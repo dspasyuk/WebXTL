@@ -1,0 +1,28 @@
+{
+  "name": "wmol",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "bootstrap.bundle.min.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "keywords": [],
+  "author": "Denis Spasyuk",
+  "license": "MIT",
+  "description": "Web-Based Shelxl Viewer and Editor",
+  "dependencies": {
+    "@popperjs/core": "^2.11.8",
+    "ace-builds": "^1.43.5",
+    "bootstrap": "^5.3.8",
+    "cors": "^2.8.5",
+    "express": "^5.2.1",
+    "multer": "^2.0.2",
+    "split-grid": "^1.0.11",
+    "three": "^0.182.0",
+    "uuid": "^13.0.0",
+    "vite": "^7.3.0"
+  }
+}

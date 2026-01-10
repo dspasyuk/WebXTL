@@ -1,0 +1,556 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebXTL - Web-Based Shelxl Viewer and Editor</title>
+    <!-- FontAwesome -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+</head>
+
+<body>
+    <div id="app" class="d-flex flex-column vh-100">
+        <!-- Menu Bar -->
+        <nav class="navbar navbar-expand-sm navbar-light bg-light border-bottom border-secondary py-0">
+            <div class="container-fluid">
+                <a class="navbar-brand" href="#">WebXTL</a>
+                <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav">
+                    <span class="navbar-toggler-icon"></span>
+                </button>
+                <div class="collapse navbar-collapse" id="navbarNav">
+                    <ul class="navbar-nav">
+                        <li class="nav-item dropdown">
+                            <a class="nav-link dropdown-toggle" href="#" id="fileDropdown" role="button"
+                                data-bs-toggle="dropdown">File</a>
+                            <ul class="dropdown-menu">
+                                <li><a class="dropdown-item" href="#" id="menu-open">Open...</a></li>
+                                <li><a class="dropdown-item" href="#" id="menu-load-hkl">Load HKL...</a></li>
+                                <li><a class="dropdown-item" href="#" id="menu-save">Save</a></li>
+                                <li>
+                                    <hr class="dropdown-divider">
+                                </li>
+                                <li><a class="dropdown-item" href="#" id="menu-settings">Settings...</a></li>
+                                <li>
+                                    <hr class="dropdown-divider">
+                                </li>
+                                <li><a class="dropdown-item" href="#">Exit</a></li>
+                            </ul>
+                        </li>
+                        <li class="nav-item dropdown">
+                            <a class="nav-link dropdown-toggle" href="#" id="projectDropdown" role="button"
+                                data-bs-toggle="dropdown">Project</a>
+                            <ul class="dropdown-menu">
+                                <li><a class="dropdown-item" href="#" id="menu-project-manager">Project Manager...</a>
+                                </li>
+                                <li>
+                                    <hr class="dropdown-divider">
+                                </li>
+                                <li><a class="dropdown-item" href="#" id="menu-save-server">Save to Server</a></li>
+                            </ul>
+                        </li>
+                        <li class="nav-item dropdown">
+                            <a class="nav-link dropdown-toggle" href="#" id="editDropdown" role="button"
+                                data-bs-toggle="dropdown">Edit</a>
+                            <ul class="dropdown-menu" style="min-width: 250px;">
+                                <li><a class="dropdown-item" href="#" id="menu-cut">Cut <span
+                                            class="text-muted small float-end">Ctrl-X</span></a></li>
+                                <li><a class="dropdown-item" href="#" id="menu-copy">Copy <span
+                                            class="text-muted small float-end">Ctrl-C</span></a></li>
+                                <li><a class="dropdown-item" href="#" id="menu-paste">Paste <span
+                                            class="text-muted small float-end">Ctrl-V</span></a></li>
+                                <li><a class="dropdown-item" href="#" id="menu-delete">Delete</a></li>
+                                <li><a class="dropdown-item" href="#" id="menu-search">Search & Replace <span
+                                            class="text-muted small float-end">Ctrl-F</span></a></li>
+                                <li>
+                                    <hr class="dropdown-divider">
+                                </li>
+                                <li><a class="dropdown-item" href="#" id="menu-duplicate">Duplicate Text <span
+                                            class="text-muted small float-end">Ctrl-D</span></a></li>
+                                <li><a class="dropdown-item" href="#" id="menu-add-trailer">Add Trailer... <span
+                                            class="text-muted small float-end">Alt-T</span></a></li>
+                                <li><a class="dropdown-item" href="#" id="menu-relabel">Relabel Atoms <span
+                                            class="text-muted small float-end">Ctrl-L</span></a></li>
+                                <li>
+                                    <hr class="dropdown-divider">
+                                </li>
+                                <li><a class="dropdown-item" href="#" id="menu-kill-q">Kill Q Peaks <span
+                                            class="text-muted small float-end">Ctrl-K</span></a></li>
+                                <li><a class="dropdown-item" href="#" id="menu-kill-h">Kill H Atoms <span
+                                            class="text-muted small float-end">Ctrl-Shift-K</span></a></li>
+                                <li><a class="dropdown-item" href="#" id="menu-kill-htab">Kill HTAB</a></li>
+                                <li><a class="dropdown-item" href="#" id="menu-kill-mol">Kill MOLE</a></li>
+                                <li><a class="dropdown-item" href="#" id="menu-kill-resi">Kill RESI</a></li>
+                                <li><a class="dropdown-item" href="#" id="menu-comment">Comment/Uncomment <span
+                                            class="text-muted small float-end">Ctrl-/</span></a></li>
+                            </ul>
+                        </li>
+                        <li class="nav-item dropdown">
+                            <a class="nav-link dropdown-toggle" href="#" id="selectDropdown" role="button"
+                                data-bs-toggle="dropdown">Select</a>
+                            <ul class="dropdown-menu">
+                                <li><a class="dropdown-item" href="#" id="menu-select-all">Select All <span
+                                            class="text-muted small float-end">Ctrl-A</span></a></li>
+                                <li><a class="dropdown-item" href="#" id="menu-deselect-all">Deselect All</a></li>
+                                <li>
+                                    <hr class="dropdown-divider">
+                                </li>
+                                <li><a class="dropdown-item" href="#" id="menu-select-nuclei">Custom Select by
+                                        Nuclei...</a></li>
+                            </ul>
+                        </li>
+                        <li class="nav-item dropdown">
+                            <a class="nav-link dropdown-toggle" href="#" id="optionsDropdown" role="button"
+                                data-bs-toggle="dropdown">Options</a>
+                            <ul class="dropdown-menu">
+                                <li><a class="dropdown-item" href="#" id="menu-formula">Get Molecular Formula</a></li>
+                                <li><a class="dropdown-item" href="#" id="menu-correct-formula">Correct Molecular
+                                        Formula</a></li>
+                                <li>
+                                    <hr class="dropdown-divider">
+                                </li>
+                                <li><a class="dropdown-item" href="#" id="menu-isotropic">Isotropic <span
+                                            class="text-muted small float-end">Ctrl-I</span></a></li>
+                                <li><a class="dropdown-item" href="#" id="menu-change-uiso">Change U(iso)</a></li>
+                                <li>
+                                    <hr class="dropdown-divider">
+                                </li>
+                                <li><a class="dropdown-item" href="#" id="menu-omit">OMIT Error/ESD>9</a></li>
+                                <li><a class="dropdown-item" href="#" id="menu-disp">Calculate DISP</a></li>
+                                <li>
+                                    <hr class="dropdown-divider">
+                                </li>
+                                <li><a class="dropdown-item" href="#" id="menu-hfix">HFIX <span
+                                            class="text-muted small float-end">Alt-H</span></a></li>
+                                <li><a class="dropdown-item" href="#" id="menu-autohfix">Auto HFIX (Carbons) <span
+                                            class="text-muted small float-end">Ctrl-H</span></a></li>
+                                <li><a class="dropdown-item" href="#" id="menu-sort">Sort Atoms <span
+                                            class="text-muted small float-end">Alt-S</span></a></li>
+                                <li><a class="dropdown-item" href="#" id="menu-duplicates">Find Duplicate Labels <span
+                                            class="text-muted small float-end">Alt-D</span></a></li>
+                                <li><a class="dropdown-item" href="#" id="menu-q-to-c">Assign Q as Carbons</a></li>
+                            </ul>
+                        </li>
+                        <li class="nav-item dropdown">
+                            <a class="nav-link dropdown-toggle" href="#" id="calculateDropdown" role="button"
+                                data-bs-toggle="dropdown">Calculate</a>
+                            <ul class="dropdown-menu">
+                                <li><a class="dropdown-item" href="#" id="menu-refine">Refine Structure</a></li>
+                            </ul>
+                        </li>
+                        <li class="nav-item dropdown">
+                            <a class="nav-link dropdown-toggle" href="#" id="viewDropdown" role="button"
+                                data-bs-toggle="dropdown">View</a>
+                            <ul class="dropdown-menu">
+                                <li><a class="dropdown-item" href="#" id="menu-unitcell">Toggle Unit Cell</a></li>
+                                <li><a class="dropdown-item" href="#" id="menu-camera">Toggle Perspective/Ortho</a></li>
+                                <li><a class="dropdown-item" href="#" id="menu-labels">Toggle Labels</a></li>
+                                <li><a class="dropdown-item" href="#" id="menu-show-adps">Show ADPs</a></li>
+                                <li>
+                                    <hr class="dropdown-divider">
+                                </li>
+                                <li><a class="dropdown-item" href="#" id="menu-reset">Reset Camera</a></li>
+                            </ul>
+                        </li>
+                        <li class="nav-item dropdown">
+                            <a class="nav-link dropdown-toggle" href="#" id="helpDropdown" role="button"
+                                data-bs-toggle="dropdown">Help</a>
+                            <ul class="dropdown-menu">
+                                <li><a class="dropdown-item" href="#" id="menu-about">About</a></li>
+                            </ul>
+                        </li>
+                    </ul>
+                </div>
+            </div>
+        </nav>
+
+        <!-- Toolbar -->
+        <div class="toolbar bg-light p-1 border-bottom border-secondary d-flex gap-1 flex-wrap justify-content-start">
+            <button class="btn btn-sm btn-light square-btn" id="tool-open" title="Open File"><i
+                    class="fa-solid fa-folder-open"></i></button>
+            <button class="btn btn-sm btn-light square-btn" id="tool-save" title="Save File"><i
+                    class="fa-solid fa-save"></i></button>
+            <div class="vr mx-1 bg-secondary"></div>
+            <button class="btn btn-sm btn-light square-btn" id="tool-refine" title="Refine Structure"><i
+                    class="fa-solid fa-flask"></i></button>
+            <div class="vr mx-1 bg-secondary"></div>
+            <button class="btn btn-sm btn-light square-btn fw-bold" id="tool-kill-q" title="Kill Q Peaks"
+                style="color: #d63384;">Q</button>
+            <button class="btn btn-sm btn-light square-btn fw-bold" id="tool-kill-h" title="Kill H Atoms"
+                style="color: #0dcaf0;">H</button>
+            <div class="vr mx-1 bg-secondary"></div>
+            <button class="btn btn-sm btn-light square-btn" id="tool-relabel" title="Relabel Atoms (Ctrl-L)"><i
+                    class="fa-solid fa-pen-to-square"></i></button>
+            <button class="btn btn-sm btn-light square-btn" id="tool-sort" title="Sort Atoms (Alt-S)"><i
+                    class="fa-solid fa-arrow-down-a-z"></i></button>
+            <button class="btn btn-sm btn-light square-btn" id="tool-search" title="Search (Ctrl-F)"><i
+                    class="fa-solid fa-magnifying-glass"></i></button>
+            <div class="vr mx-1 bg-secondary"></div>
+            <button class="btn btn-sm btn-light square-btn" id="tool-reset" title="Reset View"><i
+                    class="fa-solid fa-home"></i></button>
+            <div class="vr mx-1 bg-secondary"></div>
+            <button class="btn btn-sm btn-outline-secondary square-btn" id="tool-unitcell" title="Toggle Unit Cell"
+                data-bs-toggle="button">
+                <i class="fas fa-vector-square"></i>
+            </button>
+            <button class="btn btn-sm btn-outline-secondary square-btn" id="tool-symmetry"
+                title="Toggle Symmetry Elements" data-bs-toggle="button">
+                <i class="fas fa-shapes"></i>
+            </button>
+            <button class="btn btn-sm btn-outline-secondary square-btn active" id="tool-labels" title="Toggle Labels"
+                data-bs-toggle="button" aria-pressed="true">
+                <i class="fas fa-tag"></i>
+            </button>
+            <button class="btn btn-sm btn-outline-secondary square-btn" id="tool-adps" title="Toggle ADPs"
+                data-bs-toggle="button">
+                <i class="fas fa-circle-notch"></i>
+            </button>
+            <button class="btn btn-sm btn-outline-secondary square-btn active" id="tool-camera"
+                title="Toggle Perspective / Orthographic" aria-pressed="true"><i class="fa-solid fa-video"></i></button>
+            <div class="vr mx-1 bg-secondary"></div>
+            <button class="btn btn-sm btn-light square-btn" id="tool-settings" title="Preferences"><i
+                    class="fa-solid fa-cog"></i></button>
+        </div>
+
+        <!-- Main Content with Vertical Tabs -->
+        <div class="flex-grow-1 d-flex flex-row overflow-hidden">
+            <!-- Vertical Tabs -->
+            <div class="bg-light border-end border-secondary" style="width: 60px; min-width: 60px;">
+                <ul class="nav flex-column nav-pills p-0 m-0" id="mainTabs" role="tablist">
+                    <li class="nav-item" role="presentation">
+                        <button class="nav-link active w-100 text-start fw-bold rounded-0 py-2"
+                            style="padding-left: 2px !important; padding-right: 1px !important; font-size: 0.75rem;"
+                            id="tab-3d" data-bs-toggle="tab" data-bs-target="#pane-3d" type="button"
+                            role="tab">3D</button>
+                    </li>
+                    <li class="nav-item" role="presentation">
+                        <button class="nav-link w-100 text-start fw-bold rounded-0 py-2"
+                            style="padding-left: 2px !important; padding-right: 1px !important; font-size: 0.75rem;"
+                            id="tab-split" data-bs-toggle="tab" data-bs-target="#pane-split" type="button"
+                            role="tab">3D/RES</button>
+                    </li>
+                    <li class="nav-item" role="presentation">
+                        <button class="nav-link w-100 text-start fw-bold rounded-0 py-2"
+                            style="padding-left: 2px !important; padding-right: 1px !important; font-size: 0.75rem;"
+                            id="tab-res" data-bs-toggle="tab" data-bs-target="#pane-res" type="button"
+                            role="tab">RES</button>
+                    </li>
+                    <li class="nav-item" role="presentation">
+                        <button class="nav-link w-100 text-start fw-bold rounded-0 py-2"
+                            style="padding-left: 2px !important; padding-right: 1px !important; font-size: 0.75rem;"
+                            id="tab-cif" data-bs-toggle="tab" data-bs-target="#pane-cif" type="button"
+                            role="tab">CIF</button>
+                    </li>
+                </ul>
+            </div>
+
+            <!-- Tab Content -->
+            <div class="tab-content flex-grow-1 position-relative" id="mainTabContent">
+                <!-- 3D View Pane -->
+                <div class="tab-pane fade show active h-100 w-100" id="pane-3d" role="tabpanel">
+                    <div id="three-container" class="h-100 w-100"></div>
+                </div>
+                <!-- Dummy Split Pane -->
+                <div class="tab-pane fade h-100 w-100" id="pane-split" role="tabpanel"></div>
+                <!-- Split Gutter -->
+                <div id="split-gutter"></div>
+                <!-- RES Editor Pane -->
+                <div class="tab-pane fade h-100 w-100" id="pane-res" role="tabpanel">
+                    <div id="res-editor" class="h-100 w-100"></div>
+                </div>
+                <!-- CIF Editor Pane -->
+                <div class="tab-pane fade h-100" id="content-cif" role="tabpanel">
+                    <div id="editor-cif" class="w-100 h-100"></div>
+                </div>
+                <div class="tab-pane fade h-100" id="content-lst" role="tabpanel">
+                    <div id="editor-lst" class="w-100 h-100"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <input type="file" id="file-input" style="display: none;" accept=".res,.cif,.ins,.pdb,.hkl" multiple>
+    <input type="file" id="hkl-input" style="display: none;" accept=".hkl">
+    <!-- Preferences Modal -->
+    <div class="modal fade" id="preferencesModal" tabindex="-1" aria-labelledby="preferencesModalLabel"
+        aria-hidden="true">
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="preferencesModalLabel">Preferences</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                    <ul class="nav nav-tabs" id="prefTabs" role="tablist">
+                        <li class="nav-item" role="presentation">
+                            <button class="nav-link active" id="pref-general-tab" data-bs-toggle="tab"
+                                data-bs-target="#pref-general" type="button" role="tab">General</button>
+                        </li>
+                        <li class="nav-item" role="presentation">
+                            <button class="nav-link" id="pref-editor-tab" data-bs-toggle="tab"
+                                data-bs-target="#pref-editor" type="button" role="tab">Editor</button>
+                        </li>
+                        <li class="nav-item" role="presentation">
+                            <button class="nav-link" id="pref-viewer-tab" data-bs-toggle="tab"
+                                data-bs-target="#pref-viewer" type="button" role="tab">3D Viewer</button>
+                        </li>
+                    </ul>
+                    <div class="tab-content p-3 border border-top-0" id="prefTabsContent">
+                        <!-- General Tab -->
+                        <div class="tab-pane fade show active" id="pref-general" role="tabpanel">
+                            <div class="mb-3">
+                                <label for="pref-ui-fontsize" class="form-label">Menu Font Size (px)</label>
+                                <input type="number" class="form-control" id="pref-ui-fontsize" value="14">
+                            </div>
+                            <div class="mb-3">
+                                <label for="pref-server-url" class="form-label">Refinement Server URL</label>
+                                <input type="text" class="form-control" id="pref-server-url"
+                                    value="http://localhost:3000/refine">
+                            </div>
+                        </div>
+                        <!-- Editor Tab -->
+                        <div class="tab-pane fade" id="pref-editor" role="tabpanel">
+                            <div class="mb-3">
+                                <label for="pref-editor-fontsize" class="form-label">Font Size (px)</label>
+                                <input type="number" class="form-control" id="pref-editor-fontsize" value="18">
+                            </div>
+                            <div class="mb-3">
+                                <label for="pref-editor-theme" class="form-label">Theme</label>
+                                <select class="form-select" id="pref-editor-theme">
+                                    <option value="ace/theme/chrome">Chrome (Light)</option>
+                                    <option value="ace/theme/monokai">Monokai (Dark)</option>
+                                    <option value="ace/theme/github">GitHub</option>
+                                    <option value="ace/theme/twilight">Twilight</option>
+                                </select>
+                            </div>
+                            <div class="mb-3">
+                                <label for="pref-editor-fontfamily" class="form-label">Font Family</label>
+                                <input type="text" class="form-control" id="pref-editor-fontfamily"
+                                    value='Monaco, Menlo, "Ubuntu Mono", "Consolas", "source-code-pro", monospace'>
+                            </div>
+                        </div>
+                        <!-- Viewer Tab -->
+                        <div class="tab-pane fade" id="pref-viewer" role="tabpanel">
+                            <div class="row">
+                                <div class="col-md-6">
+                                    <div class="mb-3">
+                                        <label for="pref-bg-color" class="form-label">Background Color</label>
+                                        <input type="color" class="form-control form-control-color" id="pref-bg-color"
+                                            value="#ffffff">
+                                    </div>
+                                    <div class="mb-3">
+                                        <label for="pref-bond-color" class="form-label">Bond Color</label>
+                                        <input type="color" class="form-control form-control-color" id="pref-bond-color"
+                                            value="#888888">
+                                    </div>
+                                    <div class="mb-3">
+                                        <label for="pref-cell-color" class="form-label">Unit Cell Color</label>
+                                        <input type="color" class="form-control form-control-color" id="pref-cell-color"
+                                            value="#000000">
+                                    </div>
+                                </div>
+                                <div class="col-md-6">
+                                    <div class="mb-3">
+                                        <label for="pref-bond-metal" class="form-label">Max Metal Bond Length
+                                            (Å)</label>
+                                        <input type="number" class="form-control" id="pref-bond-metal" value="2.5"
+                                            step="0.1">
+                                    </div>
+                                    <div class="mb-3">
+                                        <label for="pref-bond-nonmetal" class="form-label">Max Non-Metal Bond Length
+                                            (Å)</label>
+                                        <input type="number" class="form-control" id="pref-bond-nonmetal" value="1.9"
+                                            step="0.1">
+                                    </div>
+                                    <div class="mb-3">
+                                        <label for="pref-bond-hbond" class="form-label">Max H-Bond Length (Å)</label>
+                                        <input type="number" class="form-control" id="pref-bond-hbond" value="0.0"
+                                            step="0.1">
+                                        <div class="form-text">Set > 0 to enable H-bonds (e.g. 2.8)</div>
+                                    </div>
+
+                                    <h6 class="mt-4">Appearance</h6>
+                                    <div class="row g-2">
+                                        <div class="col-6">
+                                            <label for="pref-atom-scale" class="form-label">Atom Radius</label>
+                                            <input type="number" class="form-control" id="pref-atom-scale" value="0.3"
+                                                step="0.05">
+                                        </div>
+                                        <div class="col-6">
+                                            <label for="pref-bond-radius" class="form-label">Bond Radius</label>
+                                            <input type="number" class="form-control" id="pref-bond-radius" value="0.05"
+                                                step="0.01">
+                                        </div>
+                                        <div class="col-12 mt-2">
+                                            <label for="pref-quality" class="form-label">Quality (Resolution)</label>
+                                            <select class="form-select" id="pref-quality">
+                                                <option value="low">Low</option>
+                                                <option value="medium" selected>Medium</option>
+                                                <option value="high">High</option>
+                                            </select>
+                                        </div>
+                                    </div>
+
+                                    <h6 class="mt-4">Labels</h6>
+                                    <div class="row g-2">
+                                        <div class="col-6">
+                                            <label for="pref-label-size" class="form-label">Font Size</label>
+                                            <input type="number" class="form-control" id="pref-label-size" value="24">
+                                        </div>
+                                        <div class="col-6">
+                                            <label for="pref-label-color" class="form-label">Color</label>
+                                            <input type="color" class="form-control form-control-color"
+                                                id="pref-label-color" value="#000000">
+                                        </div>
+                                        <div class="col-4 mt-2">
+                                            <label for="pref-label-offx" class="form-label">Offset X</label>
+                                            <input type="number" class="form-control" id="pref-label-offx" value="0.3"
+                                                step="0.1">
+                                        </div>
+                                        <div class="col-4 mt-2">
+                                            <label for="pref-label-offy" class="form-label">Offset Y</label>
+                                            <input type="number" class="form-control" id="pref-label-offy" value="0.3"
+                                                step="0.1">
+                                        </div>
+                                        <div class="col-4 mt-2">
+                                            <label for="pref-label-offz" class="form-label">Offset Z</label>
+                                            <input type="number" class="form-control" id="pref-label-offz" value="0.3"
+                                                step="0.1">
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+                    <!-- Changes apply in real-time, no save button needed strictly, but maybe for persistence later -->
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Project Manager Modal -->
+    <div class="modal fade" id="projectManagerModal" tabindex="-1">
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title">Project Manager</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <div class="row">
+                        <div class="col-md-6 border-end">
+                            <h6>Available Projects</h6>
+                            <div class="list-group" id="project-list" style="max-height: 300px; overflow-y: auto;">
+                                <!-- Project items injected here -->
+                                <div class="text-center p-3"><span class="spinner-border spinner-border-sm"></span>
+                                    Loading...</div>
+                            </div>
+                            <div class="mt-3">
+                                <button class="btn btn-primary" id="btn-load-project" disabled>Load Selected</button>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <h6>Backups & Restore</h6>
+                            <p class="text-muted small" id="backup-project-name">Select a project to view backups.</p>
+                            <div class="list-group" id="backup-list" style="max-height: 250px; overflow-y: auto;">
+                                <!-- Backup items injected here -->
+                            </div>
+                            <div class="mt-3">
+                                <button class="btn btn-warning" id="btn-restore-backup" disabled>Restore Selected
+                                    Backup</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- About Modal -->
+    <div class="modal fade" id="aboutModal" tabindex="-1" aria-hidden="true">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title">About WebXTL</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body text-center">
+                    <h4>WebXTL</h4>
+                    <p class="text-muted">Web-Based Shelxl Viewer and Editor</p>
+                    <hr>
+                    <p><strong>Author:</strong> Denis Spasyuk</p>
+                    <p><strong>License:</strong> MIT</p>
+                    <p>Version 1.0.0</p>
+                    <p class="small text-muted">&copy; 2026 Denis Spasyuk</p>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Results Modal -->
+    <div class="modal" id="resultsModal" tabindex="-1" aria-hidden="true">
+        <div class="modal-dialog modal-lg modal-dialog-scrollable" style="max-width: 960px;">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title">Refinement Results</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                    <pre id="results-content" class="bg-light p-3 border rounded"
+                        style="font-family: monospace; white-space: pre-wrap;"></pre>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Select Nuclei Modal -->
+    <div class="modal fade" id="selectNucleiModal" tabindex="-1" aria-hidden="true">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title">Select by Nuclei</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                    <div class="mb-3">
+                        <label for="select-nuclei-input" class="form-label">Element Symbol</label>
+                        <input type="text" class="form-control" id="select-nuclei-input" placeholder="e.g. C, N, Fe"
+                            autofocus>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                    <button type="button" class="btn btn-primary" id="btn-perform-select-nuclei">Select</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Status Bar -->
+    <footer class="fixed-bottom bg-light border-top d-flex align-items-center px-3"
+        style="height: 30px; z-index: 1030;">
+        <span class="badge bg-secondary me-3" id="status-hkl" title="HKL File Status">HKL</span>
+        <span id="status-bar-content" class="text-muted fw-bold">Ready</span>
+    </footer>
+
+    <!-- Scripts -->
+    <!-- Scripts -->
+    <!-- split-grid.js moved to temp, removing reference or replacing with npm usage? It was in file system but moved. 
+         Wait, checking if SplitGrid is imported in main.js. It is likely not imported if it was a standalone script.
+         Let's assume user wants it working. If I moved it to temp, I broke it if it's not imported.
+         Actually main.js: `import 'split-grid.js'`? No. 
+         I should check main.js for SplitGrid usage.
+         Proceeding with main script update mostly. -->
+    <script type="module" src="./src/main.js"></script>
+</body>
+
+</html>

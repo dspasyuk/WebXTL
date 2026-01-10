@@ -1,0 +1,191 @@
+/* Import Bootstrap CSS is handled in main.js or via link if we used CDN, 
+   but since we installed it, we should import it in main.js or use a preprocessor.
+   For simplicity with Vite, we can import it in main.js. 
+   Here we add custom overrides. */
+
+:root {
+    --bg-main: #ffffff;
+    --bg-secondary: #f8f9fa;
+    --text-main: #333333;
+    --border-color: #dee2e6;
+    --accent: #e9ecef;
+}
+
+body {
+    background-color: var(--bg-main);
+    color: var(--text-main);
+    overflow: hidden;
+}
+
+/* Navbar Customization */
+.navbar {
+    font-size: 0.9rem;
+    background-color: var(--bg-secondary) !important;
+    border-bottom: 1px solid var(--border-color) !important;
+}
+
+.dropdown-menu {
+    background-color: var(--bg-main);
+    border-color: var(--border-color);
+}
+
+.dropdown-item {
+    color: var(--text-main);
+}
+
+.dropdown-item:hover {
+    background-color: var(--accent);
+    color: var(--text-main);
+}
+
+.dropdown-divider {
+    border-top-color: var(--border-color);
+}
+
+/* Toolbar Customization */
+.toolbar {
+    background-color: var(--bg-secondary) !important;
+    border-bottom: 1px solid var(--border-color) !important;
+}
+
+.square-btn {
+    width: 32px;
+    height: 32px;
+    padding: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 4px;
+    background-color: var(--bg-main);
+    border: 1px solid var(--border-color);
+    color: var(--text-main);
+    font-size: 1.1rem;
+}
+
+.square-btn:hover {
+    background-color: var(--accent);
+    border-color: #adb5bd;
+    color: var(--text-main);
+}
+
+.square-btn.active {
+    background-color: #e2e6ea;
+    border-color: #adb5bd;
+    color: var(--text-main);
+}
+
+/* Tabs Customization */
+/* Vertical Tabs Customization */
+.nav-pills .nav-link {
+    color: #6c757d;
+    border-radius: 0;
+    background-color: transparent;
+    transition: all 0.2s ease;
+}
+
+.nav-pills .nav-link:hover {
+    background-color: var(--accent);
+    color: var(--text-main);
+}
+
+.nav-pills .nav-link.active {
+    background-color: #77797b !important;
+    color: var(--text-main);
+    font-weight: 500;
+}
+
+/* Content Area */
+.tab-content {
+    background-color: var(--bg-main);
+}
+
+#three-container {
+    background: var(--bg-main);
+}
+
+/* Editor Overrides */
+.cm-editor {
+    height: 100%;
+}
+
+.cm-scroller {
+    overflow: auto;
+}
+
+/* Ensure tab panes take full height */
+.tab-pane {
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+}
+
+#res-editor,
+#cif-editor {
+    flex: 1;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    position: relative;
+}
+
+/* Ace Editor Override */
+.ace_editor {
+    width: 100% !important;
+    height: 100% !important;
+}
+
+/* Split View Layout */
+/* Split View Layout */
+.split-layout {
+    display: grid;
+    grid-template-columns: 1fr 5px 1fr;
+    /* 3D | Gutter | RES */
+    height: 100%;
+}
+
+/* Always show 3D pane in first column */
+.split-layout>#pane-3d {
+    display: block !important;
+    opacity: 1 !important;
+    width: 100% !important;
+    height: 100% !important;
+    grid-column: 1;
+}
+
+/* Always show RES pane in third column */
+.split-layout>#pane-res {
+    display: block !important;
+    opacity: 1 !important;
+    width: 100% !important;
+    height: 100% !important;
+    grid-column: 3;
+}
+
+/* Hide the dummy split pane */
+.split-layout>#pane-split {
+    display: none !important;
+}
+
+/* Hide other tabs */
+.split-layout>.tab-pane:not(#pane-3d):not(#pane-res) {
+    display: none !important;
+}
+
+#split-gutter {
+    background-color: #ccc;
+    cursor: col-resize;
+    display: none;
+}
+
+.split-layout>#split-gutter {
+    display: block;
+    grid-column: 2;
+}
+
+/* Ensure editors fill height in split mode */
+.split-layout #res-editor,
+.split-layout #cif-editor {
+    height: 100% !important;
+}

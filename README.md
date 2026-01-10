@@ -59,6 +59,28 @@ WebXTL includes a suite of specialized tools for structure refinement:
 -   **Refine Structure**: Trigger refinement processes directly from the toolbar (requires backend configuration).
 -   **Symmetry & Unit Cell**: Visual toggles for unit cell boundaries and symmetry elements.
 
+### 🖥️ Server & Backend Architecture
+WebXTL is powered by a robust Node.js/Express backend that handles heavy lifting for crystallography tasks:
+
+**Structure Refinement Engine**
+-   **Native SHELXL Integration**: The server spawns a real `shelxl` process to perform least-squares refinement (`POST /refine`).
+-   **Process Management**: Handles execution, captures standard output/error logs, and returns the refined structure (`.res`) and listing (`.lst`) files to the frontend.
+-   **Requirement**: The `shelxl` executable must be installed and accessible in the system PATH.
+
+**Project Management System**
+-   **Workspace Organization**: Automatically creates isolated project directories for each structure.
+-   **Version Control**:
+    -   **Automatic Backups**: Creates timestamped backups of `.ins` files before every refinement and manual save.
+    -   **Restore Points**: Allows users to browse and restore previous versions of their structure files.
+-   **Persistence**: Projects are saved server-side, enabling easy reloading of previous work sessions.
+
+**Backend API Endpoints**
+-   `/projects`: List all available projects.
+-   `/projects/:name`: Load the latest state (`.res` or `.ins`) of a specific project.
+-   `/projects/:name/save`: Save current editor content to the project file.
+-   `/projects/:name/backups`: Retrieve list of available auto-backups.
+-   `/refine`: Upload `.ins` and `.hkl` files to trigger a `shelxl` refinement job.
+
 ## Installation & Development
 
 1.  **Clone the Repository**

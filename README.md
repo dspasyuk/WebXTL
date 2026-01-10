@@ -14,9 +14,15 @@ WebXTL is a powerful, modern web application designed for crystallographers. It 
 ### 🖥️ Interface & Visualization
 -   **Dual-Pane Workspace**: 
     -   **Split View**: Simultaneously view the 3D structure and the underlying code (RES/INS/CIF).
+    
+    ![Split View](./images/3d_res-view.png)
+
     -   **Resizable Panes**: Adjustable split-grid layout for customized workflows.
 -   **High-Performance 3D Viewer**:
     -   **Rendering**: Atoms, bonds, unit cell, and ADPs (Anisotropic Displacement Parameters) rendered using Three.js.
+    
+    ![ADP Rendering](./images/3D_res-view-ADP.png)
+
     -   **View Controls**: Toggle Unit Cell, Labels, Perspective/Orthographic projection.
     -   **Interaction**: Click atoms to select them in the editor.
 

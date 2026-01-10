@@ -2,6 +2,8 @@
 
 **Advanced Web-Based Shelxl Viewer and Editor**
 
+![WebXTL 3D View](./images/3d_view.png)
+
 WebXTL is a powerful, modern web application designed for crystallographers. It provides a seamless environment for visualizing molecular structures, editing crystallographic data files (.res, .ins, .cif, .pdb), and managing refinement projects—all within the browser.
 
 ## Key Features

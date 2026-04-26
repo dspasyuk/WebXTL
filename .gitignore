@@ -3,5 +3,7 @@ dist
 temp
 uploads
 projects
+versions
+test
 .DS_Store
 *.log

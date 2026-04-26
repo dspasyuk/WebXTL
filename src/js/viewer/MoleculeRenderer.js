@@ -33,14 +33,21 @@ export class MoleculeRenderer {
     }
 
     clear() {
-        while(this.group.children.length > 0){ 
-            // Don't remove highlightGroup if it's a child!
-            // Actually, clear() removes everything. We should re-add highlightGroup or just clear children that are NOT highlightGroup.
-            // Or easier: clear everything and re-create highlightGroup.
-            this.group.remove(this.group.children[0]); 
+        for (let i = this.group.children.length - 1; i >= 0; i--) {
+            const child = this.group.children[i];
+            if (!child.userData.isMap) {
+                this.group.remove(child);
+            }
         }
-        this.highlightGroup = new THREE.Group();
-        this.group.add(this.highlightGroup);
+        // Re-create highlight group if it was removed (it likely was)
+        // Check if it exists?
+        if (!this.group.children.includes(this.highlightGroup)) {
+             this.highlightGroup = new THREE.Group();
+             this.group.add(this.highlightGroup);
+        } else {
+            // If it wasn't removed (e.g. if I marked it? No, I didn't), clear it
+            this.clearHighlights();
+        }
     }
 
     clearHighlights() {
@@ -179,6 +186,8 @@ export class MoleculeRenderer {
         } else {
             expandedAtoms = data.atoms.map(a => ({ ...a }));
         }
+        
+        this.expandedAtoms = expandedAtoms; // Expose for MapCalculator
 
         // 4. Draw Atoms
         const atomsByElement = {};
@@ -374,14 +383,18 @@ export class MoleculeRenderer {
             this.group.add(qBondLines);
         }
         
-        // Center camera
-        const center = new THREE.Vector3();
-        allPositions.forEach(item => center.add(item.pos));
-        if (allPositions.length > 0) center.divideScalar(allPositions.length);
+        // Center camera on bounding box
+        let min = new THREE.Vector3(Infinity, Infinity, Infinity);
+        let max = new THREE.Vector3(-Infinity, -Infinity, -Infinity);
+        allPositions.forEach(item => {
+            min.min(item.pos);
+            max.max(item.pos);
+        });
+        const center = new THREE.Vector3().addVectors(min, max).multiplyScalar(0.5);
         
         this.group.position.copy(center).multiplyScalar(-1);
 
-        // Calculate bounding radius
+        // Calculate bounding radius from center
         let maxDistSq = 0;
         allPositions.forEach(item => {
             const distSq = item.pos.distanceToSquared(center);

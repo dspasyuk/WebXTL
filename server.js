@@ -156,6 +156,7 @@ app.get('/projects', (req, res) => {
 });
 
 // 2. Load Project (Get .res/.ins content)
+// 2. Load Project (Get .res/.ins content) - Legacy / Main Entry
 app.get('/projects/:name', (req, res) => {
     try {
         const basename = req.params.name;
@@ -171,19 +172,55 @@ app.get('/projects/:name', (req, res) => {
         let content = '';
         let type = 'res';
 
-        // Prefer .res, fall back to .ins
         if (fs.existsSync(resPath)) {
             content = fs.readFileSync(resPath, 'utf8');
         } else if (fs.existsSync(insPath)) {
             content = fs.readFileSync(insPath, 'utf8');
             type = 'ins';
         } else {
-            return res.status(404).json({ error: 'No .res or .ins file found for this project.' });
+            // If neither exists, just return the file list so the user can pick
+            const files = fs.readdirSync(projectDir).filter(f => fs.lstatSync(path.join(projectDir, f)).isFile());
+            return res.json({ name: basename, files: files });
         }
 
         res.json({ name: basename, type: type, content: content });
     } catch (error) {
         res.status(500).json({ error: 'Failed to load project', details: error.message });
+    }
+});
+
+// 2b. List all files in project
+app.get('/projects/:name/files', (req, res) => {
+    try {
+        const basename = req.params.name;
+        const projectDir = path.join(PROJECTS_DIR, basename);
+        if (!fs.existsSync(projectDir)) return res.status(404).json({ error: 'Project not found' });
+        
+        const files = fs.readdirSync(projectDir)
+            .filter(f => fs.lstatSync(path.join(projectDir, f)).isFile())
+            .map(f => ({
+                name: f,
+                size: fs.statSync(path.join(projectDir, f)).size,
+                mtime: fs.statSync(path.join(projectDir, f)).mtime
+            }));
+        res.json(files);
+    } catch (error) {
+        res.status(500).json({ error: 'Failed to list project files' });
+    }
+});
+
+// 2c. Get specific file from project
+app.get('/projects/:name/files/:filename', (req, res) => {
+    try {
+        const basename = req.params.name;
+        const filename = req.params.filename;
+        const filePath = path.join(PROJECTS_DIR, basename, filename);
+        
+        if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'File not found' });
+        
+        res.sendFile(filePath);
+    } catch (error) {
+        res.status(500).json({ error: 'Failed to fetch file' });
     }
 });
 

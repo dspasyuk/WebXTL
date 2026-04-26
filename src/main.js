@@ -17,6 +17,11 @@ import { ShelxParser } from './js/parser/ShelxParser.js';
 import { CifParser } from './js/parser/CifParser.js';
 import { PdbParser } from './js/parser/PdbParser.js';
 import { MoleculeRenderer } from './js/viewer/MoleculeRenderer.js';
+import { FcfParser } from './js/parser/FcfParser.js';
+import { MapCalculator } from './js/compute/MapCalculator.js';
+import { DensityRenderer } from './js/viewer/DensityRenderer.js';
+import { RealSpaceRefiner } from './js/compute/RealSpaceRefiner.js';
+import { FRAGMENTS } from './js/compute/FragmentLibrary.js';
 import './js/ace/mode-cif.js';
 import './js/ace/mode-shelx.js';
 
@@ -40,15 +45,39 @@ class WMOLApp {
             parsers: {
                 shelx: new ShelxParser(),
                 cif: new CifParser(),
-                pdb: new PdbParser()
+                pdb: new PdbParser(),
+                fcf: new FcfParser()
             },
+            mapCalculator: new MapCalculator(),
+            realSpaceRefiner: new RealSpaceRefiner(),
+            densityRenderer: null,
             renderTimeout: null,
+            rsr: { active: false, from: null, to: null },
+            fragment: { active: false, selectedId: null, placedAtoms: null },
+            preview: {
+                active: false,
+                cartAtoms: null,
+                centroid: null,
+                placementPos: null,
+                rotation: { x: 0, y: 0, z: 0 },
+                translation: { x: 0, y: 0, z: 0 },
+                meshes: [],
+                labels: [],
+                baseCartAtoms: null,
+                fragmentDef: null,
+                sfacElements: null,
+                sfacLineIndex: -1,
+                allLines: null,
+                usesExistingAtom: false,
+                existingAtomLabel: null
+            },
             loadedContent: null,
             loadedFilename: null,
             loadedType: 'res',
             fileId: 0, // Track file version to sync editor
             hklContent: null,
             hklName: null,
+            fcfRawContent: null,
             splitView: false,
             splitInstance: null,
             viewSettings: {
@@ -105,13 +134,76 @@ class WMOLApp {
         this.mouse = new THREE.Vector2();
     }
 
+    saveStateToLocalStorage() {
+        try {
+            if (this.state.loadedContent) {
+                localStorage.setItem('webxtl_res_content', this.state.loadedContent);
+                localStorage.setItem('webxtl_loaded_type', this.state.loadedType);
+                localStorage.setItem('webxtl_loaded_filename', this.state.loadedFilename || '');
+            }
+        } catch(e) { console.warn('localStorage save error:', e.message); }
+        try {
+            if (this.state.hklContent && this.state.hklContent.length < 3 * 1024 * 1024) {
+                localStorage.setItem('webxtl_hkl_content', this.state.hklContent);
+                localStorage.setItem('webxtl_hkl_name', this.state.hklName || '');
+            }
+        } catch(e) { console.warn('localStorage HKL save error:', e.message); }
+        try {
+            if (this.state.fcfRawContent && this.state.fcfRawContent.length < 3 * 1024 * 1024) {
+                localStorage.setItem('webxtl_fcf_content', this.state.fcfRawContent);
+            }
+        } catch(e) { console.warn('localStorage FCF save error:', e.message); }
+    }
+
+    restoreStateFromLocalStorage() {
+        const resContent = localStorage.getItem('webxtl_res_content');
+        const loadedType = localStorage.getItem('webxtl_loaded_type');
+        const filename = localStorage.getItem('webxtl_loaded_filename');
+        const hklContent = localStorage.getItem('webxtl_hkl_content');
+        const hklName = localStorage.getItem('webxtl_hkl_name');
+        const fcfContent = localStorage.getItem('webxtl_fcf_content');
+
+        if (!resContent || !loadedType) return;
+
+        console.log('Restoring last session from localStorage...');
+        this.state.loadedContent = resContent;
+        this.state.loadedType = loadedType;
+        this.state.loadedFilename = filename || null;
+
+        const editor = this.state.editors[loadedType] || this.state.editors.res;
+        if (editor) {
+            editor.setValue(this.truncateContent(resContent), -1);
+        }
+
+        this.renderContent(resContent, loadedType);
+        this.resetView();
+
+        if (hklContent) {
+            this.state.hklContent = hklContent;
+            this.state.hklName = hklName || null;
+            const statusHkl = document.getElementById('status-hkl');
+            if (statusHkl) {
+                statusHkl.classList.remove('bg-secondary');
+                statusHkl.classList.add('bg-success');
+                statusHkl.title = "HKL Loaded: " + (hklName || 'unknown');
+            }
+        }
+
+        if (fcfContent) {
+            setTimeout(() => this.renderMap(fcfContent), 200);
+        }
+    }
+
     init() {
         this.setupEditors();
         this.setup3D();
+        this.setupMapControls();
         this.setupFileHandling();
         this.setupEditorCommands();
         this.setupUIEvents();
+        this.setupFragmentControls();
         this.setupPreferences();
+        this.restoreStateFromLocalStorage();
     }
 
     setupPreferences() {
@@ -241,20 +333,27 @@ class WMOLApp {
 
     // --- Project Manager Methods ---
 
+    // Helper for API URL
+    getApiUrl(path) {
+        // Default to port 3000 on the same host
+        const host = window.location.hostname;
+        return `http://${host}:3000${path}`;
+    }
+
     async apiListProjects() {
-        const res = await fetch('http://localhost:3000/projects');
+        const res = await fetch(this.getApiUrl('/projects'));
         if (!res.ok) throw new Error('Failed to list projects');
         return res.json();
     }
 
     async apiLoadProject(name) {
-        const res = await fetch(`http://localhost:3000/projects/${name}`);
+        const res = await fetch(this.getApiUrl(`/projects/${name}`));
         if (!res.ok) throw new Error('Failed to load project');
         return res.json();
     }
 
     async apiSaveProject(name, content, type) {
-        const res = await fetch(`http://localhost:3000/projects/${name}/save`, {
+        const res = await fetch(this.getApiUrl(`/projects/${name}/save`), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ content, type })
@@ -264,15 +363,27 @@ class WMOLApp {
     }
 
     async apiListBackups(name) {
-        const res = await fetch(`http://localhost:3000/projects/${name}/backups`);
+        const res = await fetch(this.getApiUrl(`/projects/${name}/backups`));
         if (!res.ok) throw new Error('Failed to list backups');
         return res.json();
     }
 
     async apiGetBackup(name, filename) {
-        const res = await fetch(`http://localhost:3000/projects/${name}/backups/${filename}`);
+        const res = await fetch(this.getApiUrl(`/projects/${name}/backups/${filename}`));
         if (!res.ok) throw new Error('Failed to get backup');
         return res.json();
+    }
+
+    async apiListProjectFiles(name) {
+        const res = await fetch(this.getApiUrl(`/projects/${name}/files`));
+        if (!res.ok) throw new Error('Failed to list project files');
+        return res.json();
+    }
+
+    async apiGetProjectFile(projectName, filename) {
+        const res = await fetch(this.getApiUrl(`/projects/${projectName}/files/${filename}`));
+        if (!res.ok) throw new Error('Failed to fetch project file');
+        return res.text();
     }
 
     async openProjectManager() {
@@ -284,9 +395,11 @@ class WMOLApp {
          const listEl = document.getElementById('project-list');
          listEl.innerHTML = '<div class="text-center p-3"><span class="spinner-border spinner-border-sm"></span> Loading...</div>';
          document.getElementById('btn-load-project').disabled = true;
+         document.getElementById('project-file-list').innerHTML = '';
          document.getElementById('backup-list').innerHTML = '';
          document.getElementById('btn-restore-backup').disabled = true;
          document.getElementById('backup-project-name').textContent = 'Select a project to view backups.';
+         document.getElementById('files-project-name').textContent = 'Select a project to view files.';
 
          try {
              const projects = await this.apiListProjects();
@@ -319,10 +432,43 @@ class WMOLApp {
         document.getElementById('btn-load-project').disabled = false;
         document.getElementById('btn-load-project').onclick = () => this.loadProjectFromServer(projectName);
         
+        const fileListEl = document.getElementById('project-file-list');
         const backupListEl = document.getElementById('backup-list');
+        
+        fileListEl.innerHTML = '<div class="text-center p-2"><span class="spinner-border spinner-border-sm"></span></div>';
         backupListEl.innerHTML = '<div class="text-center p-2"><span class="spinner-border spinner-border-sm"></span></div>';
+        
+        document.getElementById('files-project-name').textContent = `Files in: ${projectName}`;
         document.getElementById('backup-project-name').textContent = `Backups for: ${projectName}`;
         
+        // Load Files
+        try {
+            const files = await this.apiListProjectFiles(projectName);
+            fileListEl.innerHTML = '';
+            if (files.length === 0) {
+                fileListEl.innerHTML = '<div class="list-group-item text-muted small">No files found.</div>';
+            } else {
+                files.forEach(f => {
+                    const item = document.createElement('a');
+                    item.className = 'list-group-item list-group-item-action py-1 d-flex justify-content-between align-items-center';
+                    item.href = '#';
+                    const icon = this.getFileIcon(f.name);
+                    item.innerHTML = `<span><i class="${icon} me-2 text-secondary"></i><small>${f.name}</small></span>
+                                     <span class="badge bg-light text-dark border small" style="font-size: 0.65rem;">${(f.size/1024).toFixed(1)} KB</span>`;
+                    item.onclick = (e) => {
+                         e.preventDefault();
+                         fileListEl.querySelectorAll('a').forEach(a => a.classList.remove('active'));
+                         item.classList.add('active');
+                         this.loadSpecificFileFromServer(projectName, f.name);
+                    };
+                    fileListEl.appendChild(item);
+                });
+            }
+        } catch (err) {
+             fileListEl.innerHTML = `<div class="text-danger small">Error: ${err.message}</div>`;
+        }
+
+        // Load Backups
         try {
             const backups = await this.apiListBackups(projectName);
             backupListEl.innerHTML = '';
@@ -348,27 +494,89 @@ class WMOLApp {
              backupListEl.innerHTML = `<div class="text-danger small">Error: ${err.message}</div>`;
         }
     }
+
+    getFileIcon(filename) {
+        const ext = filename.split('.').pop().toLowerCase();
+        if (ext === 'res' || ext === 'ins') return 'fa-solid fa-file-lines';
+        if (ext === 'hkl') return 'fa-solid fa-table';
+        if (ext === 'fcf') return 'fa-solid fa-mountain-sun';
+        if (ext === 'lst' || ext === 'log') return 'fa-solid fa-list';
+        return 'fa-solid fa-file';
+    }
+
+    async loadSpecificFileFromServer(projectName, filename, silent = false) {
+        const ext = filename.split('.').pop().toLowerCase();
+        
+        if (['res', 'ins', 'cif', 'pdb'].includes(ext)) {
+            try {
+                const content = await this.apiGetProjectFile(projectName, filename);
+                this.state.currentProject = projectName;
+                this.state.loadedType = (ext === 'ins' ? 'res' : ext);
+                this.state.loadedContent = content;
+                
+                const editor = this.state.editors[this.state.loadedType] || this.state.editors.res;
+                if (editor) editor.setValue(content, -1);
+                this.renderContent(content, this.state.loadedType);
+                this.resetView();
+                if (!silent) console.log(`Loaded ${filename} from server.`);
+            } catch (err) { if (!silent) alert(`Load failed: ${err.message}`); }
+        } else if (ext === 'hkl') {
+            try {
+                const content = await this.apiGetProjectFile(projectName, filename);
+                this.state.hklContent = content;
+                this.state.hklName = filename;
+                const statusHkl = document.getElementById('status-hkl');
+                if (statusHkl) {
+                    statusHkl.classList.remove('bg-secondary');
+                    statusHkl.classList.add('bg-success');
+                    statusHkl.title = "HKL Loaded: " + filename;
+                }
+                if (!silent) alert(`HKL file '${filename}' loaded.`);
+            } catch (err) { if (!silent) alert(`Load failed: ${err.message}`); }
+        } else if (ext === 'fcf') {
+            try {
+                const content = await this.apiGetProjectFile(projectName, filename);
+                this.renderMap(content);
+            } catch (err) { if (!silent) alert(`Load failed: ${err.message}`); }
+        }
+        this.saveStateToLocalStorage();
+    }
     
     async loadProjectFromServer(name) {
         try {
+            // 1. Load Main Structure
             const data = await this.apiLoadProject(name);
             this.state.currentProject = data.name;
-            
             this.state.loadedType = data.type;
             this.state.loadedContent = data.content;
             
             const editor = this.state.editors[data.type] || this.state.editors.res;
-            if (editor) {
-                editor.setValue(data.content, -1);
+            if (editor) editor.setValue(data.content, -1);
+            this.renderContent(data.content, data.type);
+            this.resetView();
+            
+            // 2. Auto-load associated HKL and FCF if they exist
+            const files = await this.apiListProjectFiles(name);
+            
+            // Look for HKL
+            const hklFile = files.find(f => f.name.toLowerCase() === `${name.toLowerCase()}.hkl`);
+            if (hklFile) {
+                await this.loadSpecificFileFromServer(name, hklFile.name, true);
             }
             
-            this.renderContent(data.content, data.type);
+            // Look for FCF
+            const fcfFile = files.find(f => f.name.toLowerCase() === `${name.toLowerCase()}.fcf`);
+            if (fcfFile) {
+                await this.loadSpecificFileFromServer(name, fcfFile.name, true);
+            }
             
-             const modalEl = document.getElementById('projectManagerModal');
-             const modal = bootstrap.Modal.getInstance(modalEl);
-             if (modal) modal.hide();
-             
-             alert(`Project '${name}' loaded successfully.`);
+            this.saveStateToLocalStorage();
+
+            const modalEl = document.getElementById('projectManagerModal');
+            const modal = bootstrap.Modal.getInstance(modalEl);
+            if (modal) modal.hide();
+            
+            alert(`Project '${name}' loaded successfully (including associated maps if present).`);
              
         } catch (err) {
             alert(`Error loading project: ${err.message}`);
@@ -391,6 +599,7 @@ class WMOLApp {
                 editor.setValue(data.content, -1);
             }
             this.renderContent(data.content, type);
+            this.saveStateToLocalStorage();
             
             const modalEl = document.getElementById('projectManagerModal');
             const modal = bootstrap.Modal.getInstance(modalEl);
@@ -1974,6 +2183,7 @@ class WMOLApp {
             }
             
             this.state.parsedData = data; // Store for calculations (e.g. bond length)
+            this.state.cachedMapData = null; // Invalidate map cache as atoms changed
             
             if (data && this.state.moleculeRenderer) {
                 const renderSettings = {
@@ -1982,6 +2192,7 @@ class WMOLApp {
                 };
                 this.state.moleculeRenderer.render(data, renderSettings);
             }
+            this.saveStateToLocalStorage();
         } catch (e) {
             console.error("Parse error:", e);
             alert("Error parsing file: " + e.message);
@@ -2028,6 +2239,7 @@ class WMOLApp {
 
         // Molecule Renderer
         this.state.moleculeRenderer = new MoleculeRenderer(this.state.scene);
+        this.state.densityRenderer = new DensityRenderer(this.state.moleculeRenderer.group);
 
         // Initial Render
         this.tryRender('res');
@@ -2067,7 +2279,8 @@ class WMOLApp {
             const moveY = Math.abs(event.clientY - this.mouseState.downY);
             
             // If moved more than 3 pixels, treat as drag/rotate and ignore click
-            if (moveX > 3 || moveY > 3) return;
+            const threshold = this.state.rsr.active ? 10 : 3;
+            if (moveX > threshold || moveY > threshold) return;
 
             const rect = this.state.renderer.domElement.getBoundingClientRect();
             this.mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
@@ -2081,6 +2294,66 @@ class WMOLApp {
                 const target = intersects.find(i => i.object.isMesh || i.object.isInstancedMesh);
                 
                 if (target) {
+                    // --- Fragment Placement Mode ---
+                    if (this.state.rsr.active && this.state.fragment.active && this.state.fragment.selectedId && !this.state.preview.active) {
+                        let atomData = null;
+                        if (target.object.isInstancedMesh && target.object.userData.atomMap) {
+                            atomData = target.object.userData.atomMap[target.instanceId];
+                        } else {
+                            const atomHit = intersects.find(i => i.object.isInstancedMesh && i.object.userData.atomMap);
+                            if (atomHit) {
+                                atomData = atomHit.object.userData.atomMap[atomHit.instanceId];
+                            }
+                        }
+                        document.body.style.cursor = 'wait';
+                        this.placeFragment(atomData, event);
+                        return;
+                    }
+
+                    // --- RSR Mode ---
+                    if (this.state.rsr.active) {
+                        // Find atomData from target or nearest hit
+                        let atomData = null;
+                        if (target.object.isInstancedMesh && target.object.userData.atomMap) {
+                            atomData = target.object.userData.atomMap[target.instanceId];
+                        } else {
+                            // If we hit something else (like a bond), try to find the nearest atom mesh
+                            const atomHit = intersects.find(i => i.object.isInstancedMesh && i.object.userData.atomMap);
+                            if (atomHit) {
+                                atomData = atomHit.object.userData.atomMap[atomHit.instanceId];
+                            }
+                        }
+
+                        if (atomData) {
+                            if (!this.state.rsr.from) {
+                                this.state.rsr.from = atomData;
+                                // Highlight 'From' atom
+                                this.state.moleculeRenderer.highlightAtoms(new Set([atomData.lineNumber || atomData.startLine]));
+                                document.getElementById('status-bar-content').textContent = `RSR: Selected ${atomData.label}. Click 'To' atom.`;
+                            } else {
+                                this.state.rsr.to = atomData;
+                                // Highlight both 'From' and 'To' atoms
+                                const lines = new Set([
+                                    this.state.rsr.from.lineNumber || this.state.rsr.from.startLine,
+                                    atomData.lineNumber || atomData.startLine
+                                ]);
+                                this.state.moleculeRenderer.highlightAtoms(lines);
+                                
+                                // Show spinner and wait cursor
+                                document.getElementById('rsr-progress').classList.remove('d-none');
+                                document.body.style.cursor = 'wait';
+                                document.getElementById('status-bar-content').textContent = `Refining segment ${this.state.rsr.from.label} to ${atomData.label}...`;
+                                
+                                setTimeout(() => {
+                                    this.performRealSpaceRefinement().then(() => {
+                                        document.body.style.cursor = 'default';
+                                    });
+                                }, 50);
+                            }
+                        }
+                        return;
+                    }
+
                     // Left Click: Scroll to Line or Select
                     if (event.button === 0) {
                         if (target.object.isInstancedMesh && target.object.userData.atomMap) {
@@ -2221,6 +2494,10 @@ class WMOLApp {
                         this.state.controls.update();
                     }
                 }
+            } else if (this.state.rsr.active && this.state.fragment.active && this.state.fragment.selectedId && !this.state.preview.active) {
+                // Click in empty space while in fragment placement mode
+                document.body.style.cursor = 'wait';
+                this.placeFragment(null, event);
             }
         });
 
@@ -2230,6 +2507,13 @@ class WMOLApp {
             if (el) {
                 el.addEventListener('click', (e) => {
                     e.preventDefault();
+                    
+                    // Check if it's a class method first
+                    if (typeof this[command] === 'function') {
+                        this[command]();
+                        return;
+                    }
+
                     const editor = this.state.editors.res;
                     if (editor) {
                         editor.focus();
@@ -2240,14 +2524,13 @@ class WMOLApp {
                             const text = editor.getCopyText();
                             if (text) {
                                 navigator.clipboard.writeText(text);
-                                editor.execCommand('cut'); // Ace handles removal
+                                editor.execCommand('cut');
                             }
                         } else if (command === 'paste') {
                             navigator.clipboard.readText().then(text => {
                                 if (text) editor.onPaste(text);
                             }).catch(err => {
                                 console.error('Failed to read clipboard', err);
-                                // Fallback to execCommand if clipboard API fails (unlikely to work but worth a try)
                                 editor.execCommand('paste', e.clipboardData ? e.clipboardData.getData('text/plain') : null);
                             });
                         } else {
@@ -2296,6 +2579,8 @@ class WMOLApp {
         bindMenu('tool-sort', 'sortAtoms'); // Toolbar
         bindMenu('menu-duplicates', 'findDuplicates');
         bindMenu('menu-q-to-c', 'qToC');
+        bindMenu('menu-rsr', 'toggleRSR');
+        bindMenu('tool-rsr', 'toggleRSR');
 
         // Clipping Plane Control (Ctrl + Scroll)
         this.state.renderer.domElement.addEventListener('wheel', (event) => {
@@ -2486,6 +2771,12 @@ class WMOLApp {
         const fileInput = document.getElementById('file-input');
         
         // Menu Open
+        const toolServerOpen = document.getElementById('tool-server-open');
+        if (toolServerOpen) toolServerOpen.addEventListener('click', () => this.openProjectManager());
+
+        const btnRefreshProjects = document.getElementById('btn-refresh-projects');
+        if (btnRefreshProjects) btnRefreshProjects.addEventListener('click', () => this.openProjectManager());
+
         const menuOpen = document.getElementById('menu-open');
         if (menuOpen) menuOpen.addEventListener('click', () => fileInput.click());
 
@@ -2493,10 +2784,14 @@ class WMOLApp {
         const toolOpen = document.getElementById('tool-open');
         if (toolOpen) toolOpen.addEventListener('click', () => fileInput.click());
 
-        // HKL Load Handling
-        const hklInput = document.getElementById('hkl-input');
+        // HKL/FCF Load Handling
         const menuLoadHkl = document.getElementById('menu-load-hkl');
-        if (menuLoadHkl) menuLoadHkl.addEventListener('click', () => hklInput.click());
+        if (menuLoadHkl) menuLoadHkl.addEventListener('click', () => document.getElementById('hkl-input').click());
+        
+        const menuLoadFcf = document.getElementById('menu-load-fcf');
+        if (menuLoadFcf) menuLoadFcf.addEventListener('click', () => fileInput.click());
+
+        const hklInput = document.getElementById('hkl-input');
 
         hklInput.addEventListener('change', (e) => {
             const file = e.target.files[0];
@@ -2560,108 +2855,1022 @@ class WMOLApp {
         const toolSave = document.getElementById('tool-save');
         if (toolSave) toolSave.addEventListener('click', handleSave);
 
-        fileInput.addEventListener('change', (e) => {
+        fileInput.addEventListener('change', async (e) => {
             console.log("File input changed");
             const files = Array.from(e.target.files);
-            if (files.length === 0) {
-                console.log("No file selected");
-                return;
-            }
+            if (files.length === 0) return;
 
-            // Identify files
-            let structureFile = null;
-            let hklFile = null;
-
-            files.forEach(file => {
-                const name = file.name.toLowerCase();
-                if (name.endsWith('.res') || name.endsWith('.ins') || name.endsWith('.cif') || name.endsWith('.pdb')) {
-                    structureFile = file;
-                } else if (name.endsWith('.hkl')) {
-                    hklFile = file;
-                }
+            // Sort files: Structure -> HKL -> FCF
+            const structureFiles = files.filter(f => {
+                const n = f.name.toLowerCase();
+                return n.endsWith('.res') || n.endsWith('.ins') || n.endsWith('.cif') || n.endsWith('.pdb');
             });
+            const hklFiles = files.filter(f => f.name.toLowerCase().endsWith('.hkl'));
+            const fcfFiles = files.filter(f => f.name.toLowerCase().endsWith('.fcf'));
 
-            const loadHkl = (file) => {
-                const reader = new FileReader();
-                reader.onload = (event) => {
-                    this.state.hklContent = event.target.result;
-                    this.state.hklName = file.name;
-                    console.log("HKL file loaded:", file.name);
-                    
-                    // Update UI
-                    const statusHkl = document.getElementById('status-hkl');
-                    if (statusHkl) {
-                        statusHkl.classList.remove('bg-secondary');
-                        statusHkl.classList.add('bg-success');
-                        statusHkl.title = "HKL Loaded: " + file.name;
-                    }
-                    // Only alert if loaded explicitly without structure, or maybe just log
-                    console.log("HKL auto-loaded: " + file.name);
-                };
-                reader.readAsText(file);
-            };
+            // Process structure first
+            if (structureFiles.length > 0) {
+                const file = structureFiles[0];
+                const content = await file.text();
+                
+                this.state.loadedContent = content;
+                this.state.loadedFilename = file.name;
+                this.state.fileId++;
 
-            if (structureFile) {
-                console.log("Loading structure file:", structureFile.name);
-                const reader = new FileReader();
-                reader.onload = (event) => {
-                    console.log("Structure file read complete");
-                    const content = event.target.result;
-                    this.state.loadedContent = content;
-                    this.state.loadedFilename = structureFile.name;
-                    this.state.fileId++; // New file loaded
-                    
-                    // Determine type
-                    if (structureFile.name.toLowerCase().endsWith('.res') || structureFile.name.toLowerCase().endsWith('.ins')) {
-                        this.state.loadedType = 'res';
-                    } else if (structureFile.name.toLowerCase().endsWith('.cif')) {
-                        this.state.loadedType = 'cif';
-                    } else if (structureFile.name.toLowerCase().endsWith('.pdb')) {
-                        this.state.loadedType = 'pdb';
-                    }
-                    console.log("Detected type:", this.state.loadedType);
+                const ext = file.name.split('.').pop().toLowerCase();
+                this.state.loadedType = (ext === 'ins' || ext === 'res') ? 'res' : ext;
+                
+                this.renderContent(content, this.state.loadedType);
+                this.resetView();
 
-                    // Render 3D immediately
-                    this.renderContent(content, this.state.loadedType);
-                    
-                    // Reset view to fit molecule
-                    this.resetView();
-                    
-                    // Populate editor if it matches the type
-                    if (this.state.loadedType === 'res' && this.state.editors.res) {
-                         const truncated = this.truncateContent(content);
-                         this.state.editors.res.setValue(truncated, -1);
-                         this.state.editors.res.loadedFile = content;
-                    } else if (this.state.loadedType === 'cif' && this.state.editors.cif) {
-                         const truncated = this.truncateContent(content);
-                         this.state.editors.cif.setValue(truncated, -1);
-                         this.state.editors.cif.loadedFile = content;
-                    }
-                    
-                    // Ensure we are on 3D tab?
-                    const activeTab = document.querySelector('.nav-link.active');
-                    if (activeTab && activeTab.id !== 'tab-3d' && !this.state.splitView) {
-                        const tab3d = new bootstrap.Tab(document.getElementById('tab-3d'));
-                        tab3d.show();
-                    }
+                // Populate editor
+                const editor = this.state.editors[this.state.loadedType];
+                if (editor) {
+                    editor.setValue(this.truncateContent(content), -1);
+                    editor.loadedFile = content;
+                }
 
-                    // Auto-load HKL if present
-                    if (hklFile) {
-                        // Optional: Check basename match? 
-                        // For now, just load it if selected.
-                        loadHkl(hklFile);
-                    }
-                };
-                reader.readAsText(structureFile);
-            } else if (hklFile) {
-                // Only HKL selected
-                loadHkl(hklFile);
-                alert("HKL file loaded: " + hklFile.name);
+                // Switch to 3D tab
+                const activeTab = document.querySelector('.nav-link.active');
+                if (activeTab && activeTab.id !== 'tab-3d' && !this.state.splitView) {
+                    const tab3d = new bootstrap.Tab(document.getElementById('tab-3d'));
+                    tab3d.show();
+                }
             }
+
+            // Process HKL
+            if (hklFiles.length > 0) {
+                const file = hklFiles[0];
+                const content = await file.text();
+                this.state.hklContent = content;
+                this.state.hklName = file.name;
+                const statusHkl = document.getElementById('status-hkl');
+                if (statusHkl) {
+                    statusHkl.classList.remove('bg-secondary');
+                    statusHkl.classList.add('bg-success');
+                    statusHkl.title = "HKL Loaded: " + file.name;
+                }
+            }
+
+            // Process FCF
+            if (fcfFiles.length > 0) {
+                const file = fcfFiles[0];
+                const content = await file.text();
+                this.renderMap(content);
+            }
+
+            this.saveStateToLocalStorage();
         });
     }
 
+    handleFcfFile(file) {
+        const reader = new FileReader();
+        reader.onload = (e) => {
+            const content = e.target.result;
+            this.renderMap(content);
+        };
+        reader.readAsText(file);
+    }
 
+    renderMap(content) {
+        this.state.fcfRawContent = content;
+        this.saveStateToLocalStorage();
+        try {
+            const fcfData = this.state.parsers.fcf.parse(content);
+
+            if (!this.state.parsedData || !this.state.parsedData.atoms) {
+                alert("Please load a structure (RES/CIF) first to calculate phases.");
+                return;
+            }
+
+            const cell = this.state.parsedData.cell; 
+            const mapCell = (cell && cell.a) ? cell : fcfData.cell;
+
+            // Use symmetry-expanded atoms for correct phase calculation
+            let phaseAtoms = this.state.parsedData.atoms;
+            if (this.state.moleculeRenderer && this.state.moleculeRenderer.expandedAtoms) {
+                const exp = this.state.moleculeRenderer.expandedAtoms;
+                // Deduplicate by grouping atoms with identical fractional coordinates
+                // to avoid double-counting in structure factor sum
+                const seen = new Set();
+                phaseAtoms = [];
+                exp.forEach(a => {
+                    const key = `${a.x.toFixed(4)},${a.y.toFixed(4)},${a.z.toFixed(4)},${a.element}`;
+                    if (!seen.has(key)) {
+                        seen.add(key);
+                        phaseAtoms.push(a);
+                    }
+                });
+            }
+            
+            this.state.mapCalculator.calculateStructureFactors(phaseAtoms, fcfData.reflections, mapCell);
+            
+            // Calculate Map
+            const level = parseFloat(document.getElementById('map-level').value) || 1.0;
+            const radius = parseFloat(document.getElementById('map-radius').value) || 4.0;
+            const type = document.getElementById('map-type').value || '2Fo-Fc';
+            
+            this.state.currentMapData = { reflections: fcfData.reflections, cell: mapCell }; // Store for updates
+            
+            const mapData = this.state.mapCalculator.calculateMap(fcfData.reflections, mapCell, 0.5, type); 
+            this.state.cachedMapData = mapData; // Cache for RSR
+        
+        // Calculate Center (Cartesian) and Bounds
+        const displayAtoms = this.state.moleculeRenderer && this.state.moleculeRenderer.expandedAtoms 
+                             ? this.state.moleculeRenderer.expandedAtoms 
+                             : atoms;
+        
+        // 1. Calculate Cartesian Bounds of Atoms
+        // We need the orthogonalization matrix to convert atoms to Cartesian
+        const d2r = Math.PI / 180.0;
+        const a = mapCell.a;
+        const b = mapCell.b;
+        const c = mapCell.c;
+        const alpha = mapCell.alpha * d2r;
+        const beta = mapCell.beta * d2r;
+        const gamma = mapCell.gamma * d2r;
+        
+        const v = Math.sqrt(1 - Math.cos(alpha)**2 - Math.cos(beta)**2 - Math.cos(gamma)**2 + 2*Math.cos(alpha)*Math.cos(beta)*Math.cos(gamma));
+        
+        const m11 = a;
+        const m12 = b * Math.cos(gamma);
+        const m13 = c * Math.cos(beta);
+        
+        const m21 = 0;
+        const m22 = b * Math.sin(gamma);
+        const m23 = c * (Math.cos(alpha) - Math.cos(beta)*Math.cos(gamma)) / Math.sin(gamma);
+        
+        const m31 = 0;
+        const m32 = 0;
+        const m33 = c * v / Math.sin(gamma);
+        
+        const fracToCartMatrix = new THREE.Matrix4().set(
+            m11, m12, m13, 0,
+            m21, m22, m23, 0,
+            m31, m32, m33, 0,
+            0,   0,   0,   1
+        );
+        
+        const cartToFracMatrix = new THREE.Matrix4().copy(fracToCartMatrix).invert();
+        
+        let minCart = new THREE.Vector3(Infinity, Infinity, Infinity);
+        let maxCart = new THREE.Vector3(-Infinity, -Infinity, -Infinity);
+        
+        const vec = new THREE.Vector3();
+        
+        displayAtoms.forEach(atom => {
+            vec.set(atom.x, atom.y, atom.z);
+            vec.applyMatrix4(fracToCartMatrix);
+            minCart.min(vec);
+            maxCart.max(vec);
+        });
+        
+        // Cartesian Center
+        const centerCart = new THREE.Vector3().addVectors(minCart, maxCart).multiplyScalar(0.5);
+        
+        // 2. Define Sphere Box in Cartesian
+        const r = radius;
+        const boxMinCart = { x: centerCart.x - r, y: centerCart.y - r, z: centerCart.z - r };
+        const boxMaxCart = { x: centerCart.x + r, y: centerCart.y + r, z: centerCart.z + r };
+        
+        // 3. Convert Box Corners to Fractional to find Fractional Bounds
+        // Invert Matrix
+        const det = m11 * (m22 * m33 - m23 * m32) - m12 * (m21 * m33 - m23 * m31) + m13 * (m21 * m32 - m22 * m31);
+        const invDet = 1 / det;
+        
+        const i11 = (m22 * m33 - m23 * m32) * invDet;
+        const i12 = (m13 * m32 - m12 * m33) * invDet;
+        const i13 = (m12 * m23 - m13 * m22) * invDet;
+        
+        const i21 = (m23 * m31 - m21 * m33) * invDet;
+        const i22 = (m11 * m33 - m13 * m31) * invDet;
+        const i23 = (m13 * m21 - m11 * m23) * invDet;
+        
+        const i31 = (m21 * m32 - m22 * m31) * invDet;
+        const i32 = (m12 * m31 - m11 * m32) * invDet;
+        const i33 = (m11 * m22 - m12 * m21) * invDet;
+        
+        const cartToFrac = (x, y, z) => {
+            return {
+                x: i11 * x + i12 * y + i13 * z,
+                y: i21 * x + i22 * y + i23 * z,
+                z: i31 * x + i32 * y + i33 * z
+            };
+        };
+        
+        const corners = [
+            { x: boxMinCart.x, y: boxMinCart.y, z: boxMinCart.z },
+            { x: boxMaxCart.x, y: boxMinCart.y, z: boxMinCart.z },
+            { x: boxMinCart.x, y: boxMaxCart.y, z: boxMinCart.z },
+            { x: boxMaxCart.x, y: boxMaxCart.y, z: boxMinCart.z },
+            { x: boxMinCart.x, y: boxMinCart.y, z: boxMaxCart.z },
+            { x: boxMaxCart.x, y: boxMinCart.y, z: boxMaxCart.z },
+            { x: boxMinCart.x, y: boxMaxCart.y, z: boxMaxCart.z },
+            { x: boxMaxCart.x, y: boxMaxCart.y, z: boxMaxCart.z }
+        ];
+        
+        let minFrac = { x: Infinity, y: Infinity, z: Infinity };
+        let maxFrac = { x: -Infinity, y: -Infinity, z: -Infinity };
+        
+        corners.forEach(c => {
+            const f = cartToFrac(c.x, c.y, c.z);
+            if (f.x < minFrac.x) minFrac.x = f.x;
+            if (f.y < minFrac.y) minFrac.y = f.y;
+            if (f.z < minFrac.z) minFrac.z = f.z;
+            if (f.x > maxFrac.x) maxFrac.x = f.x;
+            if (f.y > maxFrac.y) maxFrac.y = f.y;
+            if (f.z > maxFrac.z) maxFrac.z = f.z;
+        });
+        
+        const bounds = { min: minFrac, max: maxFrac };
+        const centerFrac = cartToFrac(centerCart.x, centerCart.y, centerCart.z);
+        
+        this.state.currentMapBounds = bounds;
+        this.state.currentMapCenter = centerFrac;
+        this.state.currentMapRadius = radius;
+
+        // Render
+        this.state.densityRenderer.render(mapData, mapCell, level, 0x0000ff, bounds, centerFrac, radius); 
+            
+            // Activate toggle button
+            const btn = document.getElementById('tool-map-toggle');
+            if (btn) {
+                btn.classList.add('active');
+                btn.setAttribute('aria-pressed', 'true');
+            }
+            
+        } catch (e) {
+            console.error("Map error:", e);
+            alert("Error rendering map: " + e.message);
+        }
+    }
+
+    setupMapControls() {
+        const typeSelect = document.getElementById('map-type');
+        const levelInput = document.getElementById('map-level');
+        const radiusInput = document.getElementById('map-radius');
+        const toggleBtn = document.getElementById('tool-map-toggle');
+
+        const updateMap = () => {
+             if (this.state.currentMapData && this.state.densityRenderer && toggleBtn.classList.contains('active')) {
+                 const level = parseFloat(levelInput.value) || 1.0;
+                 const radius = parseFloat(radiusInput.value) || 4.0;
+                 const type = typeSelect.value;
+                 
+                 let needsRecalc = false;
+                 
+                 if (this.state.lastMapType !== type) {
+                     needsRecalc = true;
+                     this.state.lastMapType = type;
+                 }
+                 
+                 if (needsRecalc) {
+                     const mapData = this.state.mapCalculator.calculateMap(
+                         this.state.currentMapData.reflections, 
+                         this.state.currentMapData.cell, 
+                         0.5, 
+                         type
+                     );
+                     this.state.cachedMapData = mapData;
+                 }
+                 
+                 if (!this.state.cachedMapData && !needsRecalc) {
+                      this.state.cachedMapData = this.state.mapCalculator.calculateMap(
+                         this.state.currentMapData.reflections, 
+                         this.state.currentMapData.cell, 
+                         0.5, 
+                         type
+                     );
+                 }
+                 
+                 // Re-calculate bounds and center
+                 const atoms = this.state.moleculeRenderer && this.state.moleculeRenderer.expandedAtoms 
+                               ? this.state.moleculeRenderer.expandedAtoms 
+                               : this.state.parsedData.atoms;
+                 const mapCell = this.state.currentMapData.cell;
+                 
+                 // 1. Calculate Cartesian Bounds of Atoms
+                 const d2r = Math.PI / 180.0;
+                 const a = mapCell.a;
+                 const b = mapCell.b;
+                 const c = mapCell.c;
+                 const alpha = mapCell.alpha * d2r;
+                 const beta = mapCell.beta * d2r;
+                 const gamma = mapCell.gamma * d2r;
+                 
+                 const v = Math.sqrt(1 - Math.cos(alpha)**2 - Math.cos(beta)**2 - Math.cos(gamma)**2 + 2*Math.cos(alpha)*Math.cos(beta)*Math.cos(gamma));
+                 
+                 const m11 = a;
+                 const m12 = b * Math.cos(gamma);
+                 const m13 = c * Math.cos(beta);
+                 const m21 = 0;
+                 const m22 = b * Math.sin(gamma);
+                 const m23 = c * (Math.cos(alpha) - Math.cos(beta)*Math.cos(gamma)) / Math.sin(gamma);
+                 const m31 = 0;
+                 const m32 = 0;
+                 const m33 = c * v / Math.sin(gamma);
+                 
+                 const fracToCartMatrix = new THREE.Matrix4().set(
+                     m11, m12, m13, 0,
+                     m21, m22, m23, 0,
+                     m31, m32, m33, 0,
+                     0,   0,   0,   1
+                 );
+                 
+                 const cartToFracMatrix = new THREE.Matrix4().copy(fracToCartMatrix).invert();
+                 
+                 let minCart = new THREE.Vector3(Infinity, Infinity, Infinity);
+                 let maxCart = new THREE.Vector3(-Infinity, -Infinity, -Infinity);
+                 
+                 const vec = new THREE.Vector3();
+                 
+                 atoms.forEach(atom => {
+                     vec.set(atom.x, atom.y, atom.z);
+                     vec.applyMatrix4(fracToCartMatrix);
+                     minCart.min(vec);
+                     maxCart.max(vec);
+                 });
+                 
+                 const centerCart = new THREE.Vector3().addVectors(minCart, maxCart).multiplyScalar(0.5);
+                 
+                 const r = radius;
+                 // Define box corners in Cartesian
+                 const cornersCart = [
+                     new THREE.Vector3(centerCart.x - r, centerCart.y - r, centerCart.z - r),
+                     new THREE.Vector3(centerCart.x + r, centerCart.y - r, centerCart.z - r),
+                     new THREE.Vector3(centerCart.x - r, centerCart.y + r, centerCart.z - r),
+                     new THREE.Vector3(centerCart.x + r, centerCart.y + r, centerCart.z - r),
+                     new THREE.Vector3(centerCart.x - r, centerCart.y - r, centerCart.z + r),
+                     new THREE.Vector3(centerCart.x + r, centerCart.y - r, centerCart.z + r),
+                     new THREE.Vector3(centerCart.x - r, centerCart.y + r, centerCart.z + r),
+                     new THREE.Vector3(centerCart.x + r, centerCart.y + r, centerCart.z + r)
+                 ];
+                 
+                 let minFrac = new THREE.Vector3(Infinity, Infinity, Infinity);
+                 let maxFrac = new THREE.Vector3(-Infinity, -Infinity, -Infinity);
+                 
+                 cornersCart.forEach(c => {
+                     const f = c.clone().applyMatrix4(cartToFracMatrix);
+                     minFrac.min(f);
+                     maxFrac.max(f);
+                 });
+                 
+                 const bounds = { min: minFrac, max: maxFrac };
+                 const centerFrac = centerCart.clone().applyMatrix4(cartToFracMatrix);
+                 
+                 this.state.currentMapBounds = bounds;
+                 this.state.currentMapCenter = centerFrac;
+                 this.state.currentMapRadius = radius;
+                 
+                 this.state.densityRenderer.render(this.state.cachedMapData, mapCell, level, 0x0000ff, bounds, centerFrac, radius);
+             }
+        };
+
+        if (typeSelect) typeSelect.addEventListener('change', updateMap);
+        if (levelInput) levelInput.addEventListener('change', updateMap);
+        if (radiusInput) radiusInput.addEventListener('change', updateMap);
+        
+        if (toggleBtn) {
+            toggleBtn.addEventListener('click', () => {
+                if (toggleBtn.classList.contains('active')) {
+                    toggleBtn.classList.remove('active');
+                    toggleBtn.setAttribute('aria-pressed', 'false');
+                    if (this.state.densityRenderer && this.state.densityRenderer.mesh) {
+                        this.state.densityRenderer.mesh.visible = false;
+                    }
+                } else {
+                    if (!this.state.currentMapData) {
+                        alert("No FCF map data loaded. Please open an FCF file first.");
+                        // Optional: Trigger file open?
+                        // document.getElementById('file-input').click();
+                        return;
+                    }
+                    
+                    toggleBtn.classList.add('active');
+                    toggleBtn.setAttribute('aria-pressed', 'true');
+                    
+                    if (!this.state.cachedMapData) {
+                        updateMap();
+                    } else if (this.state.densityRenderer && this.state.densityRenderer.mesh) {
+                        this.state.densityRenderer.mesh.visible = true;
+                    } else {
+                        updateMap();
+                    }
+                }
+            });
+        }
+    }
+
+    // ========== FRAGMENT PLACEMENT ==========
+
+    getFracToCartMatrix(cell) {
+        const { a, b, c, alpha, beta, gamma } = cell;
+        const toRad = Math.PI / 180;
+        const ca = Math.cos(alpha * toRad), cb = Math.cos(beta * toRad), cc = Math.cos(gamma * toRad);
+        const sb = Math.sin(beta * toRad), sc = Math.sin(gamma * toRad);
+        const V = a * b * c * Math.sqrt(1 - ca*ca - cb*cb - cc*cc + 2*ca*cb*cc);
+        const m11 = a, m12 = b * cc, m13 = c * cb;
+        const m22 = b * sc, m23 = c * (ca - cb * cc) / sc;
+        const m33 = V / (a * b * sc);
+        return { m11, m12, m13, m22, m23, m33, V };
+    }
+
+    getCartToFracMatrix(cell) {
+        const m = this.getFracToCartMatrix(cell);
+        const det = m.m11 * (m.m22 * m.m33) + m.m12 * 0 + m.m13 * 0;
+        const invDet = 1 / det;
+        return {
+            i11: (m.m22 * m.m33) * invDet,
+            i12: (-m.m12 * m.m33) * invDet,
+            i13: (m.m12 * m.m23 - m.m13 * m.m22) * invDet,
+            i21: 0, i22: (m.m11 * m.m33) * invDet, i23: (-m.m11 * m.m23) * invDet,
+            i31: 0, i32: 0, i33: (m.m11 * m.m22) * invDet
+        };
+    }
+
+    setupFragmentControls() {
+        const fragmentSelect = document.getElementById('fragment-select');
+        const placeBtn = document.getElementById('tool-place-fragment');
+
+        const activateFragmentMode = () => {
+            const fragmentId = fragmentSelect ? fragmentSelect.value : '';
+            if (fragmentId && this.state.loadedContent) {
+                if (!this.state.cachedMapData && !this.state.currentMapData) {
+                    alert("Please load an FCF map first for fragment placement and refinement.");
+                    return;
+                }
+                this.state.fragment.active = true;
+                this.state.fragment.selectedId = fragmentId;
+                if (!this.state.rsr.active) {
+                    this.state.rsr.active = true;
+                    const rsrBtn = document.getElementById('tool-rsr');
+                    if (rsrBtn) rsrBtn.classList.add('active');
+                }
+                document.body.style.cursor = 'crosshair';
+                document.getElementById('status-bar-content').textContent =
+                    `Place ${FRAGMENTS[fragmentId].name}: Click atom or scene position`;
+            }
+        };
+
+        if (fragmentSelect) {
+            fragmentSelect.addEventListener('change', () => {
+                if (this.state.preview.active) return;
+                const val = fragmentSelect.value;
+                if (val) activateFragmentMode();
+                else {
+                    this.state.fragment.active = false;
+                    this.state.fragment.selectedId = null;
+                }
+            });
+        }
+
+        if (placeBtn) {
+            placeBtn.addEventListener('click', () => {
+                if (this.state.preview.active) return;
+                const val = fragmentSelect ? fragmentSelect.value : '';
+                if (val) activateFragmentMode();
+                else alert("Select a group from the dropdown first.");
+            });
+        }
+
+        ['rot-x', 'rot-y', 'rot-z'].forEach(id => {
+            const el = document.getElementById(id);
+            if (el) {
+                el.addEventListener('input', () => {
+                    document.getElementById(id + '-val').textContent = el.value;
+                    this.updatePreviewTransform();
+                });
+            }
+        });
+
+        ['trans-x', 'trans-y', 'trans-z'].forEach(id => {
+            const el = document.getElementById(id);
+            if (el) {
+                el.addEventListener('input', () => {
+                    document.getElementById(id + '-val').textContent = parseFloat(el.value).toFixed(2);
+                    this.updatePreviewTransform();
+                });
+            }
+        });
+
+        const refineBtn = document.getElementById('btn-frag-refine');
+        if (refineBtn) {
+            refineBtn.addEventListener('click', () => this.refinePreviewFragment());
+        }
+
+        const okBtn = document.getElementById('btn-frag-ok');
+        if (okBtn) {
+            okBtn.addEventListener('click', () => this.acceptFragment());
+        }
+
+        const cancelBtn = document.getElementById('btn-frag-cancel');
+        if (cancelBtn) {
+            cancelBtn.addEventListener('click', () => this.cancelFragmentPlacement());
+        }
+    }
+
+    placeFragment(clickedAtom, event) {
+        const fragmentId = this.state.fragment.selectedId;
+        if (!fragmentId || !FRAGMENTS[fragmentId]) return;
+        const fragment = FRAGMENTS[fragmentId];
+        const cell = this.state.parsedData.cell;
+        if (!cell) return;
+
+        // Compute placement position in world Cartesian
+        let posCart;
+        if (clickedAtom) {
+            const m = this.getFracToCartMatrix(cell);
+            posCart = new THREE.Vector3(
+                m.m11 * clickedAtom.x + m.m12 * clickedAtom.y + m.m13 * clickedAtom.z,
+                m.m22 * clickedAtom.y + m.m23 * clickedAtom.z,
+                m.m33 * clickedAtom.z
+            );
+        } else {
+            const rect = this.state.renderer.domElement.getBoundingClientRect();
+            const mx = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+            const my = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+            const rc = new THREE.Raycaster();
+            rc.setFromCamera(new THREE.Vector2(mx, my), this.state.camera);
+            const n = new THREE.Vector3();
+            this.state.camera.getWorldDirection(n);
+            const center = this.state.controls ? this.state.controls.target : new THREE.Vector3(0, 0, 0);
+            const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(n, center);
+            const pt = new THREE.Vector3();
+            const hit = rc.ray.intersectPlane(plane, pt);
+            posCart = hit ? pt : center.clone();
+            // Convert from world-space to molecule group local coordinates
+            const gPos = this.state.moleculeRenderer
+                ? this.state.moleculeRenderer.group.position
+                : new THREE.Vector3();
+            posCart.sub(gPos);
+        }
+
+        // Read editor lines (before any insertions — needed for label generation)
+        const editor = this.state.editors.res;
+        if (!editor) return;
+        const allLines = editor.getValue().split('\n');
+
+        // Parse SFAC
+        const sfacElements = [];
+        let sfacLineIndex = -1;
+        for (let i = 0; i < allLines.length; i++) {
+            const parts = allLines[i].trim().split(/\s+/);
+            if (parts[0].toUpperCase() === 'SFAC') {
+                sfacLineIndex = i;
+                for (let j = 1; j < parts.length; j++) {
+                    if (isNaN(parseFloat(parts[j]))) sfacElements.push(parts[j].toUpperCase());
+                }
+                break;
+            }
+        }
+        const neededElements = [...new Set(fragment.atoms.map(a => a.element.toUpperCase()))];
+        neededElements.forEach(el => { if (!sfacElements.includes(el)) sfacElements.push(el); });
+
+        // Generate unique labels
+        const getNextLabel = (element) => {
+            let maxNum = 0;
+            const re = new RegExp(`^${element}(\\d+)`, 'i');
+            const allLabels = [];
+            for (let i = 0; i < allLines.length; i++) {
+                const m = allLines[i].trim().match(/^(\S+)/);
+                if (m) allLabels.push(m[1]);
+            }
+            if (this.state.parsedData && this.state.parsedData.atoms) {
+                this.state.parsedData.atoms.forEach(a => allLabels.push(a.label));
+            }
+            allLabels.forEach(l => {
+                const m = l.match(re);
+                if (m) { const n = parseInt(m[1]); if (n > maxNum) maxNum = n; }
+            });
+            return element + (maxNum + 1);
+        };
+
+        // Determine if we placed on an existing atom
+        const usesExistingAtom = clickedAtom !== null;
+        const existingAtomLabel = clickedAtom ? clickedAtom.label : null;
+
+        const newAtomObjects = [];
+        const baseCartAtoms = [];
+
+        const m = this.getFracToCartMatrix(cell);
+        const inv = this.getCartToFracMatrix(cell);
+
+        // Initial random rotation
+        const angle = Math.random() * 2 * Math.PI;
+        const cosA = Math.cos(angle), sinA = Math.sin(angle);
+
+        // Anchor is the first fragment atom (local origin)
+        const anchor = fragment.atoms[0];
+
+        fragment.atoms.forEach((fa, idx) => {
+            const el = fa.element.toUpperCase();
+
+            // Anchor atom reuses the clicked atom's label; others get new unique labels
+            const label = (idx === 0 && usesExistingAtom)
+                ? existingAtomLabel
+                : getNextLabel(el);
+
+            // Rotate around anchor
+            const lx = fa.x - anchor.x, ly = fa.y - anchor.y, lz = fa.z - anchor.z;
+            const rx = lx * cosA - ly * sinA;
+            const ry = lx * sinA + ly * cosA;
+            const rz = lz;
+
+            // World Cartesian: anchor at click position
+            const wx = posCart.x + rx;
+            const wy = posCart.y + ry;
+            const wz = posCart.z + rz;
+
+            baseCartAtoms.push({ label, element: el, x: wx, y: wy, z: wz });
+
+            const fracX = inv.i11 * wx + inv.i12 * wy + inv.i13 * wz;
+            const fracY = inv.i21 * wx + inv.i22 * wy + inv.i23 * wz;
+            const fracZ = inv.i31 * wx + inv.i32 * wy + inv.i33 * wz;
+
+            newAtomObjects.push({
+                label, element: el,
+                x: fracX, y: fracY, z: fracZ,
+                occupancy: 11.0, uiso: 0.05, u: null, part: 0
+            });
+        });
+
+        // Centroid for rotation = posCart (rotation pivots around the anchor
+        // which sits at the clicked atom position)
+        const centroid = posCart.clone();
+
+        // Store preview state
+        this.state.preview.active = true;
+        this.state.preview.baseCartAtoms = baseCartAtoms;
+        this.state.preview.centroid = centroid;
+        this.state.preview.placementPos = posCart.clone();
+        this.state.preview.rotation = { x: 0, y: 0, z: 0 };
+        this.state.preview.translation = { x: 0, y: 0, z: 0 };
+        this.state.preview.fragmentDef = fragment;
+        this.state.preview.sfacElements = sfacElements;
+        this.state.preview.sfacLineIndex = sfacLineIndex;
+        this.state.preview.allLines = allLines;
+        this.state.preview.cartAtoms = baseCartAtoms.map(a => ({ ...a }));
+        this.state.preview.usesExistingAtom = usesExistingAtom;
+        this.state.preview.existingAtomLabel = existingAtomLabel;
+
+        // Render green preview
+        this.updatePreviewDisplay();
+
+        // Show panel
+        document.getElementById('frag-placement-title').textContent = `Place ${fragment.name}`;
+        document.getElementById('frag-placement-status').textContent = 'Preview';
+        document.getElementById('fragmentPlacementPanel').style.display = 'block';
+
+        document.getElementById('status-bar-content').textContent = `Adjust ${fragment.name}, then refine or accept.`;
+        document.body.style.cursor = 'default';
+    }
+
+    getTransformedCartAtoms() {
+        const base = this.state.preview.baseCartAtoms;
+        if (!base) return [];
+        const c = this.state.preview.centroid;
+        const rot = this.state.preview.rotation;
+        const tr = this.state.preview.translation;
+
+        const toRad = Math.PI / 180;
+        const rx = rot.x * toRad, ry = rot.y * toRad, rz = rot.z * toRad;
+        const cx = Math.cos(rx), sx = Math.sin(rx);
+        const cy = Math.cos(ry), sy = Math.sin(ry);
+        const cz = Math.cos(rz), sz = Math.sin(rz);
+
+        // Rotation matrices (Z * Y * X)
+        const rotMat = (px, py, pz) => {
+            // Rotate X
+            let y1 = py * cx - pz * sx;
+            let z1 = py * sx + pz * cx;
+            // Rotate Y
+            let x2 = px * cy + z1 * sy;
+            let z2 = -px * sy + z1 * cy;
+            // Rotate Z
+            let x3 = x2 * cz - y1 * sz;
+            let y3 = x2 * sz + y1 * cz;
+            return { x: x3, y: y3, z: z2 };
+        };
+
+        return base.map(a => {
+            const rel = { x: a.x - c.x, y: a.y - c.y, z: a.z - c.z };
+            const rotRel = rotMat(rel.x, rel.y, rel.z);
+            return {
+                label: a.label,
+                element: a.element,
+                x: c.x + rotRel.x + tr.x,
+                y: c.y + rotRel.y + tr.y,
+                z: c.z + rotRel.z + tr.z
+            };
+        });
+    }
+
+    getAtomColor(element) {
+        const colors = {
+            'H': 0x90FF90, 'C': 0x00FF00, 'N': 0x00CC00, 'O': 0x00FF00,
+            'F': 0x00FF66, 'CL': 0x00FF33, 'BR': 0x00FF00, 'I': 0x00AA00,
+            'S': 0x00FF00, 'P': 0x00FF00
+        };
+        return colors[element.toUpperCase()] || 0x00FF00;
+    }
+
+    updatePreviewDisplay() {
+        this.clearPreviewMeshes();
+
+        const transformed = this.getTransformedCartAtoms();
+        this.state.preview.cartAtoms = transformed;
+
+        const sphereGeo = new THREE.SphereGeometry(0.35, 16, 16);
+        const targetGroup = this.state.moleculeRenderer
+            ? this.state.moleculeRenderer.group
+            : this.state.scene;
+
+        transformed.forEach(a => {
+            const color = this.getAtomColor(a.element);
+            const mat = new THREE.MeshStandardMaterial({ color, emissive: color, emissiveIntensity: 0.5 });
+            const mesh = new THREE.Mesh(sphereGeo, mat);
+            mesh.position.set(a.x, a.y, a.z);
+            mesh.renderOrder = 999;
+            mesh.userData.isPreviewAtom = true;
+            targetGroup.add(mesh);
+            this.state.preview.meshes.push(mesh);
+
+            const canvas = document.createElement('canvas');
+            canvas.width = 128;
+            canvas.height = 64;
+            const ctx = canvas.getContext('2d');
+            ctx.font = 'Bold 32px Arial';
+            ctx.fillStyle = '#00ff00';
+            ctx.fillText(a.label, 4, 36);
+            const tex = new THREE.CanvasTexture(canvas);
+            const sprMat = new THREE.SpriteMaterial({ map: tex, depthTest: false, depthWrite: false });
+            const sprite = new THREE.Sprite(sprMat);
+            sprite.position.set(a.x, a.y + 0.5, a.z);
+            sprite.scale.set(1.0, 0.5, 1);
+            sprite.renderOrder = 999;
+            sprite.userData.isPreviewLabel = true;
+            targetGroup.add(sprite);
+            this.state.preview.labels.push(sprite);
+        });
+    }
+
+    clearPreviewMeshes() {
+        const targetGroup = this.state.moleculeRenderer
+            ? this.state.moleculeRenderer.group
+            : this.state.scene;
+        this.state.preview.meshes.forEach(m => {
+            targetGroup.remove(m);
+            m.geometry.dispose();
+            m.material.dispose();
+        });
+        this.state.preview.meshes = [];
+        this.state.preview.labels.forEach(s => {
+            targetGroup.remove(s);
+            s.material.map?.dispose();
+            s.material.dispose();
+        });
+        this.state.preview.labels = [];
+    }
+
+    updatePreviewTransform() {
+        if (!this.state.preview.active) return;
+        this.state.preview.rotation.x = parseFloat(document.getElementById('rot-x').value) || 0;
+        this.state.preview.rotation.y = parseFloat(document.getElementById('rot-y').value) || 0;
+        this.state.preview.rotation.z = parseFloat(document.getElementById('rot-z').value) || 0;
+        this.state.preview.translation.x = parseFloat(document.getElementById('trans-x').value) || 0;
+        this.state.preview.translation.y = parseFloat(document.getElementById('trans-y').value) || 0;
+        this.state.preview.translation.z = parseFloat(document.getElementById('trans-z').value) || 0;
+        this.updatePreviewDisplay();
+    }
+
+    refinePreviewFragment() {
+        if (!this.state.preview.active) return;
+        const cartAtoms = this.state.preview.cartAtoms;
+        if (!cartAtoms || cartAtoms.length === 0) return;
+
+        const refineProgress = document.getElementById('frag-refine-progress');
+        if (refineProgress) refineProgress.classList.remove('d-none');
+        document.getElementById('btn-frag-refine').disabled = true;
+
+        try {
+            if (!this.state.cachedMapData && this.state.currentMapData) {
+                const type = document.getElementById('map-type').value || '2Fo-Fc';
+                this.state.cachedMapData = this.state.mapCalculator.calculateMap(
+                    this.state.currentMapData.reflections,
+                    this.state.currentMapData.cell,
+                    0.5,
+                    type
+                );
+            }
+
+            if (!this.state.cachedMapData) {
+                alert("No map data for refinement.");
+                if (refineProgress) refineProgress.classList.add('d-none');
+                document.getElementById('btn-frag-refine').disabled = false;
+                return;
+            }
+
+            const cell = this.state.parsedData.cell;
+            const inv = this.getCartToFracMatrix(cell);
+
+            // Convert current Cartesian positions to fractional for refinement
+            const fracAtoms = cartAtoms.map(a => ({
+                label: a.label,
+                element: a.element,
+                x: inv.i11 * a.x + inv.i12 * a.y + inv.i13 * a.z,
+                y: inv.i21 * a.x + inv.i22 * a.y + inv.i23 * a.z,
+                z: inv.i31 * a.x + inv.i32 * a.y + inv.i33 * a.z,
+                occupancy: 11.0,
+                uiso: 0.05
+            }));
+
+            // Run rigid-body RSR (preserves fragment geometry)
+            this.state.realSpaceRefiner.refineRigid(fracAtoms, this.state.cachedMapData, cell);
+
+            // Convert back to Cartesian for display
+            const m = this.getFracToCartMatrix(cell);
+            const refinedCart = fracAtoms.map(a => ({
+                label: a.label,
+                element: a.element,
+                x: m.m11 * a.x + m.m12 * a.y + m.m13 * a.z,
+                y: m.m22 * a.y + m.m23 * a.z,
+                z: m.m33 * a.z
+            }));
+
+            // Update base atoms to refined positions, reset transforms
+            this.state.preview.baseCartAtoms = refinedCart;
+            this.state.preview.rotation = { x: 0, y: 0, z: 0 };
+            this.state.preview.translation = { x: 0, y: 0, z: 0 };
+
+            // Recompute centroid
+            let cx = 0, cy = 0, cz = 0;
+            refinedCart.forEach(a => { cx += a.x; cy += a.y; cz += a.z; });
+            cx /= refinedCart.length; cy /= refinedCart.length; cz /= refinedCart.length;
+            this.state.preview.centroid = new THREE.Vector3(cx, cy, cz);
+
+            // Reset sliders
+            ['rot-x', 'rot-y', 'rot-z', 'trans-x', 'trans-y', 'trans-z'].forEach(id => {
+                const el = document.getElementById(id);
+                if (el) el.value = 0;
+                const valEl = document.getElementById(id + '-val');
+                if (valEl) {
+                    const isRot = id.startsWith('rot');
+                    valEl.textContent = isRot ? '0' : '0.00';
+                }
+            });
+
+            this.updatePreviewDisplay();
+            document.getElementById('frag-placement-status').textContent = 'Refined';
+            document.getElementById('status-bar-content').textContent = 'Fragment refined. Adjust or accept.';
+        } catch (e) {
+            console.error("Refine preview error:", e);
+            alert("Refinement error: " + e.message);
+        } finally {
+            if (refineProgress) refineProgress.classList.add('d-none');
+            document.getElementById('btn-frag-refine').disabled = false;
+        }
+    }
+
+    acceptFragment() {
+        if (!this.state.preview.active) return;
+
+        const cartAtoms = this.state.preview.cartAtoms;
+        const sfacElements = this.state.preview.sfacElements;
+        const sfacLineIndex = this.state.preview.sfacLineIndex;
+        const editor = this.state.editors.res;
+        if (!editor || !cartAtoms) return;
+
+        const cell = this.state.parsedData.cell;
+        const inv = this.getCartToFracMatrix(cell);
+        const doc = editor.getSession().getDocument();
+
+        // Update SFAC if needed
+        if (sfacLineIndex !== -1) {
+            const existing = doc.getLine(sfacLineIndex);
+            const parts = existing.trim().split(/\s+/);
+            if (parts[0].toUpperCase() === 'SFAC') {
+                const currentEls = [];
+                for (let j = 1; j < parts.length; j++) {
+                    if (isNaN(parseFloat(parts[j]))) currentEls.push(parts[j].toUpperCase());
+                }
+                let updated = false;
+                sfacElements.forEach(el => {
+                    if (!currentEls.includes(el)) { currentEls.push(el); updated = true; }
+                });
+                if (updated) {
+                    doc.removeInLine(sfacLineIndex, 0, existing.length);
+                    doc.insertInLine({ row: sfacLineIndex, column: 0 }, 'SFAC ' + currentEls.join(' '));
+                }
+            }
+        }
+
+        // Generate SHELX lines (skip anchor if placed on an existing atom)
+        const getSfacIndex = (el) => {
+            const idx = sfacElements.indexOf(el.toUpperCase());
+            return idx >= 0 ? idx + 1 : 1;
+        };
+
+        const usesExisting = this.state.preview.usesExistingAtom;
+        const existingLabel = this.state.preview.existingAtomLabel;
+
+        const shexLines = [];
+        const currentLines = doc.getAllLines();
+
+        cartAtoms.forEach((a, idx) => {
+            const fx = inv.i11 * a.x + inv.i12 * a.y + inv.i13 * a.z;
+            const fy = inv.i21 * a.x + inv.i22 * a.y + inv.i23 * a.z;
+            const fz = inv.i31 * a.x + inv.i32 * a.y + inv.i33 * a.z;
+            const sfacIdx = getSfacIndex(a.element);
+
+            if (idx === 0 && usesExisting && existingLabel) {
+                // Update the existing atom's line in place
+                for (let li = 0; li < currentLines.length; li++) {
+                    const labelMatch = currentLines[li].trim().match(/^(\S+)/);
+                    if (labelMatch && labelMatch[1] === existingLabel) {
+                        const parts = currentLines[li].trim().split(/\s+/);
+                        if (parts.length >= 5) {
+                            const leadingWS = currentLines[li].match(/^\s*/)[0];
+                            parts[2] = fx.toFixed(5);
+                            parts[3] = fy.toFixed(5);
+                            parts[4] = fz.toFixed(5);
+                            // Update SFAC index if needed
+                            parts[1] = String(sfacIdx);
+                            currentLines[li] = leadingWS + parts.join(' ');
+                        }
+                        break;
+                    }
+                }
+            } else {
+                shexLines.push(`${a.label}  ${sfacIdx}  ${fx.toFixed(5)}  ${fy.toFixed(5)}  ${fz.toFixed(5)}  11.0  0.05`);
+            }
+        });
+
+        // Write back existing atom updates
+        if (usesExisting && existingLabel) {
+            editor.setValue(currentLines.join('\n'), -1);
+        }
+
+        // Insert new lines before END
+        const textToInsert = shexLines.join('\n') + '\n';
+        if (shexLines.length > 0) {
+            let insertPos = -1;
+            const allLines = doc.getAllLines();
+            for (let i = allLines.length - 1; i >= 0; i--) {
+                if (allLines[i].trim().toUpperCase() === 'END') { insertPos = i; break; }
+            }
+            if (insertPos === -1) {
+                insertPos = doc.getLength();
+                editor.session.insert({ row: insertPos, column: 0 }, '\n' + textToInsert + 'END\n');
+            } else {
+                editor.session.insert({ row: insertPos, column: 0 }, textToInsert);
+            }
+        }
+
+        editor.loadedFile = editor.getValue();
+        this.state.loadedContent = editor.getValue();
+
+        this.clearPreviewMeshes();
+        this.state.preview.active = false;
+
+        document.getElementById('fragmentPlacementPanel').style.display = 'none';
+
+        this.exitFragmentMode();
+
+        this.renderContent(this.state.loadedContent, 'res');
+        const acceptedCount = usesExisting ? shexLines.length + 1 : cartAtoms.length;
+        document.getElementById('status-bar-content').textContent = `Accepted ${acceptedCount} atoms.`;
+    }
+
+    cancelFragmentPlacement() {
+        this.clearPreviewMeshes();
+        this.state.preview.active = false;
+
+        document.getElementById('fragmentPlacementPanel').style.display = 'none';
+
+        this.exitFragmentMode();
+        document.getElementById('status-bar-content').textContent = 'Placement cancelled.';
+    }
+
+    exitFragmentMode() {
+        this.state.fragment.active = false;
+        this.state.fragment.selectedId = null;
+        this.state.fragment.placedAtoms = null;
+        this.state.preview.active = false;
+        this.state.preview.cartAtoms = null;
+        this.state.preview.baseCartAtoms = null;
+        this.state.preview.usesExistingAtom = false;
+        this.state.preview.existingAtomLabel = null;
+        if (this.state.rsr.active) {
+            this.state.rsr.active = false;
+            this.state.rsr.from = null;
+            this.state.rsr.to = null;
+            const rsrBtn = document.getElementById('tool-rsr');
+            if (rsrBtn) rsrBtn.classList.remove('active');
+        }
+        const fragmentSelect = document.getElementById('fragment-select');
+        if (fragmentSelect) fragmentSelect.value = '';
+        document.body.style.cursor = 'default';
+    }
 
     async refineStructure() {
         if (!this.state.editors.res) return;
@@ -2806,6 +4015,121 @@ class WMOLApp {
         }
         this.state.controls.update();
         this.onWindowResize();
+    }
+
+    toggleRSR() {
+        const btn = document.getElementById('tool-rsr');
+        if (this.state.rsr.active) {
+            if (this.state.preview.active) {
+                this.cancelFragmentPlacement();
+            }
+            this.state.rsr.active = false;
+            this.state.rsr.from = null;
+            this.state.rsr.to = null;
+            if (btn) btn.classList.remove('active');
+            this.deselectAll();
+            document.body.style.cursor = 'default';
+            document.getElementById('status-bar-content').textContent = "Real Space Refinement Deactivated";
+        } else {
+            if (!this.state.cachedMapData && !this.state.currentMapData) {
+                alert("Please load an FCF map first for Real Space Refinement.");
+                return;
+            }
+            this.state.rsr.active = true;
+            this.state.rsr.from = null;
+            this.state.rsr.to = null;
+            if (btn) btn.classList.add('active');
+            document.body.style.cursor = 'crosshair';
+            document.getElementById('status-bar-content').textContent = "Real Space Refinement: Click 'From' atom";
+        }
+    }
+
+    async performRealSpaceRefinement() {
+        const from = this.state.rsr.from;
+        const to = this.state.rsr.to;
+        
+        if (!from || !to) return;
+        
+        // Find all atoms in range (using lineNumber to match even if symmetry-expanded)
+        const atoms = this.state.parsedData.atoms;
+        const fromIdx = atoms.findIndex(a => (a.lineNumber || a.startLine) === (from.lineNumber || from.startLine));
+        const toIdx = atoms.findIndex(a => (a.lineNumber || a.startLine) === (to.lineNumber || to.startLine));
+        
+        if (fromIdx === -1 || toIdx === -1) {
+            alert("Atoms not found in structure.");
+            return;
+        }
+
+        const start = Math.min(fromIdx, toIdx);
+        const end = Math.max(fromIdx, toIdx);
+        
+        const subset = atoms.slice(start, end + 1);
+        
+        console.log(`Refining ${subset.length} atoms...`);
+        
+        try {
+            // Ensure we have a map
+            if (!this.state.cachedMapData) {
+                const type = document.getElementById('map-type').value || '2Fo-Fc';
+                this.state.cachedMapData = this.state.mapCalculator.calculateMap(
+                    this.state.currentMapData.reflections, 
+                    this.state.currentMapData.cell, 
+                    0.5, 
+                    type
+                );
+            }
+
+            this.state.realSpaceRefiner.refine(subset, this.state.cachedMapData, this.state.parsedData.cell);
+
+            this.updateEditorLines(subset);
+
+            this.renderContent(this.state.loadedContent, this.state.loadedType);
+
+            document.getElementById('status-bar-content').textContent = `Refined ${subset.length} atoms.`;
+            
+        } catch (e) {
+            console.error("RSR Error:", e);
+            alert("RSR Error: " + e.message);
+        } finally {
+            // Reset RSR selection but keep mode active
+            this.state.rsr.from = null;
+            this.state.rsr.to = null;
+            document.getElementById('rsr-progress').classList.add('d-none');
+            this.deselectAll();
+            document.getElementById('status-bar-content').textContent = "Real Space Refinement: Click 'From' atom";
+        }
+    }
+
+    updateEditorLines(atoms) {
+        if (this.state.loadedType !== 'res') return;
+        const editor = this.state.editors.res;
+        if (!editor) return;
+
+        const lines = editor.getValue().split('\n');
+        const labelToLine = {};
+        for (let i = 0; i < lines.length; i++) {
+            const m = lines[i].trim().match(/^(\S+)/);
+            if (m) labelToLine[m[1]] = i;
+        }
+
+        atoms.forEach(atom => {
+            const lineIdx = labelToLine[atom.label];
+            if (lineIdx !== undefined && lineIdx >= 0 && lineIdx < lines.length) {
+                const line = lines[lineIdx];
+                const parts = line.trim().split(/\s+/);
+                if (parts.length >= 5) {
+                    parts[2] = atom.x.toFixed(5);
+                    parts[3] = atom.y.toFixed(5);
+                    parts[4] = atom.z.toFixed(5);
+                    const leadingWS = line.match(/^\s*/)[0];
+                    lines[lineIdx] = leadingWS + parts.join(' ');
+                }
+            }
+        });
+
+        const newContent = lines.join('\n');
+        editor.setValue(newContent, -1);
+        this.state.loadedContent = newContent;
     }
 }
 

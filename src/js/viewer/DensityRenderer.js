@@ -24,7 +24,7 @@ export class DensityRenderer {
         }
 
         this.isoLevel = level;
-        this.material.color.setHex(color);
+        this.material.color.set(color);
 
         const { data, nx, ny, nz } = mapData;
         

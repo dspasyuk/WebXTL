@@ -75,11 +75,14 @@ class WMOLApp {
             loadedFilename: null,
             loadedType: 'res',
             fileId: 0, // Track file version to sync editor
+            currentProject: null,
+            fileTabs: {}, // keyed by filename -> { filename, type, editor, project, dirty }
             hklContent: null,
             hklName: null,
             fcfRawContent: null,
             splitView: false,
             splitInstance: null,
+            showEditor: true,
             viewSettings: {
                 showUnitCell: false, // Default to OFF
                 showSymmetry: false,
@@ -90,12 +93,19 @@ class WMOLApp {
             preferences: {
                 general: {
                     uiFontSize: 14,
-                    serverUrl: 'http://localhost:3000/refine'
+                    serverUrl: 'http://localhost:3000/refine',
+                    refineTimeout: 300000,
+                    restoreSession: true,
+                    autoSave: true
                 },
                 editor: {
                     theme: 'ace/theme/chrome',
                     fontSize: 18,
-                    fontFamily: 'Monaco, Menlo, "Ubuntu Mono", "Consolas", "source-code-pro", monospace'
+                    fontFamily: 'Monaco, Menlo, "Ubuntu Mono", "Consolas", "source-code-pro", monospace',
+                    tabSize: 4,
+                    wrapLines: false,
+                    showLineNumbers: true,
+                    highlightActiveLine: true
                 },
                 viewer: {
                     backgroundColor: '#ffffff',
@@ -121,6 +131,14 @@ class WMOLApp {
                         radius: 0.05,
                         resolution: 'medium'
                     }
+                },
+                map: {
+                    type: '2Fo-Fc',
+                    sigma: 1.0,
+                    radius: 10.0,
+                    resolution: 0.5,
+                    color: '#0000ff',
+                    autoShow: false
                 }
             },
             selectionOrder: [] // Track order of selected rows
@@ -132,9 +150,43 @@ class WMOLApp {
         // Raycasting
         this.raycaster = new THREE.Raycaster();
         this.mouse = new THREE.Vector2();
+
+        this.loadPreferences();
+    }
+
+    loadPreferences() {
+        try {
+            const raw = localStorage.getItem('webxtl_preferences');
+            if (!raw) return;
+            const saved = JSON.parse(raw);
+            const merge = (base, patch) => {
+                if (!patch || typeof patch !== 'object' || Array.isArray(patch)) return patch;
+                const out = { ...base };
+                for (const k of Object.keys(patch)) {
+                    if (base && typeof base[k] === 'object' && base[k] !== null && !Array.isArray(base[k])) {
+                        out[k] = merge(base[k], patch[k]);
+                    } else {
+                        out[k] = patch[k];
+                    }
+                }
+                return out;
+            };
+            this.state.preferences = merge(this.state.preferences, saved);
+        } catch (e) {
+            console.warn('Failed to load preferences:', e.message);
+        }
+    }
+
+    savePreferences() {
+        try {
+            localStorage.setItem('webxtl_preferences', JSON.stringify(this.state.preferences));
+        } catch (e) {
+            console.warn('Failed to save preferences:', e.message);
+        }
     }
 
     saveStateToLocalStorage() {
+        if (this.state.preferences && this.state.preferences.general.autoSave === false) return;
         try {
             if (this.state.loadedContent) {
                 localStorage.setItem('webxtl_res_content', this.state.loadedContent);
@@ -156,6 +208,7 @@ class WMOLApp {
     }
 
     restoreStateFromLocalStorage() {
+        if (this.state.preferences && this.state.preferences.general.restoreSession === false) return;
         const resContent = localStorage.getItem('webxtl_res_content');
         const loadedType = localStorage.getItem('webxtl_loaded_type');
         const filename = localStorage.getItem('webxtl_loaded_filename');
@@ -195,6 +248,7 @@ class WMOLApp {
     }
 
     init() {
+        this.enableSplitView();
         this.setupEditors();
         this.setup3D();
         this.setupMapControls();
@@ -216,83 +270,101 @@ class WMOLApp {
             });
         }
 
-        // Bind Inputs
-        const bindInput = (id, category, key, type = 'value', callback = null) => {
-            const el = document.getElementById(id);
-            if (!el) return;
-            
-            // Set initial value
-            if (this.state.preferences[category][key] !== undefined) {
-                el.value = this.state.preferences[category][key];
-            } else if (category === 'viewer') {
-                // Handle nested viewer objects
-                if (this.state.preferences.viewer.bondThresholds[key] !== undefined) {
-                    el.value = this.state.preferences.viewer.bondThresholds[key];
-                } else if (this.state.preferences.viewer.labels[key] !== undefined) {
-                    el.value = this.state.preferences.viewer.labels[key];
-                } else if (this.state.preferences.viewer.atoms[key] !== undefined) {
-                    el.value = this.state.preferences.viewer.atoms[key];
-                } else if (this.state.preferences.viewer.bonds[key] !== undefined) {
-                    el.value = this.state.preferences.viewer.bonds[key];
-                }
+        // Dot-path helpers over this.state.preferences
+        const getPref = (path, fallback) => {
+            const parts = path.split('.');
+            let cur = this.state.preferences;
+            for (const p of parts) {
+                if (cur === null || cur === undefined || typeof cur !== 'object') return fallback;
+                cur = cur[p];
             }
-
-            el.addEventListener('input', (e) => {
-                let val = e.target.value;
-                if (e.target.type === 'number') val = parseFloat(val);
-                
-                if (category === 'viewer') {
-                    if (['metal', 'nonMetal', 'hBond'].includes(key)) {
-                        this.state.preferences.viewer.bondThresholds[key] = val;
-                    } else if (['fontSize', 'color', 'offsetX', 'offsetY', 'offsetZ'].includes(key)) {
-                        this.state.preferences.viewer.labels[key] = val;
-                    } else if (['scale', 'resolution'].includes(key)) {
-                        // Resolution is shared for now or specific? Let's assume shared "quality" input maps to both
-                        if (key === 'resolution') {
-                            this.state.preferences.viewer.atoms.resolution = val;
-                            this.state.preferences.viewer.bonds.resolution = val;
-                        } else {
-                            this.state.preferences.viewer.atoms[key] = val;
-                        }
-                    } else if (key === 'bondRadius') { // Mapped from pref-bond-radius
-                        this.state.preferences.viewer.bonds.radius = val;
-                    }
-                } else {
-                    this.state.preferences[category][key] = val;
-                }
-                
-                this.applyPreferences();
-                if (callback) callback();
-            });
+            return cur === undefined ? fallback : cur;
+        };
+        const setPref = (path, val) => {
+            const parts = path.split('.');
+            let cur = this.state.preferences;
+            for (let i = 0; i < parts.length - 1; i++) {
+                if (cur[parts[i]] === undefined) cur[parts[i]] = {};
+                cur = cur[parts[i]];
+            }
+            cur[parts[parts.length - 1]] = val;
         };
 
-        // General
-        bindInput('pref-ui-fontsize', 'general', 'uiFontSize');
-        bindInput('pref-server-url', 'general', 'serverUrl', 'value');
+        // id -> preference path (+ input type)
+        const BINDINGS = [
+            // General
+            { id: 'pref-ui-fontsize', path: 'general.uiFontSize', type: 'number' },
+            { id: 'pref-server-url', path: 'general.serverUrl' },
+            { id: 'pref-refine-timeout', path: 'general.refineTimeout', type: 'number' },
+            { id: 'pref-restore-session', path: 'general.restoreSession', type: 'checkbox' },
+            { id: 'pref-autosave', path: 'general.autoSave', type: 'checkbox' },
+            // Editor
+            { id: 'pref-editor-fontsize', path: 'editor.fontSize', type: 'number' },
+            { id: 'pref-editor-theme', path: 'editor.theme' },
+            { id: 'pref-editor-fontfamily', path: 'editor.fontFamily' },
+            { id: 'pref-editor-tabsize', path: 'editor.tabSize', type: 'number' },
+            { id: 'pref-editor-wrap', path: 'editor.wrapLines', type: 'checkbox' },
+            { id: 'pref-editor-gutter', path: 'editor.showLineNumbers', type: 'checkbox' },
+            { id: 'pref-editor-highlight', path: 'editor.highlightActiveLine', type: 'checkbox' },
+            // Viewer
+            { id: 'pref-bg-color', path: 'viewer.backgroundColor', type: 'color' },
+            { id: 'pref-bond-color', path: 'viewer.bondColor', type: 'color' },
+            { id: 'pref-cell-color', path: 'viewer.unitCellColor', type: 'color' },
+            { id: 'pref-label-color', path: 'viewer.labels.color', type: 'color' },
+            { id: 'pref-bond-metal', path: 'viewer.bondThresholds.metal', type: 'number' },
+            { id: 'pref-bond-nonmetal', path: 'viewer.bondThresholds.nonMetal', type: 'number' },
+            { id: 'pref-bond-hbond', path: 'viewer.bondThresholds.hBond', type: 'number' },
+            { id: 'pref-bond-radius', path: 'viewer.bonds.radius', type: 'number' },
+            { id: 'pref-atom-scale', path: 'viewer.atoms.scale', type: 'number' },
+            { id: 'pref-quality', path: 'viewer.atoms.resolution' },
+            { id: 'pref-label-size', path: 'viewer.labels.fontSize', type: 'number' },
+            { id: 'pref-label-offx', path: 'viewer.labels.offsetX', type: 'number' },
+            { id: 'pref-label-offy', path: 'viewer.labels.offsetY', type: 'number' },
+            { id: 'pref-label-offz', path: 'viewer.labels.offsetZ', type: 'number' },
+            // Map
+            { id: 'pref-map-type', path: 'map.type' },
+            { id: 'pref-map-sigma', path: 'map.sigma', type: 'number' },
+            { id: 'pref-map-radius', path: 'map.radius', type: 'number' },
+            { id: 'pref-map-resolution', path: 'map.resolution', type: 'number' },
+            { id: 'pref-map-color', path: 'map.color', type: 'color' },
+            { id: 'pref-map-autoshow', path: 'map.autoShow', type: 'checkbox' }
+        ];
 
-        // Editor
-        bindInput('pref-editor-fontsize', 'editor', 'fontSize');
-        bindInput('pref-editor-theme', 'editor', 'theme');
-        bindInput('pref-editor-fontfamily', 'editor', 'fontFamily');
+        BINDINGS.forEach(({ id, path, type = 'text' }) => {
+            const el = document.getElementById(id);
+            if (!el) return;
 
-        // Viewer
-        bindInput('pref-bg-color', 'viewer', 'backgroundColor');
-        bindInput('pref-bond-color', 'viewer', 'bondColor');
-        bindInput('pref-cell-color', 'viewer', 'unitCellColor');
-        
-        bindInput('pref-bond-metal', 'viewer', 'metal');
-        bindInput('pref-bond-nonmetal', 'viewer', 'nonMetal');
-        bindInput('pref-bond-hbond', 'viewer', 'hBond');
+            // Set initial value from preferences
+            const val = getPref(path);
+            if (val !== undefined) {
+                if (type === 'checkbox') el.checked = !!val;
+                else el.value = val;
+            }
 
-        bindInput('pref-atom-scale', 'viewer', 'scale');
-        bindInput('pref-bond-radius', 'viewer', 'bondRadius');
-        bindInput('pref-quality', 'viewer', 'resolution');
+            el.addEventListener('input', () => {
+                let v = el.value;
+                if (type === 'checkbox') v = el.checked;
+                else if (type === 'number') v = parseFloat(v);
+                else if (type === 'color') v = el.value;
+                setPref(path, v);
+                this.savePreferences();
+                this.applyPreferences();
+            });
+        });
 
-        bindInput('pref-label-size', 'viewer', 'fontSize');
-        bindInput('pref-label-color', 'viewer', 'color');
-        bindInput('pref-label-offx', 'viewer', 'offsetX');
-        bindInput('pref-label-offy', 'viewer', 'offsetY');
-        bindInput('pref-label-offz', 'viewer', 'offsetZ');
+        // Sync toolbar map controls from preferences and apply initial prefs
+        this.applyMapControlsFromPrefs();
+        this.applyPreferences();
+    }
+
+    applyMapControlsFromPrefs() {
+        const typeSel = document.getElementById('map-type');
+        const levelIn = document.getElementById('map-level');
+        const radiusIn = document.getElementById('map-radius');
+        const map = this.state.preferences.map;
+        if (typeSel && map.type) typeSel.value = map.type;
+        if (levelIn && map.sigma) levelIn.value = map.sigma;
+        if (radiusIn && map.radius) radiusIn.value = map.radius;
     }
 
     applyPreferences() {
@@ -304,19 +376,24 @@ class WMOLApp {
         navLinks.forEach(el => el.style.fontSize = uiSize + 'px');
 
         // Editor
-        const edTheme = this.state.preferences.editor.theme;
-        const edSize = this.state.preferences.editor.fontSize;
-        const edFamily = this.state.preferences.editor.fontFamily;
-        
-        if (this.state.editors.res) {
-            this.state.editors.res.setTheme(edTheme);
-            this.state.editors.res.setFontSize(edSize);
-            this.state.editors.res.setOption('fontFamily', edFamily);
-        }
-        if (this.state.editors.cif) {
-            this.state.editors.cif.setTheme(edTheme);
-            this.state.editors.cif.setFontSize(edSize);
-            this.state.editors.cif.setOption('fontFamily', edFamily);
+        const prefs = this.state.preferences.editor;
+        const applyEditorOpts = (editor) => {
+            if (!editor) return;
+            editor.setTheme(prefs.theme);
+            editor.setFontSize(prefs.fontSize);
+            editor.setOption('fontFamily', prefs.fontFamily);
+            editor.setOption('tabSize', prefs.tabSize);
+            editor.setOption('useSoftTabs', true);
+            editor.setOption('wrap', prefs.wrapLines ? 'free' : false);
+            editor.setOption('showLineNumbers', prefs.showLineNumbers);
+            editor.setOption('showGutter', prefs.showLineNumbers);
+            editor.setOption('highlightActiveLine', prefs.highlightActiveLine);
+        };
+        applyEditorOpts(this.state.editors.res);
+        applyEditorOpts(this.state.editors.cif);
+        if (this.state.editors.lst) applyEditorOpts(this.state.editors.lst);
+        if (this.state.fileTabs) {
+            Object.values(this.state.fileTabs).forEach(t => applyEditorOpts(t.editor));
         }
 
         // Viewer
@@ -325,9 +402,28 @@ class WMOLApp {
             this.state.scene.background = new THREE.Color(bgColor);
         }
 
+        // Sync toolbar map controls
+        this.applyMapControlsFromPrefs();
+
         // Re-render 3D content to apply bond/color changes
         if (this.state.loadedContent) {
             this.renderContent(this.state.loadedContent, this.state.loadedType);
+        }
+
+        // Refresh the map (color etc.) if one is currently visible
+        if (this.state.currentMapData && this.state.densityRenderer) {
+            const btn = document.getElementById('tool-map-toggle');
+            if (btn && btn.classList.contains('active')) {
+                this.state.densityRenderer.render(
+                    this.state.cachedMapData,
+                    this.state.currentMapData.cell,
+                    parseFloat(document.getElementById('map-level').value) || 1.0,
+                    new THREE.Color(this.state.preferences.map.color),
+                    this.state.currentMapBounds,
+                    this.state.currentMapCenter,
+                    this.state.currentMapRadius
+                );
+            }
         }
     }
 
@@ -359,6 +455,16 @@ class WMOLApp {
             body: JSON.stringify({ content, type })
         });
         if (!res.ok) throw new Error('Failed to save project');
+        return res.json();
+    }
+
+    async apiSaveProjectFile(name, filename, content) {
+        const res = await fetch(this.getApiUrl(`/projects/${name}/savefile`), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ filename, content })
+        });
+        if (!res.ok) throw new Error('Failed to save file');
         return res.json();
     }
 
@@ -504,40 +610,224 @@ class WMOLApp {
         return 'fa-solid fa-file';
     }
 
-    async loadSpecificFileFromServer(projectName, filename, silent = false) {
+    safeId(str) {
+        return String(str).replace(/[^a-zA-Z0-9_-]/g, '-');
+    }
+
+    getAceModeForExt(type) {
+        if (type === 'cif') return 'ace/mode/cif';
+        if (['res', 'ins', 'shelx'].includes(type)) return 'ace/mode/shelx';
+        return 'ace/mode/text';
+    }
+
+    switchToTab(id) {
+        const el = document.getElementById(id);
+        if (el && !el.classList.contains('active')) {
+            new bootstrap.Tab(el).show();
+        }
+    }
+
+    openFileTab(filename, content, type, sourceProject = null, activate = true) {
+        const key = filename;
+        let tab = this.state.fileTabs[key];
+
+        if (tab) {
+            // Existing tab: refresh content if changed
+            if (content !== undefined && tab.editor.getValue() !== content) {
+                tab.editor.setValue(content, -1);
+                tab.dirty = true;
+            }
+            if (sourceProject) this.state.currentProject = sourceProject;
+            if (activate) this.activateFileTab(key);
+            return tab;
+        }
+
+        // --- Create tab button ---
+        const tabsUl = document.getElementById('mainTabs');
+        const li = document.createElement('li');
+        li.className = 'nav-item';
+        li.setAttribute('role', 'presentation');
+
+        const btn = document.createElement('button');
+        btn.className = 'nav-link w-100 text-start fw-bold rounded-0 py-2 d-flex align-items-center';
+        btn.style.cssText = 'padding-left: 4px !important; padding-right: 4px !important; font-size: 0.65rem;';
+        btn.id = 'tab-file-' + this.safeId(key);
+        btn.setAttribute('data-bs-toggle', 'tab');
+        btn.setAttribute('data-bs-target', '#pane-file-' + this.safeId(key));
+        btn.setAttribute('type', 'button');
+        btn.setAttribute('role', 'tab');
+        btn.setAttribute('title', filename);
+
+        // Label shows just the extension (deduplicated), full name in tooltip
+        const extLabel = (type || filename.split('.').pop() || 'txt').toUpperCase();
+        const existingWithLabel = Object.values(this.state.fileTabs).filter(t => t.label === extLabel).length;
+        const label = existingWithLabel === 0 ? extLabel : extLabel + (existingWithLabel + 1);
+
+        const labelEl = document.createElement('span');
+        labelEl.className = 'text-truncate';
+        labelEl.textContent = label;
+        btn.appendChild(labelEl);
+
+        const saveBtn = document.createElement('span');
+        saveBtn.className = 'tab-save-btn ms-1';
+        saveBtn.setAttribute('title', 'Save to server');
+        saveBtn.innerHTML = '<i class="fa-solid fa-floppy-disk" style="font-size: 0.6rem; color: #6c757d;"></i>';
+        saveBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            this.saveFileTab(key);
+        });
+        btn.appendChild(saveBtn);
+
+        li.appendChild(btn);
+        tabsUl.appendChild(li);
+
+        // --- Create pane ---
+        const contentDiv = document.getElementById('mainTabContent');
+        const pane = document.createElement('div');
+        pane.className = 'tab-pane fade h-100 w-100';
+        pane.id = 'pane-file-' + this.safeId(key);
+        pane.setAttribute('role', 'tabpanel');
+        const editorDiv = document.createElement('div');
+        editorDiv.id = 'editor-file-' + this.safeId(key);
+        editorDiv.className = 'h-100 w-100';
+        pane.appendChild(editorDiv);
+        contentDiv.appendChild(pane);
+
+        // --- Create Ace editor ---
+        const editor = ace.edit(editorDiv.id);
+        editor.setTheme(this.state.preferences.editor.theme);
+        editor.setFontSize(this.state.preferences.editor.fontSize);
+        editor.setOption('fontFamily', this.state.preferences.editor.fontFamily);
+        editor.session.setMode(this.getAceModeForExt(type));
+        editor.setValue(content, -1);
+
+        tab = {
+            filename,
+            label,
+            type,
+            editor,
+            project: sourceProject || this.state.currentProject,
+            dirty: false
+        };
+        this.state.fileTabs[key] = tab;
+
+        editor.session.on('change', () => {
+            tab.dirty = true;
+            if (tab.type === 'hkl') this.state.hklContent = editor.getValue();
+            if (tab.type === 'fcf') this.state.fcfRawContent = editor.getValue();
+            const tBtn = document.getElementById('tab-file-' + this.safeId(key));
+            if (tBtn) tBtn.title = tab.filename + ' (unsaved)';
+        });
+
+        if (activate) this.activateFileTab(key);
+        return tab;
+    }
+
+    activateFileTab(key) {
+        const btn = document.getElementById('tab-file-' + this.safeId(key));
+        if (btn && !btn.classList.contains('active')) {
+            new bootstrap.Tab(btn).show();
+        }
+    }
+
+    async saveFileTab(key) {
+        const tab = this.state.fileTabs[key];
+        if (!tab) return;
+
+        const project = tab.project || this.state.currentProject || tab.filename.replace(/\.[^.]+$/, '');
+        if (!project) {
+            alert("No project available to save to.");
+            return;
+        }
+
+        try {
+            const content = tab.editor.getValue();
+            await this.apiSaveProjectFile(project, tab.filename, content);
+            tab.dirty = false;
+            tab.content = content;
+            if (tab.type === 'hkl') this.state.hklContent = content;
+            if (tab.type === 'fcf') this.state.fcfRawContent = content;
+            const btn = document.getElementById('tab-file-' + this.safeId(key));
+            if (btn) btn.title = tab.filename;
+            alert(`Saved '${tab.filename}' to project '${project}'.`);
+        } catch (err) {
+            alert(`Save failed: ${err.message}`);
+        }
+    }
+
+    closeFileTab(key) {
+        const tab = this.state.fileTabs[key];
+        if (!tab) return;
+        if (tab.dirty && !confirm(`'${tab.filename}' has unsaved changes. Close anyway?`)) return;
+
+        const safeKey = this.safeId(key);
+        const btn = document.getElementById('tab-file-' + safeKey);
+        const pane = document.getElementById('pane-file-' + safeKey);
+        if (btn) btn.closest('li')?.remove();
+        if (pane) pane.remove();
+        if (tab.editor) tab.editor.destroy();
+        delete this.state.fileTabs[key];
+    }
+
+    async loadSpecificFileFromServer(projectName, filename, silent = false, activate = true) {
         const ext = filename.split('.').pop().toLowerCase();
-        
-        if (['res', 'ins', 'cif', 'pdb'].includes(ext)) {
-            try {
-                const content = await this.apiGetProjectFile(projectName, filename);
+
+        try {
+            const content = await this.apiGetProjectFile(projectName, filename);
+
+            if (['res', 'ins'].includes(ext)) {
+                // Primary structure (RES/INS) -> main split view
                 this.state.currentProject = projectName;
                 this.state.loadedType = (ext === 'ins' ? 'res' : ext);
                 this.state.loadedContent = content;
-                
-                const editor = this.state.editors[this.state.loadedType] || this.state.editors.res;
+                this.state.loadedFilename = filename;
+
+                const editor = this.state.editors.res;
                 if (editor) editor.setValue(content, -1);
-                this.renderContent(content, this.state.loadedType);
+                this.renderContent(content, 'res');
                 this.resetView();
-                if (!silent) console.log(`Loaded ${filename} from server.`);
-            } catch (err) { if (!silent) alert(`Load failed: ${err.message}`); }
-        } else if (ext === 'hkl') {
-            try {
-                const content = await this.apiGetProjectFile(projectName, filename);
-                this.state.hklContent = content;
-                this.state.hklName = filename;
-                const statusHkl = document.getElementById('status-hkl');
-                if (statusHkl) {
-                    statusHkl.classList.remove('bg-secondary');
-                    statusHkl.classList.add('bg-success');
-                    statusHkl.title = "HKL Loaded: " + filename;
+                if (activate) this.switchToTab('tab-split');
+            } else if (ext === 'cif') {
+                // CIF -> CIF tab + 3D render
+                this.state.currentProject = projectName;
+                this.state.loadedType = 'cif';
+                this.state.loadedContent = content;
+                this.state.loadedFilename = filename;
+
+                if (this.state.editors.cif) this.state.editors.cif.setValue(content, -1);
+                this.renderContent(content, 'cif');
+                this.resetView();
+                if (activate) this.switchToTab('tab-cif');
+            } else if (ext === 'pdb') {
+                // PDB -> 3D render + editable text tab
+                this.state.currentProject = projectName;
+                this.state.loadedType = 'pdb';
+                this.state.loadedContent = content;
+                this.state.loadedFilename = filename;
+
+                this.renderContent(content, 'pdb');
+                this.resetView();
+                this.openFileTab(filename, content, ext, projectName, activate);
+            } else {
+                // Other text files (hkl, fcf, lst, log, ...) -> editable text tab
+                this.state.currentProject = projectName;
+                this.openFileTab(filename, content, ext, projectName, activate);
+
+                if (ext === 'hkl') {
+                    this.state.hklContent = content;
+                    this.state.hklName = filename;
+                    const statusHkl = document.getElementById('status-hkl');
+                    if (statusHkl) {
+                        statusHkl.classList.remove('bg-secondary');
+                        statusHkl.classList.add('bg-success');
+                        statusHkl.title = "HKL Loaded: " + filename;
+                    }
+                } else if (ext === 'fcf') {
+                    this.renderMap(content);
                 }
-                if (!silent) alert(`HKL file '${filename}' loaded.`);
-            } catch (err) { if (!silent) alert(`Load failed: ${err.message}`); }
-        } else if (ext === 'fcf') {
-            try {
-                const content = await this.apiGetProjectFile(projectName, filename);
-                this.renderMap(content);
-            } catch (err) { if (!silent) alert(`Load failed: ${err.message}`); }
+            }
+        } catch (err) {
+            if (!silent) alert(`Load failed: ${err.message}`);
         }
         this.saveStateToLocalStorage();
     }
@@ -561,13 +851,27 @@ class WMOLApp {
             // Look for HKL
             const hklFile = files.find(f => f.name.toLowerCase() === `${name.toLowerCase()}.hkl`);
             if (hklFile) {
-                await this.loadSpecificFileFromServer(name, hklFile.name, true);
+                await this.loadSpecificFileFromServer(name, hklFile.name, true, false);
             }
             
             // Look for FCF
             const fcfFile = files.find(f => f.name.toLowerCase() === `${name.toLowerCase()}.fcf`);
             if (fcfFile) {
-                await this.loadSpecificFileFromServer(name, fcfFile.name, true);
+                await this.loadSpecificFileFromServer(name, fcfFile.name, true, false);
+            }
+
+            // Look for CIF (populate the CIF editor without replacing the primary structure)
+            const cifFile = files.find(f => f.name.toLowerCase() === `${name.toLowerCase()}.cif`);
+            if (cifFile) {
+                try {
+                    const content = await this.apiGetProjectFile(name, cifFile.name);
+                    if (this.state.editors.cif) {
+                        this.state.editors.cif.setValue(content, -1);
+                        this.state.editors.cif.loadedFile = content;
+                    }
+                } catch (e) {
+                    console.warn("Failed to load CIF:", e.message);
+                }
             }
             
             this.saveStateToLocalStorage();
@@ -612,6 +916,12 @@ class WMOLApp {
     }
     
     async saveCurrentProjectToServer() {
+         // If a file tab is active, save it
+         const activeTab = document.querySelector('.nav-link.active');
+         if (activeTab && activeTab.id.startsWith('tab-file-')) {
+             return this.saveFileTab(activeTab.id.replace('tab-file-', ''));
+         }
+         
          if (!this.state.currentProject) {
              alert("No server-side project currently loaded. Use 'Refine' or 'Project Manager' first.");
              return;
@@ -619,10 +929,21 @@ class WMOLApp {
          
          try {
              const type = this.state.loadedType || 'res';
+             const filename = this.state.loadedFilename || `structure.${type}`;
+             
+             // If this file is already open as a file tab, save via the tab
+             if (filename && this.state.fileTabs[filename]) {
+                 return this.saveFileTab(filename);
+             }
+             
              const editor = this.state.editors[type] || this.state.editors.res;
              const content = editor.getValue();
              
-             await this.apiSaveProject(this.state.currentProject, content, type);
+             if (type === 'res' || type === 'ins') {
+                 await this.apiSaveProject(this.state.currentProject, content, type);
+             } else {
+                 await this.apiSaveProjectFile(this.state.currentProject, filename, content);
+             }
              alert("Saved to server successfully.");
          } catch (err) {
              alert(`Save failed: ${err.message}`);
@@ -975,7 +1296,7 @@ class WMOLApp {
                         // Safest is immediately after UNIT).
                         const insertRow = unitLineIndex + 1;
                         const text = hfixInstructions.join('\n') + '\n';
-                        doc.insertInLine({row: insertRow, column: 0}, text);
+                        editor.session.insert({row: insertRow, column: 0}, text);
                         alert(`Generated ${count} HFIX instructions after UNIT.`);
                     } else {
                         // Fallback to cursor if UNIT not found
@@ -1163,7 +1484,7 @@ class WMOLApp {
                         const text = instructions.join('\n') + '\n';
                         
                         if (unitLineIndex !== -1) {
-                            doc.insertInLine({row: unitLineIndex + 1, column: 0}, text);
+                            editor.session.insert({row: unitLineIndex + 1, column: 0}, text);
                         } else {
                             // Fallback: insert at cursor
                             const cursor = editor.getCursorPosition();
@@ -1695,7 +2016,7 @@ class WMOLApp {
                 const targetId = event.target.id;
                 
                 // Ignore preference tabs (or any tab not part of the main view)
-                if (!['tab-3d', 'tab-split', 'tab-res', 'tab-cif', 'tab-lst'].includes(targetId)) {
+                if (!['tab-split', 'tab-cif', 'tab-lst'].includes(targetId) && !targetId.startsWith('tab-file-')) {
                     return;
                 }
                 
@@ -1705,11 +2026,16 @@ class WMOLApp {
                     this.disableSplitView();
                 }
 
-                if (targetId === 'tab-3d' || targetId === 'tab-split') {
+                if (targetId === 'tab-split') {
                     this.onWindowResize();
+                } else if (targetId.startsWith('tab-file-')) {
+                    // Resize the active file-tab editor
+                    setTimeout(() => {
+                        this.onWindowResize();
+                    }, 50);
                 } 
                 
-                if (targetId === 'tab-res' || targetId === 'tab-split') {
+                if (targetId === 'tab-split') {
                     // Lazy load RES content if available and not yet loaded
                     if (this.state.loadedType === 'res' && this.state.loadedContent) {
                         if (!this.state.editors.res.loadedFile || this.state.editors.res.loadedFile !== this.state.loadedContent) {
@@ -1822,6 +2148,13 @@ class WMOLApp {
             });
         }
 
+        const toolToggleEditor = document.getElementById('tool-toggle-editor');
+        if (toolToggleEditor) {
+            toolToggleEditor.addEventListener('click', () => {
+                this.toggleEditor();
+            });
+        }
+
         // --- Menu Wiring ---
 
         // Settings (Menu)
@@ -1830,7 +2163,6 @@ class WMOLApp {
         if (menuSettings && toolSettings) {
             menuSettings.addEventListener('click', () => toolSettings.click());
         }
-
         // View Toggles (Menu) - Sync with Toolbar
         const menuUnitCell = document.getElementById('menu-unitcell');
         // toolUnitCell is already defined earlier
@@ -2006,7 +2338,7 @@ class WMOLApp {
         
         // Force Grid Layout via JS
         container.style.display = 'grid';
-        container.style.gridTemplateColumns = '1fr 5px 1fr';
+        container.style.gridTemplateColumns = this.state.showEditor ? '1fr 5px 1fr' : '1fr';
         
         // Force 3D Pane
         if (pane3D) {
@@ -2033,6 +2365,8 @@ class WMOLApp {
             gutter.style.gridColumn = '2';
             gutter.style.width = '5px';
         }
+
+        this.applyEditorVisibility();
 
         // Initialize Split.js (split-grid)
         try {
@@ -2081,7 +2415,11 @@ class WMOLApp {
         
         // Reset RES Pane Styles
         if (paneRes) {
-            // Don't remove 'active' here, Bootstrap handles tab switching
+            // Remove the 'show active' classes that enableSplitView added.
+            // Bootstrap's tab switching only cleans up the pane of the previously
+            // active tab (pane-split), so these would otherwise leave the RES
+            // editor visible on top of the CIF/file-tab panes.
+            paneRes.classList.remove('show', 'active');
             paneRes.style.display = '';
             paneRes.style.width = '';
             paneRes.style.minWidth = '';
@@ -2101,6 +2439,57 @@ class WMOLApp {
         }
         
         setTimeout(() => this.onWindowResize(), 50);
+    }
+
+    applyEditorVisibility() {
+        const container = document.getElementById('mainTabContent');
+        const paneRes = document.getElementById('pane-res');
+        const gutter = document.getElementById('split-gutter');
+        const btn = document.getElementById('tool-toggle-editor');
+
+        if (this.state.showEditor) {
+            if (container) container.style.gridTemplateColumns = '1fr 5px 1fr';
+            if (paneRes) {
+                paneRes.style.display = 'block';
+                paneRes.style.gridColumn = '3';
+            }
+            if (gutter) {
+                gutter.style.display = 'block';
+                gutter.style.gridColumn = '2';
+            }
+        } else {
+            if (container) container.style.gridTemplateColumns = '1fr';
+            if (paneRes) {
+                paneRes.style.display = 'none';
+                paneRes.style.gridColumn = '';
+            }
+            if (gutter) {
+                gutter.style.display = 'none';
+                gutter.style.gridColumn = '';
+            }
+        }
+
+        if (btn) {
+            btn.classList.toggle('active', this.state.showEditor);
+            btn.setAttribute('aria-pressed', this.state.showEditor ? 'true' : 'false');
+        }
+    }
+
+    toggleEditor() {
+        this.state.showEditor = !this.state.showEditor;
+
+        const activeTab = document.querySelector('.nav-link.active');
+        if (activeTab && activeTab.id !== 'tab-split') {
+            new bootstrap.Tab(document.getElementById('tab-split')).show();
+        } else if (!this.state.splitView) {
+            this.enableSplitView();
+        }
+
+        this.applyEditorVisibility();
+        setTimeout(() => {
+            this.onWindowResize();
+            if (this.state.editors.res) this.state.editors.res.resize();
+        }, 60);
     }
 
     setupEditors() {
@@ -2356,9 +2745,19 @@ class WMOLApp {
 
                     // Left Click: Scroll to Line or Select
                     if (event.button === 0) {
+                        // Find the atom data: prefer the directly-hit atom mesh, otherwise fall
+                        // back to the nearest atom hit (bonds/unit-cell meshes intercept rays too)
+                        let atomData = null;
                         if (target.object.isInstancedMesh && target.object.userData.atomMap) {
-                            const atomData = target.object.userData.atomMap[target.instanceId];
-                            if (atomData && (atomData.lineNumber || atomData.startLine)) {
+                            atomData = target.object.userData.atomMap[target.instanceId];
+                        }
+                        if (!atomData) {
+                            const atomHit = intersects.find(i => i.object.isInstancedMesh && i.object.userData.atomMap);
+                            if (atomHit) {
+                                atomData = atomHit.object.userData.atomMap[atomHit.instanceId];
+                            }
+                        }
+                        if (atomData && (atomData.lineNumber || atomData.startLine)) {
                                 // Scroll RES editor if available
                                 if (this.state.editors.res) {
                                     const editor = this.state.editors.res;
@@ -2435,7 +2834,7 @@ class WMOLApp {
                                         
                                         editor.renderer.scrollCursorIntoView({row: row, column: 0}, 0.5);
                                     } else {
-                                    // Normal click: just go to line (clears selection)
+                                    // Normal click: select the atom's line range
                                     if (atomData.startLine && atomData.endLine) {
                                         // Select the range
                                         try {
@@ -2451,10 +2850,9 @@ class WMOLApp {
                                             if (endRow >= docLen) endRow = docLen - 1;
                                             
                                             if (startRow <= endRow) {
-                                                // Just move cursor and scroll
-                                                editor.moveCursorTo(startRow, 0);
+                                                // Select the range (triggers 3D highlight via changeSelection)
+                                                editor.selection.setSelectionRange(new Range(startRow, 0, endRow, session.getLine(endRow).length));
                                                 editor.scrollToLine(atomData.startLine, true, true, function(){});
-                                                editor.clearSelection();
                                             }
                                         } catch (err) {
                                             console.error("Navigation fail:", err);
@@ -2463,14 +2861,19 @@ class WMOLApp {
                                     } else {
                                         // Fallback for old data or single line
                                         const line = atomData.lineNumber || atomData.startLine;
-                                        editor.gotoLine(line, 0, true);
+                                        try {
+                                            const Range = ace.require('ace/range').Range;
+                                            const session = editor.getSession();
+                                            editor.selection.setSelectionRange(new Range(line - 1, 0, line - 1, session.getLine(line - 1).length));
+                                        } catch (e) {
+                                            editor.gotoLine(line, 0, true);
+                                        }
                                         editor.scrollToLine(line, true, true, function(){});
                                     }
                                     }
                                     editor.focus();
                                 }
                             }
-                        }
                     }
                     // Middle Click: Center View
                     else if (event.button === 1) { 
@@ -2660,6 +3063,9 @@ class WMOLApp {
         // Ace resize
         if (this.state.editors.res) this.state.editors.res.resize();
         if (this.state.editors.cif) this.state.editors.cif.resize();
+        if (this.state.fileTabs) {
+            Object.values(this.state.fileTabs).forEach(t => t.editor && t.editor.resize());
+        }
     }
 
     deselectAll() {
@@ -2801,6 +3207,7 @@ class WMOLApp {
             reader.onload = (event) => {
                 this.state.hklContent = event.target.result;
                 this.state.hklName = file.name;
+                this.openFileTab(file.name, event.target.result, 'hkl', null, true);
                 console.log("HKL file loaded:", file.name);
                 
                 // Update UI
@@ -2818,6 +3225,23 @@ class WMOLApp {
 
         // Save Handling
         const handleSave = () => {
+            // If a file tab is active, save that file's content
+            const activeTab = document.querySelector('.nav-link.active');
+            if (activeTab && activeTab.id.startsWith('tab-file-')) {
+                const tab = this.state.fileTabs[activeTab.id.replace('tab-file-', '')];
+                if (!tab) return;
+                const blob = new Blob([tab.editor.getValue()], { type: 'text/plain' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = tab.filename;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                URL.revokeObjectURL(url);
+                return;
+            }
+
             if (!this.state.loadedContent) return;
             
             // Get current content from active editor or loaded content
@@ -2890,11 +3314,14 @@ class WMOLApp {
                     editor.loadedFile = content;
                 }
 
-                // Switch to 3D tab
-                const activeTab = document.querySelector('.nav-link.active');
-                if (activeTab && activeTab.id !== 'tab-3d' && !this.state.splitView) {
-                    const tab3d = new bootstrap.Tab(document.getElementById('tab-3d'));
-                    tab3d.show();
+                // Switch to the appropriate tab
+                if (this.state.loadedType === 'cif') {
+                    this.switchToTab('tab-cif');
+                } else if (this.state.loadedType === 'pdb') {
+                    this.openFileTab(file.name, content, 'pdb', null, false);
+                    this.switchToTab('tab-split');
+                } else {
+                    this.switchToTab('tab-split');
                 }
             }
 
@@ -2904,6 +3331,7 @@ class WMOLApp {
                 const content = await file.text();
                 this.state.hklContent = content;
                 this.state.hklName = file.name;
+                this.openFileTab(file.name, content, 'hkl', null, true);
                 const statusHkl = document.getElementById('status-hkl');
                 if (statusHkl) {
                     statusHkl.classList.remove('bg-secondary');
@@ -2916,6 +3344,7 @@ class WMOLApp {
             if (fcfFiles.length > 0) {
                 const file = fcfFiles[0];
                 const content = await file.text();
+                this.openFileTab(file.name, content, 'fcf', null, true);
                 this.renderMap(content);
             }
 
@@ -2972,7 +3401,7 @@ class WMOLApp {
             
             this.state.currentMapData = { reflections: fcfData.reflections, cell: mapCell }; // Store for updates
             
-            const mapData = this.state.mapCalculator.calculateMap(fcfData.reflections, mapCell, 0.5, type); 
+            const mapData = this.state.mapCalculator.calculateMap(fcfData.reflections, mapCell, this.state.preferences.map.resolution, type); 
             this.state.cachedMapData = mapData; // Cache for RSR
         
         // Calculate Center (Cartesian) and Bounds
@@ -3089,15 +3518,22 @@ class WMOLApp {
         this.state.currentMapCenter = centerFrac;
         this.state.currentMapRadius = radius;
 
-        // Render
-        this.state.densityRenderer.render(mapData, mapCell, level, 0x0000ff, bounds, centerFrac, radius); 
-            
-            // Activate toggle button
+        // Render only if the user opted to show maps automatically
+        if (this.state.preferences.map.autoShow) {
+            this.state.densityRenderer.render(mapData, mapCell, level, new THREE.Color(this.state.preferences.map.color), bounds, centerFrac, radius);
             const btn = document.getElementById('tool-map-toggle');
             if (btn) {
                 btn.classList.add('active');
                 btn.setAttribute('aria-pressed', 'true');
             }
+        } else {
+            // Map loaded but hidden by default; ensure toggle is off
+            const btn = document.getElementById('tool-map-toggle');
+            if (btn) {
+                btn.classList.remove('active');
+                btn.setAttribute('aria-pressed', 'false');
+            }
+        }
             
         } catch (e) {
             console.error("Map error:", e);
@@ -3116,19 +3552,22 @@ class WMOLApp {
                  const level = parseFloat(levelInput.value) || 1.0;
                  const radius = parseFloat(radiusInput.value) || 4.0;
                  const type = typeSelect.value;
+                 const resolution = this.state.preferences.map.resolution;
+                 const color = new THREE.Color(this.state.preferences.map.color);
                  
                  let needsRecalc = false;
                  
-                 if (this.state.lastMapType !== type) {
+                 if (this.state.lastMapType !== type || this.state.lastMapResolution !== resolution) {
                      needsRecalc = true;
                      this.state.lastMapType = type;
+                     this.state.lastMapResolution = resolution;
                  }
                  
                  if (needsRecalc) {
                      const mapData = this.state.mapCalculator.calculateMap(
                          this.state.currentMapData.reflections, 
                          this.state.currentMapData.cell, 
-                         0.5, 
+                         resolution, 
                          type
                      );
                      this.state.cachedMapData = mapData;
@@ -3138,7 +3577,7 @@ class WMOLApp {
                       this.state.cachedMapData = this.state.mapCalculator.calculateMap(
                          this.state.currentMapData.reflections, 
                          this.state.currentMapData.cell, 
-                         0.5, 
+                         resolution, 
                          type
                      );
                  }
@@ -3222,7 +3661,7 @@ class WMOLApp {
                  this.state.currentMapCenter = centerFrac;
                  this.state.currentMapRadius = radius;
                  
-                 this.state.densityRenderer.render(this.state.cachedMapData, mapCell, level, 0x0000ff, bounds, centerFrac, radius);
+                 this.state.densityRenderer.render(this.state.cachedMapData, mapCell, level, new THREE.Color(this.state.preferences.map.color), bounds, centerFrac, radius);
              }
         };
 
@@ -3658,7 +4097,7 @@ class WMOLApp {
                 this.state.cachedMapData = this.state.mapCalculator.calculateMap(
                     this.state.currentMapData.reflections,
                     this.state.currentMapData.cell,
-                    0.5,
+                    this.state.preferences.map.resolution,
                     type
                 );
             }
@@ -3913,7 +4352,8 @@ class WMOLApp {
 
             const response = await fetch(this.state.preferences.general.serverUrl, {
                 method: 'POST',
-                body: formData
+                body: formData,
+                signal: AbortSignal.timeout(this.state.preferences.general.refineTimeout || 300000)
             });
 
             if (!response.ok) {
@@ -4074,7 +4514,7 @@ class WMOLApp {
                 this.state.cachedMapData = this.state.mapCalculator.calculateMap(
                     this.state.currentMapData.reflections, 
                     this.state.currentMapData.cell, 
-                    0.5, 
+                    this.state.preferences.map.resolution, 
                     type
                 );
             }

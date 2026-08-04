@@ -260,7 +260,46 @@ app.post('/projects/:name/save', (req, res) => {
     }
 });
 
-// 4. List Backups
+// 4. Save arbitrary file in project (creates project dir if missing)
+app.post('/projects/:name/savefile', (req, res) => {
+    try {
+        const basename = path.basename(req.params.name);
+        const { filename, content } = req.body;
+        
+        if (!filename || content === undefined) {
+            return res.status(400).json({ error: 'filename and content are required' });
+        }
+
+        const cleanName = path.basename(filename);
+        if (!cleanName || cleanName === '.' || cleanName === '..') {
+            return res.status(400).json({ error: 'Invalid filename' });
+        }
+
+        const projectDir = path.join(PROJECTS_DIR, basename);
+        if (!fs.existsSync(projectDir)) {
+            fs.mkdirSync(projectDir, { recursive: true });
+        }
+
+        const filePath = path.join(projectDir, cleanName);
+
+        // Create a quick backup before overwriting
+        const backupDir = path.join(projectDir, 'backup');
+        if (!fs.existsSync(backupDir)) fs.mkdirSync(backupDir, { recursive: true });
+
+        if (fs.existsSync(filePath)) {
+            const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+            fs.copyFileSync(filePath, path.join(backupDir, `${cleanName}_manual_save_${timestamp}`));
+        }
+
+        fs.writeFileSync(filePath, content, 'utf8');
+        res.json({ success: true, message: `Saved '${cleanName}' successfully` });
+    } catch (error) {
+        console.error("Save file error:", error);
+        res.status(500).json({ error: 'Failed to save file', details: error.message });
+    }
+});
+
+// 5. List Backups
 app.get('/projects/:name/backups', (req, res) => {
     try {
         const basename = req.params.name;

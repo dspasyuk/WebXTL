@@ -39,18 +39,6 @@
                             </ul>
                         </li>
                         <li class="nav-item dropdown">
-                            <a class="nav-link dropdown-toggle" href="#" id="projectDropdown" role="button"
-                                data-bs-toggle="dropdown">Project</a>
-                            <ul class="dropdown-menu">
-                                <li><a class="dropdown-item" href="#" id="menu-project-manager">Project Manager...</a>
-                                </li>
-                                <li>
-                                    <hr class="dropdown-divider">
-                                </li>
-                                <li><a class="dropdown-item" href="#" id="menu-save-server">Save to Server</a></li>
-                            </ul>
-                        </li>
-                        <li class="nav-item dropdown">
                             <a class="nav-link dropdown-toggle" href="#" id="editDropdown" role="button"
                                 data-bs-toggle="dropdown">Edit</a>
                             <ul class="dropdown-menu" style="min-width: 250px;">
@@ -98,6 +86,18 @@
                                 </li>
                                 <li><a class="dropdown-item" href="#" id="menu-select-nuclei">Custom Select by
                                         Nuclei...</a></li>
+                            </ul>
+                        </li>
+                        <li class="nav-item dropdown">
+                            <a class="nav-link dropdown-toggle" href="#" id="projectDropdown" role="button"
+                                data-bs-toggle="dropdown">Project</a>
+                            <ul class="dropdown-menu">
+                                <li><a class="dropdown-item" href="#" id="menu-project-manager">Project Manager...</a>
+                                </li>
+                                <li>
+                                    <hr class="dropdown-divider">
+                                </li>
+                                <li><a class="dropdown-item" href="#" id="menu-save-server">Save to Server</a></li>
                             </ul>
                         </li>
                         <li class="nav-item dropdown">
@@ -168,29 +168,29 @@
 
         <!-- Toolbar -->
         <div class="toolbar bg-light p-1 border-bottom border-secondary d-flex gap-1 flex-wrap justify-content-start">
-            <button class="btn btn-sm btn-light square-btn" id="tool-open" title="Open File"><i
+            <button class="btn btn-sm btn-outline-secondary square-btn" id="tool-open" title="Open File"><i
                     class="fa-solid fa-folder-open"></i></button>
-            <button class="btn btn-sm btn-light square-btn" id="tool-server-open" title="Open from Server"><i
+            <button class="btn btn-sm btn-outline-secondary square-btn" id="tool-server-open" title="Open from Server"><i
                     class="fa-solid fa-cloud"></i></button>
-            <button class="btn btn-sm btn-light square-btn" id="tool-save" title="Save File"><i
+            <button class="btn btn-sm btn-outline-secondary square-btn" id="tool-save" title="Save File"><i
                     class="fa-solid fa-save"></i></button>
             <div class="vr mx-1 bg-secondary"></div>
-            <button class="btn btn-sm btn-light square-btn" id="tool-refine" title="Refine Structure"><i
+            <button class="btn btn-sm btn-outline-secondary square-btn" id="tool-refine" title="Refine Structure"><i
                     class="fa-solid fa-flask"></i></button>
             <div class="vr mx-1 bg-secondary"></div>
-            <button class="btn btn-sm btn-light square-btn fw-bold" id="tool-kill-q" title="Kill Q Peaks"
+            <button class="btn btn-sm btn-outline-secondary square-btn fw-bold" id="tool-kill-q" title="Kill Q Peaks"
                 style="color: #d63384;">Q</button>
-            <button class="btn btn-sm btn-light square-btn fw-bold" id="tool-kill-h" title="Kill H Atoms"
+            <button class="btn btn-sm btn-outline-secondary square-btn fw-bold" id="tool-kill-h" title="Kill H Atoms"
                 style="color: #0dcaf0;">H</button>
             <div class="vr mx-1 bg-secondary"></div>
-            <button class="btn btn-sm btn-light square-btn" id="tool-relabel" title="Relabel Atoms (Ctrl-L)"><i
+            <button class="btn btn-sm btn-outline-secondary square-btn" id="tool-relabel" title="Relabel Atoms (Ctrl-L)"><i
                     class="fa-solid fa-pen-to-square"></i></button>
-            <button class="btn btn-sm btn-light square-btn" id="tool-sort" title="Sort Atoms (Alt-S)"><i
+            <button class="btn btn-sm btn-outline-secondary square-btn" id="tool-sort" title="Sort Atoms (Alt-S)"><i
                     class="fa-solid fa-arrow-down-a-z"></i></button>
-            <button class="btn btn-sm btn-light square-btn" id="tool-search" title="Search (Ctrl-F)"><i
+            <button class="btn btn-sm btn-outline-secondary square-btn" id="tool-search" title="Search (Ctrl-F)"><i
                     class="fa-solid fa-magnifying-glass"></i></button>
             <div class="vr mx-1 bg-secondary"></div>
-            <button class="btn btn-sm btn-light square-btn" id="tool-reset" title="Reset View"><i
+            <button class="btn btn-sm btn-outline-secondary square-btn" id="tool-reset" title="Reset View"><i
                     class="fa-solid fa-home"></i></button>
             <div class="vr mx-1 bg-secondary"></div>
             <button class="btn btn-sm btn-outline-secondary square-btn" id="tool-unitcell" title="Toggle Unit Cell"
@@ -208,6 +208,10 @@
             <button class="btn btn-sm btn-outline-secondary square-btn" id="tool-adps" title="Toggle ADPs"
                 data-bs-toggle="button">
                 <i class="fas fa-circle-notch"></i>
+            </button>
+            <button class="btn btn-sm btn-outline-secondary square-btn active" id="tool-toggle-editor"
+                title="Toggle Text Editor" aria-pressed="true">
+                <i class="fas fa-code"></i>
             </button>
             <div class="vr mx-1 bg-secondary"></div>
             <div class="input-group input-group-sm" style="width: auto;">
@@ -248,7 +252,7 @@
             <button class="btn btn-sm btn-outline-secondary square-btn active" id="tool-camera"
                 title="Toggle Perspective / Orthographic" aria-pressed="true"><i class="fa-solid fa-video"></i></button>
             <div class="vr mx-1 bg-secondary"></div>
-            <button class="btn btn-sm btn-light square-btn" id="tool-settings" title="Preferences"><i
+            <button class="btn btn-sm btn-outline-secondary square-btn" id="tool-settings" title="Preferences"><i
                     class="fa-solid fa-cog"></i></button>
         </div>
 
@@ -260,25 +264,13 @@
                     <li class="nav-item" role="presentation">
                         <button class="nav-link active w-100 text-start fw-bold rounded-0 py-2"
                             style="padding-left: 2px !important; padding-right: 1px !important; font-size: 0.75rem;"
-                            id="tab-3d" data-bs-toggle="tab" data-bs-target="#pane-3d" type="button"
-                            role="tab">3D</button>
-                    </li>
-                    <li class="nav-item" role="presentation">
-                        <button class="nav-link w-100 text-start fw-bold rounded-0 py-2"
-                            style="padding-left: 2px !important; padding-right: 1px !important; font-size: 0.75rem;"
                             id="tab-split" data-bs-toggle="tab" data-bs-target="#pane-split" type="button"
-                            role="tab">3D/RES</button>
+                            role="tab" aria-selected="true">main</button>
                     </li>
                     <li class="nav-item" role="presentation">
                         <button class="nav-link w-100 text-start fw-bold rounded-0 py-2"
                             style="padding-left: 2px !important; padding-right: 1px !important; font-size: 0.75rem;"
-                            id="tab-res" data-bs-toggle="tab" data-bs-target="#pane-res" type="button"
-                            role="tab">RES</button>
-                    </li>
-                    <li class="nav-item" role="presentation">
-                        <button class="nav-link w-100 text-start fw-bold rounded-0 py-2"
-                            style="padding-left: 2px !important; padding-right: 1px !important; font-size: 0.75rem;"
-                            id="tab-cif" data-bs-toggle="tab" data-bs-target="#pane-cif" type="button"
+                            id="tab-cif" data-bs-toggle="tab" data-bs-target="#content-cif" type="button"
                             role="tab">CIF</button>
                     </li>
                 </ul>
@@ -286,12 +278,12 @@
 
             <!-- Tab Content -->
             <div class="tab-content flex-grow-1 position-relative" id="mainTabContent">
-                <!-- 3D View Pane -->
-                <div class="tab-pane fade show active h-100 w-100" id="pane-3d" role="tabpanel">
+                <!-- 3D View Pane (used inside main split view) -->
+                <div class="tab-pane fade h-100 w-100" id="pane-3d" role="tabpanel">
                     <div id="three-container" class="h-100 w-100"></div>
                 </div>
-                <!-- Dummy Split Pane -->
-                <div class="tab-pane fade h-100 w-100" id="pane-split" role="tabpanel"></div>
+                <!-- Split Pane (main default) -->
+                <div class="tab-pane fade show active h-100 w-100" id="pane-split" role="tabpanel"></div>
                 <!-- Split Gutter -->
                 <div id="split-gutter"></div>
                 <!-- RES Editor Pane -->
@@ -334,95 +326,132 @@
                             <button class="nav-link" id="pref-viewer-tab" data-bs-toggle="tab"
                                 data-bs-target="#pref-viewer" type="button" role="tab">3D Viewer</button>
                         </li>
+                        <li class="nav-item" role="presentation">
+                            <button class="nav-link" id="pref-map-tab" data-bs-toggle="tab"
+                                data-bs-target="#pref-map" type="button" role="tab">Map</button>
+                        </li>
                     </ul>
                     <div class="tab-content p-3 border border-top-0" id="prefTabsContent">
                         <!-- General Tab -->
                         <div class="tab-pane fade show active" id="pref-general" role="tabpanel">
-                            <div class="mb-3">
-                                <label for="pref-ui-fontsize" class="form-label">Menu Font Size (px)</label>
-                                <input type="number" class="form-control" id="pref-ui-fontsize" value="14">
-                            </div>
-                            <div class="mb-3">
-                                <label for="pref-server-url" class="form-label">Refinement Server URL</label>
-                                <input type="text" class="form-control" id="pref-server-url"
-                                    value="http://localhost:3000/refine">
+                            <div class="row">
+                                <div class="col-md-6">
+                                    <h6 class="text-uppercase text-muted small mb-2">Interface</h6>
+                                    <div class="mb-3">
+                                        <label for="pref-ui-fontsize" class="form-label">Menu Font Size (px)</label>
+                                        <input type="number" class="form-control" id="pref-ui-fontsize" value="14">
+                                    </div>
+                                    <div class="mb-3 form-check form-switch">
+                                        <input type="checkbox" class="form-check-input" id="pref-restore-session" checked>
+                                        <label for="pref-restore-session" class="form-check-label">Restore last session on startup</label>
+                                    </div>
+                                    <div class="mb-3 form-check form-switch">
+                                        <input type="checkbox" class="form-check-input" id="pref-autosave" checked>
+                                        <label for="pref-autosave" class="form-check-label">Auto-save session to browser storage</label>
+                                    </div>
+                                </div>
+                                <div class="col-md-6">
+                                    <h6 class="text-uppercase text-muted small mb-2">Refinement Server</h6>
+                                    <div class="mb-3">
+                                        <label for="pref-server-url" class="form-label">Server URL</label>
+                                        <input type="text" class="form-control" id="pref-server-url"
+                                            value="http://localhost:3000/refine">
+                                    </div>
+                                    <div class="mb-3">
+                                        <label for="pref-refine-timeout" class="form-label">Timeout (ms)</label>
+                                        <input type="number" class="form-control" id="pref-refine-timeout" value="300000"
+                                            step="10000">
+                                        <div class="form-text">How long to wait for a refinement job before aborting.</div>
+                                    </div>
+                                </div>
                             </div>
                         </div>
                         <!-- Editor Tab -->
                         <div class="tab-pane fade" id="pref-editor" role="tabpanel">
-                            <div class="mb-3">
-                                <label for="pref-editor-fontsize" class="form-label">Font Size (px)</label>
-                                <input type="number" class="form-control" id="pref-editor-fontsize" value="18">
-                            </div>
-                            <div class="mb-3">
-                                <label for="pref-editor-theme" class="form-label">Theme</label>
-                                <select class="form-select" id="pref-editor-theme">
-                                    <option value="ace/theme/chrome">Chrome (Light)</option>
-                                    <option value="ace/theme/monokai">Monokai (Dark)</option>
-                                    <option value="ace/theme/github">GitHub</option>
-                                    <option value="ace/theme/twilight">Twilight</option>
-                                </select>
-                            </div>
-                            <div class="mb-3">
-                                <label for="pref-editor-fontfamily" class="form-label">Font Family</label>
-                                <input type="text" class="form-control" id="pref-editor-fontfamily"
-                                    value='Monaco, Menlo, "Ubuntu Mono", "Consolas", "source-code-pro", monospace'>
+                            <div class="row">
+                                <div class="col-md-6">
+                                    <div class="mb-3">
+                                        <label for="pref-editor-fontsize" class="form-label">Font Size (px)</label>
+                                        <input type="number" class="form-control" id="pref-editor-fontsize" value="18">
+                                    </div>
+                                    <div class="mb-3">
+                                        <label for="pref-editor-theme" class="form-label">Theme</label>
+                                        <select class="form-select" id="pref-editor-theme">
+                                            <option value="ace/theme/chrome">Chrome (Light)</option>
+                                            <option value="ace/theme/monokai">Monokai (Dark)</option>
+                                            <option value="ace/theme/github">GitHub</option>
+                                            <option value="ace/theme/twilight">Twilight</option>
+                                        </select>
+                                    </div>
+                                    <div class="mb-3">
+                                        <label for="pref-editor-fontfamily" class="form-label">Font Family</label>
+                                        <input type="text" class="form-control" id="pref-editor-fontfamily"
+                                            value='Monaco, Menlo, "Ubuntu Mono", "Consolas", "source-code-pro", monospace'>
+                                    </div>
+                                    <div class="mb-3">
+                                        <label for="pref-editor-tabsize" class="form-label">Tab Size</label>
+                                        <input type="number" class="form-control" id="pref-editor-tabsize" value="4"
+                                            min="1" max="16">
+                                    </div>
+                                </div>
+                                <div class="col-md-6">
+                                    <h6 class="text-uppercase text-muted small mb-2">Display</h6>
+                                    <div class="form-check form-switch mb-2">
+                                        <input type="checkbox" class="form-check-input" id="pref-editor-gutter" checked>
+                                        <label for="pref-editor-gutter" class="form-check-label">Show Line Numbers</label>
+                                    </div>
+                                    <div class="form-check form-switch mb-2">
+                                        <input type="checkbox" class="form-check-input" id="pref-editor-wrap">
+                                        <label for="pref-editor-wrap" class="form-check-label">Wrap Lines</label>
+                                    </div>
+                                    <div class="form-check form-switch mb-2">
+                                        <input type="checkbox" class="form-check-input" id="pref-editor-highlight" checked>
+                                        <label for="pref-editor-highlight" class="form-check-label">Highlight Active Line</label>
+                                    </div>
+                                </div>
                             </div>
                         </div>
                         <!-- Viewer Tab -->
                         <div class="tab-pane fade" id="pref-viewer" role="tabpanel">
                             <div class="row">
                                 <div class="col-md-6">
-                                    <div class="mb-3">
-                                        <label for="pref-bg-color" class="form-label">Background Color</label>
-                                        <input type="color" class="form-control form-control-color" id="pref-bg-color"
-                                            value="#ffffff">
+                                    <h6 class="text-uppercase text-muted small mb-2">Colors</h6>
+                                    <div class="row g-2 mb-4">
+                                        <div class="col-6">
+                                            <label for="pref-bg-color" class="form-label small">Background</label>
+                                            <input type="color" class="form-control form-control-color" id="pref-bg-color"
+                                                value="#ffffff">
+                                        </div>
+                                        <div class="col-6">
+                                            <label for="pref-bond-color" class="form-label small">Bond</label>
+                                            <input type="color" class="form-control form-control-color" id="pref-bond-color"
+                                                value="#888888">
+                                        </div>
+                                        <div class="col-6">
+                                            <label for="pref-cell-color" class="form-label small">Unit Cell</label>
+                                            <input type="color" class="form-control form-control-color" id="pref-cell-color"
+                                                value="#000000">
+                                        </div>
+                                        <div class="col-6">
+                                            <label for="pref-label-color" class="form-label small">Label</label>
+                                            <input type="color" class="form-control form-control-color" id="pref-label-color"
+                                                value="#000000">
+                                        </div>
                                     </div>
-                                    <div class="mb-3">
-                                        <label for="pref-bond-color" class="form-label">Bond Color</label>
-                                        <input type="color" class="form-control form-control-color" id="pref-bond-color"
-                                            value="#888888">
-                                    </div>
-                                    <div class="mb-3">
-                                        <label for="pref-cell-color" class="form-label">Unit Cell Color</label>
-                                        <input type="color" class="form-control form-control-color" id="pref-cell-color"
-                                            value="#000000">
-                                    </div>
-                                </div>
-                                <div class="col-md-6">
-                                    <div class="mb-3">
-                                        <label for="pref-bond-metal" class="form-label">Max Metal Bond Length
-                                            (Å)</label>
-                                        <input type="number" class="form-control" id="pref-bond-metal" value="2.5"
-                                            step="0.1">
-                                    </div>
-                                    <div class="mb-3">
-                                        <label for="pref-bond-nonmetal" class="form-label">Max Non-Metal Bond Length
-                                            (Å)</label>
-                                        <input type="number" class="form-control" id="pref-bond-nonmetal" value="1.9"
-                                            step="0.1">
-                                    </div>
-                                    <div class="mb-3">
-                                        <label for="pref-bond-hbond" class="form-label">Max H-Bond Length (Å)</label>
-                                        <input type="number" class="form-control" id="pref-bond-hbond" value="0.0"
-                                            step="0.1">
-                                        <div class="form-text">Set > 0 to enable H-bonds (e.g. 2.8)</div>
-                                    </div>
-
-                                    <h6 class="mt-4">Appearance</h6>
+                                    <h6 class="text-uppercase text-muted small mb-2">Atoms &amp; Bonds</h6>
                                     <div class="row g-2">
                                         <div class="col-6">
-                                            <label for="pref-atom-scale" class="form-label">Atom Radius</label>
+                                            <label for="pref-atom-scale" class="form-label small">Atom Radius</label>
                                             <input type="number" class="form-control" id="pref-atom-scale" value="0.3"
                                                 step="0.05">
                                         </div>
                                         <div class="col-6">
-                                            <label for="pref-bond-radius" class="form-label">Bond Radius</label>
+                                            <label for="pref-bond-radius" class="form-label small">Bond Radius</label>
                                             <input type="number" class="form-control" id="pref-bond-radius" value="0.05"
                                                 step="0.01">
                                         </div>
-                                        <div class="col-12 mt-2">
-                                            <label for="pref-quality" class="form-label">Quality (Resolution)</label>
+                                        <div class="col-12">
+                                            <label for="pref-quality" class="form-label small">Quality (Resolution)</label>
                                             <select class="form-select" id="pref-quality">
                                                 <option value="low">Low</option>
                                                 <option value="medium" selected>Medium</option>
@@ -430,32 +459,92 @@
                                             </select>
                                         </div>
                                     </div>
-
-                                    <h6 class="mt-4">Labels</h6>
+                                </div>
+                                <div class="col-md-6">
+                                    <h6 class="text-uppercase text-muted small mb-2">Bond Lengths (Å)</h6>
+                                    <div class="row g-2 mb-4">
+                                        <div class="col-12">
+                                            <label for="pref-bond-metal" class="form-label small">Max Metal Bond</label>
+                                            <input type="number" class="form-control" id="pref-bond-metal" value="2.5"
+                                                step="0.1">
+                                        </div>
+                                        <div class="col-12">
+                                            <label for="pref-bond-nonmetal" class="form-label small">Max Non-Metal Bond</label>
+                                            <input type="number" class="form-control" id="pref-bond-nonmetal" value="1.9"
+                                                step="0.1">
+                                        </div>
+                                        <div class="col-12">
+                                            <label for="pref-bond-hbond" class="form-label small">Max H-Bond</label>
+                                            <input type="number" class="form-control" id="pref-bond-hbond" value="0.0"
+                                                step="0.1">
+                                            <div class="form-text">Set &gt; 0 to enable H-bonds (e.g. 2.8).</div>
+                                        </div>
+                                    </div>
+                                    <h6 class="text-uppercase text-muted small mb-2">Labels</h6>
                                     <div class="row g-2">
                                         <div class="col-6">
-                                            <label for="pref-label-size" class="form-label">Font Size</label>
+                                            <label for="pref-label-size" class="form-label small">Font Size</label>
                                             <input type="number" class="form-control" id="pref-label-size" value="24">
                                         </div>
                                         <div class="col-6">
-                                            <label for="pref-label-color" class="form-label">Color</label>
-                                            <input type="color" class="form-control form-control-color"
-                                                id="pref-label-color" value="#000000">
-                                        </div>
-                                        <div class="col-4 mt-2">
-                                            <label for="pref-label-offx" class="form-label">Offset X</label>
+                                            <label for="pref-label-offx" class="form-label small">Offset X</label>
                                             <input type="number" class="form-control" id="pref-label-offx" value="0.3"
                                                 step="0.1">
                                         </div>
-                                        <div class="col-4 mt-2">
-                                            <label for="pref-label-offy" class="form-label">Offset Y</label>
+                                        <div class="col-6">
+                                            <label for="pref-label-offy" class="form-label small">Offset Y</label>
                                             <input type="number" class="form-control" id="pref-label-offy" value="0.3"
                                                 step="0.1">
                                         </div>
-                                        <div class="col-4 mt-2">
-                                            <label for="pref-label-offz" class="form-label">Offset Z</label>
+                                        <div class="col-6">
+                                            <label for="pref-label-offz" class="form-label small">Offset Z</label>
                                             <input type="number" class="form-control" id="pref-label-offz" value="0.3"
                                                 step="0.1">
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <!-- Map Tab -->
+                        <div class="tab-pane fade" id="pref-map" role="tabpanel">
+                            <div class="row">
+                                <div class="col-md-6">
+                                    <h6 class="text-uppercase text-muted small mb-2">Computation</h6>
+                                    <div class="mb-3">
+                                        <label for="pref-map-type" class="form-label">Map Type</label>
+                                        <select class="form-select" id="pref-map-type">
+                                            <option value="2Fo-Fc">2Fo-Fc</option>
+                                            <option value="Fo-Fc">Fo-Fc</option>
+                                        </select>
+                                    </div>
+                                    <div class="mb-3">
+                                        <label for="pref-map-resolution" class="form-label">Resolution (Å)</label>
+                                        <input type="number" class="form-control" id="pref-map-resolution" value="0.5"
+                                            step="0.1" min="0.1">
+                                        <div class="form-text">Grid spacing for the FFT map. Smaller is finer but slower.</div>
+                                    </div>
+                                </div>
+                                <div class="col-md-6">
+                                    <h6 class="text-uppercase text-muted small mb-2">Display</h6>
+                                    <div class="mb-3">
+                                        <label for="pref-map-sigma" class="form-label">Sigma Level</label>
+                                        <input type="number" class="form-control" id="pref-map-sigma" value="1.0"
+                                            step="0.1" min="0">
+                                    </div>
+                                    <div class="mb-3">
+                                        <label for="pref-map-radius" class="form-label">Map Radius (Å)</label>
+                                        <input type="number" class="form-control" id="pref-map-radius" value="10.0"
+                                            step="0.5">
+                                    </div>
+                                    <div class="mb-3">
+                                        <label for="pref-map-color" class="form-label">Map Color</label>
+                                        <input type="color" class="form-control form-control-color" id="pref-map-color"
+                                            value="#0000ff">
+                                    </div>
+                                    <div class="mb-3">
+                                        <label for="pref-map-autoshow" class="form-label mb-1">Show Map when FCF is loaded</label>
+                                        <div>
+                                            <input type="checkbox" class="form-check-input" id="pref-map-autoshow" role="switch">
                                         </div>
                                     </div>
                                 </div>
@@ -533,7 +622,7 @@
                     <hr>
                     <p><strong>Author:</strong> Denis Spasyuk</p>
                     <p><strong>License:</strong> MIT</p>
-                    <p>Version 1.0.0</p>
+                    <p>Version 1.1.0</p>
                     <p class="small text-muted">&copy; 2026 Denis Spasyuk</p>
                 </div>
                 <div class="modal-footer">

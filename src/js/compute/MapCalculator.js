@@ -144,11 +144,20 @@ export class MapCalculator {
             }
         }
 
+        // Compute min/max with a loop (spread of a large typed array would overflow the call stack)
+        let min = Infinity;
+        let max = -Infinity;
+        for (let i = 0; i < size; i++) {
+            const v = real[i];
+            if (v < min) min = v;
+            if (v > max) max = v;
+        }
+
         return {
             data: real,
             nx, ny, nz,
-            min: Math.min(...real),
-            max: Math.max(...real),
+            min,
+            max,
             mean: 0, // Normalized
             sigma: 1 // Normalized
         };

@@ -6,6 +6,7 @@ import fs from 'fs';
 import path from 'path';
 import { spawn } from 'child_process';
 import { fileURLToPath } from 'url';
+import { buildPublishCif, buildPublishCifFromTemplates, buildReportDocx, parseDevFile, parseCif } from './publish.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -31,16 +32,58 @@ if (!fs.existsSync(PROJECTS_DIR)) {
     fs.mkdirSync(PROJECTS_DIR, { recursive: true });
 }
 
+// Templates directory (user .cif + device .dev templates)
+const TEMPLATES_DIR = path.join(__dirname, 'templates');
+const DEVICE_DIR = path.join(TEMPLATES_DIR, 'device');
+
 // Serve static files from 'dist' directory
 app.use(express.static(path.join(__dirname, 'dist')));
+
+// Run SHELXL once on <basename> in <projectDir>. Resolves with { code, stdout, stderr }.
+function runShelxl(projectDir, basename) {
+    return new Promise((resolve) => {
+        const shelxl = spawn('shelxl', [basename], { cwd: projectDir });
+        let stdout = '';
+        let stderr = '';
+        shelxl.stdout.on('data', (d) => { stdout += d.toString(); });
+        shelxl.stderr.on('data', (d) => { stderr += d.toString(); });
+        shelxl.on('close', (code) => resolve({ code, stdout, stderr }));
+        shelxl.on('error', (err) => resolve({ code: -1, stdout, stderr: stderr + '\n' + err.message }));
+    });
+}
+
+// Parse the "Recommended weighting scheme: WGHT a b" line from a SHELXL .lst.
+// Returns { a, b } or null.
+function parseRecommendedWght(lstText) {
+    const m = lstText.match(/Recommended weighting scheme:\s*WGHT\s+([\d.]+)\s+([\d.]+)/);
+    return m ? { a: m[1], b: m[2] } : null;
+}
+
+// Replace the first WGHT instruction line in a file with "WGHT a b".
+// SHELXL does not update this line itself, so we must do it for WGHT optimization.
+function updateWghtInstruction(filePath, a, b) {
+    if (!fs.existsSync(filePath)) return false;
+    const lines = fs.readFileSync(filePath, 'utf8').split(/\r?\n/);
+    let done = false;
+    for (let i = 0; i < lines.length; i++) {
+        if (/^WGHT/.test(lines[i].trim())) {
+            lines[i] = `WGHT    ${a}   ${b}`;
+            done = true;
+            break;
+        }
+    }
+    if (done) fs.writeFileSync(filePath, lines.join('\n'), 'utf8');
+    return done;
+}
 
 /**
  * POST /refine
  * Expects 'ins' and 'hkl' files in multipart/form-data.
+ * Optional JSON body: { cycles: <int> } — number of SHELXL refinement cycles (default 1).
  */
-app.post('/refine', upload.fields([{ name: 'ins', maxCount: 1 }, { name: 'hkl', maxCount: 1 }]), async (req, res) => {
+app.post('/refine', upload.fields([{ name: 'ins', maxCount: 1 }, { name: 'hkl', maxCount: 1 }, { name: 'cycles', maxCount: 1 }, { name: 'mode', maxCount: 1 }]), async (req, res) => {
     const jobId = uuidv4(); // Still useful for logging
-    
+
     try {
         // Validate inputs
         if (!req.files || !req.files['ins'] || !req.files['hkl']) {
@@ -53,7 +96,21 @@ app.post('/refine', upload.fields([{ name: 'ins', maxCount: 1 }, { name: 'hkl', 
         // Determine basename from uploaded .ins file
         const originalName = insFile.originalname;
         const basename = path.parse(originalName).name;
-        
+
+        // Multipart text fields arrive as arrays in req.body.
+        const field = (name, dflt) => {
+            let v = (req.body && req.body[name]) || dflt;
+            if (Array.isArray(v)) v = v[0];
+            return v;
+        };
+
+        // Refinement mode: 'weight' optimizes the WGHT instruction over several
+        // cycles; anything else is a single regular SHELXL run.
+        const mode = field('mode', 'regular');
+        let cycles = parseInt(field('cycles', '1'), 10);
+        if (!Number.isFinite(cycles) || cycles < 1) cycles = 1;
+        if (cycles > 50) cycles = 50;
+
         // Create project directory: projects/[basename]
         const projectDir = path.join(PROJECTS_DIR, basename);
         if (!fs.existsSync(projectDir)) {
@@ -82,55 +139,74 @@ app.post('/refine', upload.fields([{ name: 'ins', maxCount: 1 }, { name: 'hkl', 
         const backupPath = path.join(backupDir, `${basename}_${timestamp}.ins`);
         fs.copyFileSync(insPath, backupPath);
 
-        console.log(`[${jobId}] Starting refinement for project '${basename}'...`);
+        const resPath = path.join(projectDir, `${basename}.res`);
+        const lstPath = path.join(projectDir, `${basename}.lst`);
 
-        // Spawn SHELXL process
-        const shelxl = spawn('shelxl', [basename], {
-            cwd: projectDir
-        });
+        let lastCode = 0;
+        let combinedStdout = '';
+        let combinedStderr = '';
 
-        let stdout = '';
-        let stderr = '';
+        if (mode === 'weight') {
+            // WGHT optimization loop: run SHELXL, read the recommended WGHT from the
+            // .lst, write it into the .ins instruction, and re-run. SHELXL never updates
+            // the WGHT instruction itself, so we must apply the recommendation manually.
+            console.log(`[${jobId}] Starting WGHT optimization for project '${basename}' (${cycles} cycle(s))...`);
+            let lastRec = null;
+            for (let c = 1; c <= cycles; c++) {
+                console.log(`[${jobId}] WGHT cycle ${c}/${cycles}...`);
+                const r = await runShelxl(projectDir, basename);
+                lastCode = r.code;
+                combinedStdout += (c > 1 ? '\n' : '') + `===== SHELXL WGHT cycle ${c} =====\n` + r.stdout;
+                combinedStderr += r.stderr;
 
-        shelxl.stdout.on('data', (data) => {
-            stdout += data.toString();
-        });
-
-        shelxl.stderr.on('data', (data) => {
-            stderr += data.toString();
-        });
-
-        shelxl.on('close', (code) => {
-            console.log(`[${jobId}] Finished with code ${code}`);
-
-            // Read output files
-            const resPath = path.join(projectDir, `${basename}.res`);
-            const lstPath = path.join(projectDir, `${basename}.lst`);
-
-            const result = {
-                success: code === 0,
-                jobId: jobId,
-                stdout: stdout,
-                stderr: stderr,
-                files: {}
-            };
-
-            if (fs.existsSync(resPath)) {
-                result.files.res = fs.readFileSync(resPath, 'utf8');
+                // Read the recommended WGHT and apply it to the .ins for the next cycle.
+                if (fs.existsSync(lstPath)) {
+                    const rec = parseRecommendedWght(fs.readFileSync(lstPath, 'utf8'));
+                    if (rec) {
+                        lastRec = rec;
+                        updateWghtInstruction(insPath, rec.a, rec.b);
+                        console.log(`[${jobId}] Recommended WGHT ${rec.a} ${rec.b}`);
+                    }
+                }
             }
-            if (fs.existsSync(lstPath)) {
-                result.files.lst = fs.readFileSync(lstPath, 'utf8');
+            // SHELXL echoes the WGHT instruction it read, so the .res still shows the
+            // previous value. Patch the final .res (and .ins) with the last recommended
+            // WGHT so the editor shows it and the next refinement uses it.
+            if (lastRec) {
+                updateWghtInstruction(resPath, lastRec.a, lastRec.b);
+                updateWghtInstruction(insPath, lastRec.a, lastRec.b);
             }
+        } else {
+            // Regular refinement: a single SHELXL run on the uploaded .ins.
+            console.log(`[${jobId}] Starting refinement for project '${basename}'...`);
+            const r = await runShelxl(projectDir, basename);
+            lastCode = r.code;
+            combinedStdout = r.stdout;
+            combinedStderr = r.stderr;
+        }
 
-            // NO CLEANUP - Keep files for persistence
+        console.log(`[${jobId}] Finished with code ${lastCode}`);
 
-            res.json(result);
-        });
+        const result = {
+            success: lastCode === 0,
+            jobId: jobId,
+            mode: mode,
+            cycles: cycles,
+            stdout: combinedStdout,
+            stderr: combinedStderr,
+            files: {}
+        };
 
-        shelxl.on('error', (err) => {
-            console.error(`[${jobId}] Spawn error:`, err);
-            res.status(500).json({ error: 'Failed to start SHELXL process', details: err.message });
-        });
+        if (fs.existsSync(resPath)) {
+            result.files.res = fs.readFileSync(resPath, 'utf8');
+        }
+        if (fs.existsSync(lstPath)) {
+            result.files.lst = fs.readFileSync(lstPath, 'utf8');
+        }
+
+        // NO CLEANUP - Keep files for persistence
+
+        res.json(result);
 
     } catch (error) {
         console.error(`[${jobId}] Unexpected error:`, error);
@@ -334,6 +410,165 @@ app.get('/projects/:name/backups/:file', (req, res) => {
         res.json({ content: content });
     } catch (error) {
          res.status(500).json({ error: 'Failed to get backup', details: error.message });
+    }
+});
+
+// --- Publication API ---
+
+// Find the best source CIF file in a project directory.
+// Prefer <basename>.cif, then any .cif that is not a generated publish.cif.
+function findCifFile(projectDir, basename) {
+    const primary = path.join(projectDir, `${basename}.cif`);
+    if (fs.existsSync(primary)) return primary;
+    try {
+        const any = fs.readdirSync(projectDir).find(f => {
+            const lower = f.toLowerCase();
+            return lower.endsWith('.cif') && lower !== 'publish.cif';
+        });
+        if (any) return path.join(projectDir, any);
+    } catch (e) { /* ignore */ }
+    // Last resort: a previously generated publish.cif
+    const pub = path.join(projectDir, 'publish.cif');
+    if (fs.existsSync(pub)) return pub;
+    return null;
+}
+
+// GET /templates
+// Returns the list of user (.cif) and device (.dev) templates.
+app.get('/templates', (req, res) => {
+    try {
+        const users = fs.existsSync(TEMPLATES_DIR)
+            ? fs.readdirSync(TEMPLATES_DIR).filter(f => f.toLowerCase().endsWith('.cif'))
+            : [];
+        const devices = fs.existsSync(DEVICE_DIR)
+            ? fs.readdirSync(DEVICE_DIR).filter(f => f.toLowerCase().endsWith('.dev'))
+            : [];
+        res.json({ users, devices });
+    } catch (error) {
+        console.error('list templates error:', error);
+        res.status(500).json({ error: 'Failed to list templates', details: error.message });
+    }
+});
+
+// GET /projects/:name/cif-values
+// Returns the current values of the "Prepare cif for publication" form fields,
+// so the client can pre-fill the manual form from the project's CIF.
+app.get('/projects/:name/cif-values', (req, res) => {
+    try {
+        const basename = req.params.name;
+        const projectDir = path.join(PROJECTS_DIR, basename);
+        if (!fs.existsSync(projectDir)) return res.status(404).json({ error: 'Project not found' });
+
+        const cifPath = findCifFile(projectDir, basename);
+        if (!cifPath) return res.status(404).json({ error: 'No CIF file found in project' });
+
+        const { kv } = parseCif(fs.readFileSync(cifPath, 'utf8'));
+        const clean = (v) => (v === undefined ? '' : String(v).replace(/^['"]|['"]$/g, '').trim());
+        // The main block renames space-group keys to symmetry keys, so return those.
+        // Fall back to the original _space_group_* names when the symmetry keys are absent.
+        const fields = {
+            '_chemical_formula_moiety': ['_chemical_formula_moiety'],
+            '_exptl_crystal_colour': ['_exptl_crystal_colour'],
+            '_exptl_crystal_description': ['_exptl_crystal_description'],
+            '_exptl_crystal_size_min': ['_exptl_crystal_size_min'],
+            '_exptl_crystal_size_mid': ['_exptl_crystal_size_mid'],
+            '_exptl_crystal_size_max': ['_exptl_crystal_size_max'],
+            '_symmetry_cell_setting': ['_symmetry_cell_setting', '_space_group_crystal_system'],
+            '_symmetry_space_group_name_Hall': ['_symmetry_space_group_name_Hall', '_space_group_name_Hall'],
+            '_cell_formula_units_Z': ['_cell_formula_units_Z'],
+            '_exptl_absorpt_correction_T_min': ['_exptl_absorpt_correction_T_min'],
+            '_exptl_absorpt_correction_T_max': ['_exptl_absorpt_correction_T_max'],
+            '_diffrn_ambient_temperature': ['_diffrn_ambient_temperature'],
+            '_refine_ls_hydrogen_treatment': ['_refine_ls_hydrogen_treatment'],
+        };
+        const values = {};
+        for (const [outKey, srcKeys] of Object.entries(fields)) {
+            let v = '';
+            for (const k of srcKeys) {
+                const c = clean(kv[k]);
+                if (c && c !== '?') { v = c; break; }
+            }
+            values[outKey] = v;
+        }
+        res.json(values);
+    } catch (error) {
+        console.error('cif-values error:', error);
+        res.status(500).json({ error: 'Failed to read CIF values', details: error.message });
+    }
+});
+
+// POST /projects/:name/publish-cif
+// Body (template mode): { mode: 'template', userTemplate: 'MeCLS.cif', deviceTemplate: 'Can_Light_source_BM.dev', extraValues: {...} }
+// Body (manual mode):   { mode: 'manual', includeGlobal: bool, global: {...} }
+// Returns the generated publish CIF as text.
+app.post('/projects/:name/publish-cif', (req, res) => {
+    try {
+        const basename = req.params.name;
+        const projectDir = path.join(PROJECTS_DIR, basename);
+        if (!fs.existsSync(projectDir)) return res.status(404).json({ error: 'Project not found' });
+
+        const cifPath = findCifFile(projectDir, basename);
+        if (!cifPath) return res.status(404).json({ error: 'No CIF file found in project' });
+
+        const cifText = fs.readFileSync(cifPath, 'utf8');
+        const body = req.body || {};
+        let out;
+
+        if (body.mode === 'template') {
+            let userTemplate = '';
+            if (body.userTemplate) {
+                const upath = path.join(TEMPLATES_DIR, path.basename(body.userTemplate));
+                if (!fs.existsSync(upath)) return res.status(404).json({ error: `User template not found: ${body.userTemplate}` });
+                userTemplate = fs.readFileSync(upath, 'utf8');
+            }
+            let deviceValues = {};
+            if (body.deviceTemplate) {
+                const dpath = path.join(DEVICE_DIR, path.basename(body.deviceTemplate));
+                if (!fs.existsSync(dpath)) return res.status(404).json({ error: `Device template not found: ${body.deviceTemplate}` });
+                deviceValues = parseDevFile(fs.readFileSync(dpath, 'utf8'));
+            }
+            out = buildPublishCifFromTemplates(cifText, {
+                userTemplate,
+                deviceValues,
+                extraValues: body.extraValues || {},
+            });
+        } else {
+            out = buildPublishCif(cifText, { includeGlobal: !!body.includeGlobal, global: body.global });
+        }
+
+        // Persist as publish.cif in the project for convenience.
+        fs.writeFileSync(path.join(projectDir, 'publish.cif'), out, 'utf8');
+
+        res.json({ success: true, filename: 'publish.cif', content: out });
+    } catch (error) {
+        console.error('publish-cif error:', error);
+        res.status(500).json({ error: 'Failed to build publish CIF', details: error.message });
+    }
+});
+
+// POST /projects/:name/report-docx
+// Body: { title?: string }
+// Returns the crystallographic report as a DOCX file.
+app.post('/projects/:name/report-docx', async (req, res) => {
+    try {
+        const basename = req.params.name;
+        const projectDir = path.join(PROJECTS_DIR, basename);
+        if (!fs.existsSync(projectDir)) return res.status(404).json({ error: 'Project not found' });
+
+        const cifPath = findCifFile(projectDir, basename);
+        if (!cifPath) return res.status(404).json({ error: 'No CIF file found in project' });
+
+        const cifText = fs.readFileSync(cifPath, 'utf8');
+        const { title } = req.body || {};
+        const buffer = await buildReportDocx(cifText, { title });
+
+        const filename = `${basename}_report.docx`;
+        res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
+        res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+        res.send(buffer);
+    } catch (error) {
+        console.error('report-docx error:', error);
+        res.status(500).json({ error: 'Failed to build report', details: error.message });
     }
 });
 

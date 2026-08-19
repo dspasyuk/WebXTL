@@ -137,7 +137,16 @@
                                 data-bs-toggle="dropdown">Calculate</a>
                             <ul class="dropdown-menu">
                                 <li><a class="dropdown-item" href="#" id="menu-refine">Refine Structure</a></li>
+                                <li><a class="dropdown-item" href="#" id="menu-refine-weight">Weight (GOOF) Refinement...</a></li>
                                 <li><a class="dropdown-item" href="#" id="menu-rsr">Real Space Refinement</a></li>
+                            </ul>
+                        </li>
+                        <li class="nav-item dropdown">
+                            <a class="nav-link dropdown-toggle" href="#" id="publishDropdown" role="button"
+                                data-bs-toggle="dropdown">Publish</a>
+                            <ul class="dropdown-menu">
+                                <li><a class="dropdown-item" href="#" id="menu-publish-cif">Create Publish CIF...</a></li>
+                                <li><a class="dropdown-item" href="#" id="menu-report-docx">Crystallographic Report (DOCX)...</a></li>
                             </ul>
                         </li>
                         <li class="nav-item dropdown">
@@ -641,11 +650,192 @@
                     <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
                 </div>
                 <div class="modal-body">
+                    <div id="results-summary" class="mb-3"></div>
                     <pre id="results-content" class="bg-light p-3 border rounded"
                         style="font-family: monospace; white-space: pre-wrap;"></pre>
                 </div>
                 <div class="modal-footer">
                     <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Publish Modal -->
+    <div class="modal fade" id="publishModal" tabindex="-1" aria-hidden="true">
+        <div class="modal-dialog modal-lg modal-dialog-scrollable">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="publishModalTitle">Publish</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                    <div id="publish-project-info" class="alert alert-info py-2 small"></div>
+
+                    <!-- Publish CIF options -->
+                    <div id="publish-cif-section">
+                        <h6 class="text-muted mb-2">Publish CIF</h6>
+
+                        <!-- Templates -->
+                        <div class="row g-2 mb-2">
+                            <div class="col-12">
+                                <label class="form-label small mb-1">User / author template
+                                    (<code>data_global</code>)</label>
+                                <select class="form-select form-select-sm" id="pub-user-template">
+                                    <option value="">-- none --</option>
+                                </select>
+                            </div>
+                            <div class="col-12">
+                                <label class="form-label small mb-1">Instrument / device template</label>
+                                <select class="form-select form-select-sm" id="pub-device-template">
+                                    <option value="">-- none --</option>
+                                </select>
+                            </div>
+                        </div>
+                        <p class="small text-muted mb-2">The user template supplies the
+                            <code>data_global</code> block (author, references, abstract); the device template
+                            fills in the instrument, diffraction and computing values. The fields below
+                            override individual values in the CIF.</p>
+
+                        <!-- Crystal Setting + Other Settings (mirrors "Prepare cif for publication") -->
+                        <div class="row g-3">
+                            <div class="col-md-6">
+                                <fieldset class="border rounded p-2">
+                                    <legend class="fs-small text-muted px-1">Crystal Setting</legend>
+                                    <div class="row g-2">
+                                        <div class="col-6">
+                                            <label class="form-label small mb-1">Colour</label>
+                                            <select class="form-select form-select-sm" id="pub-colour">
+                                                <option value="">--</option>
+                                                <option>Yellow</option>
+                                                <option>Colourless</option>
+                                                <option>Black</option>
+                                                <option>Pink</option>
+                                                <option>Purple</option>
+                                                <option>Orange</option>
+                                                <option>Grey</option>
+                                                <option>White</option>
+                                                <option>Green</option>
+                                                <option>Red</option>
+                                                <option>Blue</option>
+                                                <option>Aqua</option>
+                                                <option>Brown</option>
+                                            </select>
+                                        </div>
+                                        <div class="col-6">
+                                            <label class="form-label small mb-1">Crystal shape</label>
+                                            <select class="form-select form-select-sm" id="pub-shape">
+                                                <option value="">--</option>
+                                                <option>block</option>
+                                                <option>prism</option>
+                                                <option>needle</option>
+                                                <option>cube</option>
+                                                <option>sphere</option>
+                                                <option>plate</option>
+                                            </select>
+                                        </div>
+                                        <div class="col-12">
+                                            <label class="form-label small mb-1">Moiety formula</label>
+                                            <input type="text" class="form-control form-control-sm"
+                                                id="pub-moiety" placeholder="e.g. C12 H16 N2 O4">
+                                        </div>
+                                        <div class="col-4">
+                                            <label class="form-label small mb-1">Size min (mm)</label>
+                                            <input type="text" class="form-control form-control-sm"
+                                                id="pub-size-min">
+                                        </div>
+                                        <div class="col-4">
+                                            <label class="form-label small mb-1">Size mid (mm)</label>
+                                            <input type="text" class="form-control form-control-sm"
+                                                id="pub-size-mid">
+                                        </div>
+                                        <div class="col-4">
+                                            <label class="form-label small mb-1">Size max (mm)</label>
+                                            <input type="text" class="form-control form-control-sm"
+                                                id="pub-size-max">
+                                        </div>
+                                        <div class="col-6">
+                                            <label class="form-label small mb-1">Cell setting</label>
+                                            <select class="form-select form-select-sm" id="pub-cell-setting">
+                                                <option value="">--</option>
+                                                <option>triclinic</option>
+                                                <option>monoclinic</option>
+                                                <option>orthorhombic</option>
+                                                <option>tetragonal</option>
+                                                <option>hexagonal</option>
+                                                <option>cubic</option>
+                                            </select>
+                                        </div>
+                                        <div class="col-6">
+                                            <label class="form-label small mb-1">Space group (H-M)</label>
+                                            <input type="text" class="form-control form-control-sm"
+                                                id="pub-space-hm" placeholder="e.g. P 21/c">
+                                        </div>
+                                        <div class="col-6">
+                                            <label class="form-label small mb-1">Z</label>
+                                            <input type="text" class="form-control form-control-sm"
+                                                id="pub-z">
+                                        </div>
+                                    </div>
+                                </fieldset>
+                            </div>
+                            <div class="col-md-6">
+                                <fieldset class="border rounded p-2">
+                                    <legend class="fs-small text-muted px-1">Other Settings</legend>
+                                    <div class="row g-2">
+                                        <div class="col-6">
+                                            <label class="form-label small mb-1">abs_T_min</label>
+                                            <input type="text" class="form-control form-control-sm"
+                                                id="pub-abs-min">
+                                        </div>
+                                        <div class="col-6">
+                                            <label class="form-label small mb-1">abs_T_max</label>
+                                            <input type="text" class="form-control form-control-sm"
+                                                id="pub-abs-max">
+                                        </div>
+                                        <div class="col-6">
+                                            <label class="form-label small mb-1">Temperature (K)</label>
+                                            <input type="text" class="form-control form-control-sm"
+                                                id="pub-temp">
+                                        </div>
+                                        <div class="col-6">
+                                            <label class="form-label small mb-1">Hydrogen treatment</label>
+                                            <select class="form-select form-select-sm" id="pub-h-treat">
+                                                <option value="">--</option>
+                                                <option>constr</option>
+                                                <option>mixed</option>
+                                                <option>calc</option>
+                                                <option>none</option>
+                                            </select>
+                                        </div>
+                                    </div>
+                                </fieldset>
+                            </div>
+                        </div>
+                    </div>
+
+                    <hr>
+
+                    <!-- Report options -->
+                    <div id="publish-report-section">
+                        <h6 class="text-muted mb-2">Crystallographic Report (DOCX)</h6>
+                        <div class="mb-2">
+                            <label class="form-label small mb-1">Report title (optional)</label>
+                            <input type="text" class="form-control form-control-sm" id="report-title"
+                                placeholder="Defaults to the chemical name">
+                        </div>
+                        <p class="small text-muted mb-0">Generates a Word document with crystal data,
+                            refinement statistics, atomic coordinates, bond lengths, bond angles and hydrogen
+                            bonds.</p>
+                    </div>
+
+                    <div id="publish-status" class="mt-3 small"></div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+                    <button type="button" class="btn btn-outline-primary" id="btn-generate-report">Generate
+                        Report (DOCX)</button>
+                    <button type="button" class="btn btn-primary" id="btn-generate-cif">Create Publish CIF</button>
                 </div>
             </div>
         </div>

@@ -1,0 +1,196 @@
+data_global
+
+
+#==============================================================================
+#                          1. SUBMISSION DETAILS
+#==============================================================================
+
+
+
+_publ_contact_author_name   'Linxtl User'
+
+_publ_contact_author_address
+;
+      Universit\'e de Montr\'eal
+      D\'epartement de Chimie
+      C.P. 6128, Succ. Centre-ville
+      Montr\'eal, Qu\'ebec
+      Canada, H3C 3J7
+;
+
+
+_publ_contact_author_phone        '1-111-111-1111'
+_publ_contact_author_fax          '1-111-111-1111'
+_publ_contact_author_email        'linxtl.user@user.com'
+
+
+
+#==============================================================================
+#                   2. PROCESSING SUMMARY (IUCr Office Use Only)
+#==============================================================================
+
+
+_journal_date_recd_electronic     ?
+
+_journal_date_to_coeditor         ?
+_journal_date_from_coeditor       ?
+_journal_date_accepted            ?
+
+_journal_date_printers_first      ?
+_journal_date_printers_final      ?
+_journal_date_proofs_out          ?
+_journal_date_proofs_in           ?
+
+_journal_coeditor_name            ?
+_journal_coeditor_code            ?
+_journal_coeditor_notes
+; ?
+;
+
+_journal_techeditor_code          ?
+_journal_techeditor_notes
+; ?
+;
+
+_journal_coden_ASTM               ?
+_journal_name_full                ?
+_journal_year                     ?
+_journal_volume                   ?
+_journal_issue                    ?
+_journal_page_first               ?
+_journal_page_last                ?
+
+_journal_suppl_publ_number        ?
+_journal_suppl_publ_pages         ?
+
+#==============================================================================
+#                        3. TITLE AND AUTHOR LIST
+#==============================================================================
+
+
+_publ_section_title
+;
+Structure of Linxtl compound  
+;
+
+# The loop structure below should contain the names and addresses of all
+# authors, in the required order of publication. Repeat as necessary.
+
+loop_
+    _publ_author_name
+    _publ_author_address
+          'linxtl, user'
+;
+      D\'epartement de Chimie
+      Universit\'e de Montr\'eal
+      C.P. 6128, Succ. Centre-ville,
+      Montr\'eal, Qu\'ebec
+      Canada H3C 3J7
+
+;
+      'linxtl, user'
+;
+       D\'epartement de Chimie
+       Universit\'e de Montr\'eal
+       C.P. 6128, Succ. Centre-ville,
+       Montr\'eal, Qu\'ebec
+       Canada H3C 3J7
+
+;
+
+  
+#==============================================================================
+#                              4. TEXT
+#==============================================================================
+
+
+_publ_section_abstract
+;
+ Here should be written a short abstract
+;
+
+
+_publ_section_comment
+;
+ Here should be written the text  of the article
+;
+
+
+
+
+
+_publ_section_exptl_prep
+;
+ Small details about the preparation of the compound.
+;
+
+
+
+
+_publ_section_exptl_refinement
+;
+
+All non-H atoms were refined by full-matrix least-squares
+with anisotropic displacement parameters. The H atoms were 
+generated geometrically (C-H 0.93 to 0.98, N-H 0.86 and O-H 0.82\%A)
+and were included in the refinement in the riding model approximation; 
+their temperature factors were set to 1.5 times those of the 
+equivalent isotropic temperature factors of the parent site (methyl) 
+and 1.2 times for others. 
+A final verification of possible voids was performed using the VOID routine 
+of the PLATON program (Spek, 2000). 
+;
+
+
+
+_publ_section_figure_captions
+;
+Fig 1 Ortep view of the title compound.
+      Thermal ellipsoids are shown at 30% probability levels.
+;
+
+
+
+_publ_section_table_legends
+;
+Table 1.  Selected geometric parameters (\%A, \%) for the title compound.
+;
+
+
+_publ_section_references
+;
+ Bruker (1997). SHELXTL (1997). Release 5.10; The Complete Software Package 
+ for Single Crystal Structure Determination.  Bruker AXS Inc.,
+ Madison, USA.
+
+ Bruker (1999a). SAINT Release 6.06. Integration Software for Single Crystal 
+ Data. Bruker AXS Inc., Madison, USA.
+
+ Bruker (1999b). SMART Release 5.059; Bruker Molecular Analysis Research Tool,
+ Bruker AXS Inc., Madison, USA.
+
+ Flack, H. D. (1983). Acta Cryst. A39, 876-881.
+
+ Flack, H. D. and Schwarzenbach, D. (1988). Acta Cryst. A44, 499-506.
+
+ Sheldrick, G. M. (1986). SHELXS86. Program for Crystal Structure
+ solution. University of G\"ottingen, Germany.
+
+ Sheldrick, G. M. (1996). SADABS, Bruker Area Detector Absorption Corrections.
+ Bruker AXS Inc., Madison, USA.
+
+ Sheldrick, G. M. (1997a). SHELXS97. Program for Crystal Structure
+ solution. University of G\"ottingen, Germany.
+
+ Sheldrick, G. M. (1997b). SHELXL97. Program for crystal structure
+ refinement. University of G\"ottingen, Germany.
+
+ Spek, A. L. (2000). PLATON,  2000 version; Molecular Geometry Program,
+ University of Utrecht, Utrecht, Holland.
+;
+_publ_section_acknowledgements
+;
+We are grateful to the Natural Sciences and Engineering Research
+Council of Canada and the Minist\`ere de l'Education du Qu\'ebec
+for financial support.
+;

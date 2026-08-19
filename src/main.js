@@ -193,6 +193,18 @@ class WMOLApp {
                 localStorage.setItem('webxtl_loaded_type', this.state.loadedType);
                 localStorage.setItem('webxtl_loaded_filename', this.state.loadedFilename || '');
             }
+            if (this.state.currentProject) {
+                localStorage.setItem('webxtl_current_project', this.state.currentProject);
+            }
+            // Persist open file tabs (content + metadata) so they survive a refresh.
+            const tabs = [];
+            for (const [name, t] of Object.entries(this.state.fileTabs || {})) {
+                const content = t.editor ? t.editor.getValue() : '';
+                if (content.length < 3 * 1024 * 1024) {
+                    tabs.push({ filename: t.filename, type: t.type, project: t.project, content });
+                }
+            }
+            localStorage.setItem('webxtl_file_tabs', JSON.stringify(tabs));
         } catch(e) { console.warn('localStorage save error:', e.message); }
         try {
             if (this.state.hklContent && this.state.hklContent.length < 3 * 1024 * 1024) {
@@ -215,6 +227,7 @@ class WMOLApp {
         const hklContent = localStorage.getItem('webxtl_hkl_content');
         const hklName = localStorage.getItem('webxtl_hkl_name');
         const fcfContent = localStorage.getItem('webxtl_fcf_content');
+        const currentProject = localStorage.getItem('webxtl_current_project');
 
         if (!resContent || !loadedType) return;
 
@@ -222,6 +235,7 @@ class WMOLApp {
         this.state.loadedContent = resContent;
         this.state.loadedType = loadedType;
         this.state.loadedFilename = filename || null;
+        if (currentProject) this.state.currentProject = currentProject;
 
         const editor = this.state.editors[loadedType] || this.state.editors.res;
         if (editor) {
@@ -244,6 +258,21 @@ class WMOLApp {
 
         if (fcfContent) {
             setTimeout(() => this.renderMap(fcfContent), 200);
+        }
+
+        // Restore open file tabs (hkl, fcf, pdb, lst, ...).
+        try {
+            const rawTabs = localStorage.getItem('webxtl_file_tabs');
+            if (rawTabs) {
+                const tabs = JSON.parse(rawTabs);
+                for (const t of tabs) {
+                    if (t && t.filename) {
+                        this.openFileTab(t.filename, t.content, t.type, t.project || null, false);
+                    }
+                }
+            }
+        } catch (e) {
+            console.warn('Failed to restore file tabs:', e.message);
         }
     }
 
@@ -490,6 +519,216 @@ class WMOLApp {
         const res = await fetch(this.getApiUrl(`/projects/${projectName}/files/${filename}`));
         if (!res.ok) throw new Error('Failed to fetch project file');
         return res.text();
+    }
+
+    // --- Publish Methods ---
+
+    async apiListTemplates() {
+        const res = await fetch(this.getApiUrl('/templates'));
+        if (!res.ok) throw new Error('Failed to list templates');
+        return res.json();
+    }
+
+    async apiGetCifValues(project) {
+        const res = await fetch(this.getApiUrl(`/projects/${project}/cif-values`));
+        if (!res.ok) throw new Error('Failed to read CIF values');
+        return res.json();
+    }
+
+    openPublishModal(mode) {
+        const project = this.state.currentProject;
+        if (!project) {
+            alert('Please open a server project first (Project > Project Manager).');
+            return;
+        }
+        const modalEl = document.getElementById('publishModal');
+        const info = document.getElementById('publish-project-info');
+        info.textContent = `Project: ${project}`;
+        document.getElementById('publish-status').innerHTML = '';
+
+        // Show/hide sections based on mode
+        const cifSection = document.getElementById('publish-cif-section');
+        const reportSection = document.getElementById('publish-report-section');
+        const btnCif = document.getElementById('btn-generate-cif');
+        const btnReport = document.getElementById('btn-generate-report');
+        const title = document.getElementById('publishModalTitle');
+
+        if (mode === 'cif') {
+            title.textContent = 'Create Publish CIF';
+            cifSection.style.display = '';
+            reportSection.style.display = 'none';
+            btnCif.style.display = '';
+            btnReport.style.display = 'none';
+            this.loadPublishTemplates();
+            this.loadPublishFormValues(project);
+        } else {
+            title.textContent = 'Crystallographic Report (DOCX)';
+            cifSection.style.display = 'none';
+            reportSection.style.display = '';
+            btnCif.style.display = 'none';
+            btnReport.style.display = '';
+        }
+
+        new bootstrap.Modal(modalEl).show();
+    }
+
+    async loadPublishTemplates() {
+        const userSel = document.getElementById('pub-user-template');
+        const devSel = document.getElementById('pub-device-template');
+        if (!userSel || !devSel) return;
+        try {
+            const { users, devices } = await this.apiListTemplates();
+            const prevUser = userSel.value;
+            const prevDev = devSel.value;
+            userSel.innerHTML = '<option value="">-- none --</option>' +
+                users.map(u => `<option value="${u}">${u}</option>`).join('');
+            devSel.innerHTML = '<option value="">-- none --</option>' +
+                devices.map(d => `<option value="${d}">${d}</option>`).join('');
+            if (prevUser && users.includes(prevUser)) userSel.value = prevUser;
+            if (prevDev && devices.includes(prevDev)) devSel.value = prevDev;
+        } catch (e) {
+            console.error('Failed to load templates:', e);
+        }
+    }
+
+    // Pre-fill the Crystal Setting / Other Settings form from the project CIF.
+    async loadPublishFormValues(project) {
+        try {
+            const v = await this.apiGetCifValues(project);
+            const set = (id, val) => {
+                const el = document.getElementById(id);
+                if (el && val) el.value = val;
+            };
+            // Selects: only set if the option exists.
+            const setSel = (id, val) => {
+                const el = document.getElementById(id);
+                if (!el || !val) return;
+                const match = Array.from(el.options).some(o => o.value === val);
+                if (match) el.value = val;
+            };
+            setSel('pub-colour', v._exptl_crystal_colour);
+            setSel('pub-shape', v._exptl_crystal_description);
+            set('pub-moiety', v._chemical_formula_moiety);
+            set('pub-size-min', v._exptl_crystal_size_min);
+            set('pub-size-mid', v._exptl_crystal_size_mid);
+            set('pub-size-max', v._exptl_crystal_size_max);
+            setSel('pub-cell-setting', v._symmetry_cell_setting);
+            set('pub-space-hm', v._symmetry_space_group_name_Hall);
+            set('pub-z', v._cell_formula_units_Z);
+            set('pub-abs-min', v._exptl_absorpt_correction_T_min);
+            set('pub-abs-max', v._exptl_absorpt_correction_T_max);
+            set('pub-temp', v._diffrn_ambient_temperature);
+            setSel('pub-h-treat', v._refine_ls_hydrogen_treatment);
+        } catch (e) {
+            console.error('Failed to pre-fill publish form:', e);
+        }
+    }
+
+    // Collect the form values into a key->value map (empty values omitted).
+    collectPublishFormValues() {
+        const val = (id) => (document.getElementById(id)?.value || '').trim();
+        const map = {
+            '_chemical_formula_moiety': val('pub-moiety'),
+            '_exptl_crystal_colour': val('pub-colour'),
+            '_exptl_crystal_description': val('pub-shape'),
+            '_exptl_crystal_size_min': val('pub-size-min'),
+            '_exptl_crystal_size_mid': val('pub-size-mid'),
+            '_exptl_crystal_size_max': val('pub-size-max'),
+            '_symmetry_cell_setting': val('pub-cell-setting'),
+            '_symmetry_space_group_name_Hall': val('pub-space-hm'),
+            '_cell_formula_units_Z': val('pub-z'),
+            '_exptl_absorpt_correction_T_min': val('pub-abs-min'),
+            '_exptl_absorpt_correction_T_max': val('pub-abs-max'),
+            '_diffrn_ambient_temperature': val('pub-temp'),
+            '_refine_ls_hydrogen_treatment': val('pub-h-treat'),
+        };
+        const out = {};
+        for (const [k, v] of Object.entries(map)) {
+            if (v && v !== '?') out[k] = v;
+        }
+        return out;
+    }
+
+    wirePublishModal() {
+        const btnCif = document.getElementById('btn-generate-cif');
+        if (btnCif) btnCif.addEventListener('click', () => this.generatePublishCif());
+
+        const btnReport = document.getElementById('btn-generate-report');
+        if (btnReport) btnReport.addEventListener('click', () => this.generateReportDocx());
+    }
+
+    setPublishStatus(html, isError = false) {
+        const el = document.getElementById('publish-status');
+        if (el) el.innerHTML = `<span class="${isError ? 'text-danger' : 'text-success'}">${html}</span>`;
+    }
+
+    async generatePublishCif() {
+        const project = this.state.currentProject;
+        if (!project) return;
+
+        const body = {
+            mode: 'template',
+            userTemplate: document.getElementById('pub-user-template').value,
+            deviceTemplate: document.getElementById('pub-device-template').value,
+            extraValues: this.collectPublishFormValues(),
+        };
+
+        this.setPublishStatus('Generating publish CIF...');
+        try {
+            const res = await fetch(this.getApiUrl(`/projects/${project}/publish-cif`), {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body),
+            });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.error || 'Failed to generate publish CIF');
+
+            this.downloadText(data.content, 'publish.cif');
+            this.setPublishStatus('Publish CIF created and downloaded (also saved to project as publish.cif).');
+        } catch (e) {
+            this.setPublishStatus('Error: ' + e.message, true);
+        }
+    }
+
+    async generateReportDocx() {
+        const project = this.state.currentProject;
+        if (!project) return;
+        const title = document.getElementById('report-title').value.trim();
+
+        this.setPublishStatus('Generating DOCX report...');
+        try {
+            const res = await fetch(this.getApiUrl(`/projects/${project}/report-docx`), {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ title }),
+            });
+            if (!res.ok) {
+                let msg = 'Failed to generate report';
+                try { msg = (await res.json()).error || msg; } catch (_) { /* ignore */ }
+                throw new Error(msg);
+            }
+            const blob = await res.blob();
+            this.downloadBlob(blob, `${project}_report.docx`);
+            this.setPublishStatus('Report generated and downloaded.');
+        } catch (e) {
+            this.setPublishStatus('Error: ' + e.message, true);
+        }
+    }
+
+    downloadText(text, filename) {
+        const blob = new Blob([text], { type: 'text/plain' });
+        this.downloadBlob(blob, filename);
+    }
+
+    downloadBlob(blob, filename) {
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
     }
 
     async openProjectManager() {
@@ -879,9 +1118,7 @@ class WMOLApp {
             const modalEl = document.getElementById('projectManagerModal');
             const modal = bootstrap.Modal.getInstance(modalEl);
             if (modal) modal.hide();
-            
-            alert(`Project '${name}' loaded successfully (including associated maps if present).`);
-             
+
         } catch (err) {
             alert(`Error loading project: ${err.message}`);
         }
@@ -2282,6 +2519,22 @@ class WMOLApp {
 
         const menuRefine = document.getElementById('menu-refine');
         if (menuRefine) menuRefine.addEventListener('click', refineStructure);
+
+        const menuRefineWeight = document.getElementById('menu-refine-weight');
+        if (menuRefineWeight) {
+            menuRefineWeight.addEventListener('click', () => this.refineWeight());
+        }
+
+        // --- Publish Menu ---
+        const menuPublishCif = document.getElementById('menu-publish-cif');
+        if (menuPublishCif) {
+            menuPublishCif.addEventListener('click', () => this.openPublishModal('cif'));
+        }
+        const menuReportDocx = document.getElementById('menu-report-docx');
+        if (menuReportDocx) {
+            menuReportDocx.addEventListener('click', () => this.openPublishModal('report'));
+        }
+        this.wirePublishModal();
 
         // --- Select Menu ---
         const menuDeselectAll = document.getElementById('menu-deselect-all');
@@ -4311,9 +4564,97 @@ class WMOLApp {
         document.body.style.cursor = 'default';
     }
 
+    // Parse the SHELXL .lst output and return HTML for a highlighted summary of
+    // the key refinement statistics (R1, wR2, GooF, Flack, diff peak/hole, ...).
+    buildRefinementSummary(lstText) {
+        if (!lstText) return '';
+        // Return the last match array (with capture groups) for a regex.
+        const last = (re) => {
+            const m = lstText.match(re);
+            return m || null;
+        };
+
+        // R1 (gt) and R1 (all) from the final summary line.
+        const r1Line = last(/R1\s*=\s*([\d.]+)\s+for\s+\d+\s+Fo\s*>\s*\d+sig\(Fo\)\s+and\s+([\d.]+)\s+for\s+all\s+\d+\s+data/);
+        const r1gt = r1Line ? r1Line[1] : null;
+        const r1all = r1Line ? r1Line[2] : null;
+
+        // R1 for the merged reflections used for Fourier.
+        const r1four = last(/R1\s*=\s*([\d.]+)\s+for\s+\d+\s+unique reflections after merging for Fourier/);
+
+        // wR2 and GooF from the final "for all data" line.
+        const wrLine = last(/wR2\s*=\s*([\d.]+),\s+GooF\s*=\s*S\s*=\s*([\d.]+)/);
+        const wr2 = wrLine ? wrLine[1] : null;
+        const goof = wrLine ? wrLine[2] : null;
+
+        // Flack parameter (classical fit).
+        const flack = last(/Flack\s*x\s*=\s*([\d.\-()]+)/);
+
+        // Difference map peak / hole.
+        const peak = last(/Highest\s+peak\s+([\d.\-]+)/);
+        const hole = last(/Deepest\s+hole\s+([\d.\-]+)/);
+
+        // Final max shift.
+        const shiftLine = last(/Mean shift\/esd\s*=\s*([\d.\-]+)\s+Maximum\s*=\s*([\d.\-]+)/);
+        const shiftMax = shiftLine ? shiftLine[2] : null;
+
+        // Grade a numeric value as 'good' (green), 'ok' (yellow) or 'bad' (red).
+        const g = {
+            r1gt:   v => v < 0.05 ? 'good' : v < 0.10 ? 'ok' : 'bad',
+            r1all:  v => v < 0.08 ? 'good' : v < 0.15 ? 'ok' : 'bad',
+            r1four: v => v < 0.05 ? 'good' : v < 0.10 ? 'ok' : 'bad',
+            wr2:    v => v < 0.15 ? 'good' : v < 0.25 ? 'ok' : 'bad',
+            goof:   v => Math.abs(v - 1) <= 0.1 ? 'good' : Math.abs(v - 1) <= 0.2 ? 'ok' : 'bad',
+            flack:  v => { const d = Math.abs(v - 0.5); return d > 0.40 ? 'good' : d > 0.25 ? 'ok' : 'bad'; },
+            peak:   v => v < 1.0 ? 'good' : v < 2.0 ? 'ok' : 'bad',
+            hole:   v => v > -1.0 ? 'good' : v > -2.0 ? 'ok' : 'bad',
+            shift:  v => Math.abs(v) < 0.5 ? 'good' : Math.abs(v) < 1.0 ? 'ok' : 'bad',
+        };
+
+        const items = [
+            { label: 'R1 (gt)', value: r1gt, grade: r1gt !== null ? g.r1gt(parseFloat(r1gt)) : null },
+            { label: 'R1 (all)', value: r1all, grade: r1all !== null ? g.r1all(parseFloat(r1all)) : null },
+            { label: 'R1 (Fourier)', value: r1four ? r1four[1] : null, grade: r1four ? g.r1four(parseFloat(r1four[1])) : null },
+            { label: 'wR2', value: wr2, grade: wr2 !== null ? g.wr2(parseFloat(wr2)) : null },
+            { label: 'GooF', value: goof, grade: goof !== null ? g.goof(parseFloat(goof)) : null },
+            { label: 'Flack x', value: flack ? flack[1] : null, grade: flack ? g.flack(parseFloat(flack[1])) : null },
+            { label: 'Peak', value: peak ? peak[1] : null, unit: 'e/Å³', grade: peak ? g.peak(parseFloat(peak[1])) : null },
+            { label: 'Hole', value: hole ? hole[1] : null, unit: 'e/Å³', grade: hole ? g.hole(parseFloat(hole[1])) : null },
+            { label: 'Max shift', value: shiftMax, unit: 'esd', grade: shiftMax !== null ? g.shift(parseFloat(shiftMax)) : null },
+        ].filter(i => i.value !== null && i.value !== '');
+
+        if (!items.length) return '';
+
+        const color = {
+            good: 'border-success text-success',
+            ok: 'border-warning text-warning-emphasis',
+            bad: 'border-danger text-danger',
+        };
+
+        const cells = items.map(i => {
+            const accent = i.grade ? color[i.grade] : 'border-secondary-subtle text-body';
+            const unit = i.unit ? `<span class="text-muted fw-normal small"> ${i.unit}</span>` : '';
+            return `<div class="border rounded p-2 text-center bg-white ${accent}">
+                        <div class="text-muted small text-uppercase">${i.label}</div>
+                        <div class="fw-bold fs-6">${i.value}${unit}</div>
+                    </div>`;
+        }).join('');
+
+        return `<div class="border rounded p-2 bg-light">
+                    <div class="fw-semibold small text-uppercase text-muted mb-2">Refinement summary
+                        <span class="ms-2 fw-normal text-muted normal-case">
+                            <span class="text-success">●</span> good
+                            <span class="text-warning-emphasis ms-1">●</span> ok
+                            <span class="text-danger ms-1">●</span> poor
+                        </span>
+                    </div>
+                    <div class="d-grid gap-2" style="grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));">${cells}</div>
+                </div>`;
+    }
+
     async refineStructure() {
         if (!this.state.editors.res) return;
-        
+
         const resContent = this.state.editors.res.getValue();
         if (!resContent) {
             alert("No structure loaded to refine.");
@@ -4334,22 +4675,68 @@ class WMOLApp {
         if (this.state.hklName) {
             baseName = this.state.hklName.replace(/\.hkl$/i, '');
         }
-        
+
         // Sanitize basename to be safe
         baseName = baseName.replace(/[^a-zA-Z0-9_-]/g, '_');
 
         formData.append('ins', insBlob, baseName + '.ins');
         formData.append('hkl', hklBlob, baseName + '.hkl');
 
-        try {
-            // Show loading state
-            const btn = document.getElementById('tool-refine');
-            const originalIcon = btn ? btn.innerHTML : '';
-            if (btn) {
-                btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i>';
-                btn.disabled = true;
-            }
+        await this.runRefinement(formData, 'tool-refine');
+    }
 
+    // Weight (GOOF) refinement: prompts for the number of SHELXL cycles (default 3)
+    // and runs that many refinement cycles to drive the goodness-of-fit toward 1.
+    async refineWeight() {
+        if (!this.state.editors.res) return;
+
+        const resContent = this.state.editors.res.getValue();
+        if (!resContent) {
+            alert("No structure loaded to refine.");
+            return;
+        }
+
+        if (!this.state.hklContent) {
+            alert("No HKL file loaded. Please load an .hkl file first.");
+            return;
+        }
+
+        // Prompt for the number of SHELXL refinement cycles (default 3).
+        const cyclesInput = prompt("Weight (GOOF) refinement — number of SHELXL cycles:", "3");
+        if (cyclesInput === null) return; // cancelled
+        let cycles = parseInt(cyclesInput, 10);
+        if (!Number.isFinite(cycles) || cycles < 1) cycles = 1;
+        if (cycles > 50) cycles = 50;
+
+        const formData = new FormData();
+        const insBlob = new Blob([resContent], { type: 'text/plain' });
+        const hklBlob = new Blob([this.state.hklContent], { type: 'text/plain' });
+
+        let baseName = 'structure';
+        if (this.state.hklName) {
+            baseName = this.state.hklName.replace(/\.hkl$/i, '');
+        }
+        baseName = baseName.replace(/[^a-zA-Z0-9_-]/g, '_');
+
+        formData.append('ins', insBlob, baseName + '.ins');
+        formData.append('hkl', hklBlob, baseName + '.hkl');
+        formData.append('cycles', String(cycles));
+        formData.append('mode', 'weight');
+
+        await this.runRefinement(formData, 'tool-refine');
+    }
+
+    // Shared refinement runner: POSTs form data to the server, updates the RES/LST
+    // editors and shows the results modal. `btnId` is the toolbar button to spin.
+    async runRefinement(formData, btnId) {
+        const btn = document.getElementById(btnId);
+        const originalIcon = btn ? btn.innerHTML : '';
+        if (btn) {
+            btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i>';
+            btn.disabled = true;
+        }
+
+        try {
             const response = await fetch(this.state.preferences.general.serverUrl, {
                 method: 'POST',
                 body: formData,
@@ -4362,7 +4749,7 @@ class WMOLApp {
 
             const data = await response.json();
             console.log("Server Response Data:", data);
-            
+
             if (data.error) {
                 throw new Error(data.error);
             }
@@ -4375,7 +4762,6 @@ class WMOLApp {
                 console.log("Refinement successful");
             }
 
-            // Log LST output
             // Log LST output
             if (data.files && data.files.lst) {
                 console.log("--- SHELXL OUTPUT ---");
@@ -4395,11 +4781,15 @@ class WMOLApp {
 
                 // Show Results Modal
                 const resultsContent = document.getElementById('results-content');
+                const resultsSummary = document.getElementById('results-summary');
                 const modalEl = document.getElementById('resultsModal');
-                
+
                 if (resultsContent && modalEl) {
                     try {
                         resultsContent.textContent = combinedOutput;
+                        if (resultsSummary) {
+                            resultsSummary.innerHTML = this.buildRefinementSummary(data.files.lst || '');
+                        }
                         const resultsModal = new bootstrap.Modal(modalEl);
                         resultsModal.show();
                     } catch (err) {
@@ -4415,10 +4805,8 @@ class WMOLApp {
             console.error("Refinement failed:", e);
             alert("Refinement failed: " + e.message);
         } finally {
-            // Restore button state
-            const btn = document.getElementById('tool-refine');
             if (btn) {
-                btn.innerHTML = '<i class="fa-solid fa-flask"></i>';
+                btn.innerHTML = originalIcon || '<i class="fa-solid fa-flask"></i>';
                 btn.disabled = false;
             }
         }

@@ -1,0 +1,13 @@
+_diffrn_radiation_type            synchrotron
+_diffrn_measurement_method       '\k and \w scans'
+_diffrn_source                     synchrotron  
+_diffrn_measurement_device_type   'Rayonix MX300HE CCD area detector'
+_diffrn_radiation_source          'bending magnet' 
+_diffrn_radiation_monochromator   'bending magnet'
+_computing_data_collection        'MxDC, (Fodje, 2012)'
+_computing_cell_refinement        'Bruker SAINT'
+_computing_data_reduction         'Bruker SAINT'  
+_computing_structure_solution     'SHELXL2013 (Sheldrick, 2013)'
+_computing_structure_refinement   'SHELXL2013 (Sheldrick, 2013)'
+_computing_molecular_graphics     'ShelXle (Hübschle, 2011)'
+_computing_publication_material   'LinXTL v.  5.5.2 (Spasyuk, 2009)' 

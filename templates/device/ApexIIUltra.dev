@@ -1,0 +1,6 @@
+_diffrn_radiation_wavelength      0.71073 
+_diffrn_radiation_type            MoK\a 
+_diffrn_radiation_source          'TXS X-ray Generator' 
+_diffrn_radiation_monochromator   'Goebel-mirror' 
+_diffrn_measurement_device_type  'Bruker APEX-II CCD'
+_diffrn_measurement_method       '\f and \w scans'

@@ -7,3 +7,4 @@ versions
 test
 .DS_Store
 *.log
+session-*

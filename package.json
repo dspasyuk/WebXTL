@@ -1,11 +1,13 @@
 {
   "name": "wmol",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "type": "module",
   "main": "bootstrap.bundle.min.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "dev": "vite",
+    "dev": "concurrently -n server,client -c blue,green \"npm:server\" \"npm:client\"",
+    "server": "node server.js",
+    "client": "vite",
     "build": "vite build",
     "preview": "vite preview"
   },
@@ -18,11 +20,15 @@
     "ace-builds": "^1.43.5",
     "bootstrap": "^5.3.8",
     "cors": "^2.8.5",
+    "docx": "^9.7.1",
     "express": "^5.2.1",
     "multer": "^2.0.2",
     "split-grid": "^1.0.11",
     "three": "^0.182.0",
     "uuid": "^13.0.0",
     "vite": "^7.3.0"
+  },
+  "devDependencies": {
+    "concurrently": "^10.0.5"
   }
 }

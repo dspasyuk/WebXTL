@@ -13,7 +13,7 @@ import { fileURLToPath } from 'node:url';
 import { parseHkl } from './hkl-parser.js';
 import { buildLaueGroups, sgLaueClass } from './laue.js';
 import { analyzeSpaceGroup, crystalSystemFromCell, scoreSpaceGroup } from './analyze.js';
-import { mergeReflections, computeMergeStatistics, writeShelxHkl, writeXdsAscii, buildMergingReport } from './merge.js';
+import { mergeReflections, computeMergeStatistics, writeShelxHkl, writeXdsAscii, buildMergingReport, dSpacing } from './merge.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -76,6 +76,10 @@ function centeringOf(sg) {
  * options: {
  *   cell: {a,b,c,alpha,beta,gamma},        // needed when the file has none
  *   spaceGroup: number | string,           // optionally force a space group
+ *   laue: string,                          // optionally force a Laue class (e.g. '2/m', 'mmm')
+ *   resolution: { dmin, dmax },            // optionally restrict to a resolution range
+ *   sigThreshold: number,                  // significance threshold for absences (default 5)
+ *   xdsOutput: string,                     // OUTPUT_FILE name for the merged XDS_ASCII
  * }
  * Returns { ok, error?, summary, best, merge }.
  */
@@ -102,9 +106,20 @@ export function analyzeHkl(text, options = {}) {
         return { ok: false, error: 'Bad unit cell parameters.' };
     }
 
-    const reflections = parsed.reflections;
+    let reflections = parsed.reflections;
     if (!reflections.length) {
         return { ok: false, error: 'No reflections parsed from the HKL file.' };
+    }
+
+    // Optionally restrict to a resolution range.
+    if (options.resolution && options.resolution.dmin && options.resolution.dmax) {
+        reflections = reflections.filter(r => {
+            const d = dSpacing(r.h, r.k, r.l, cell);
+            return Number.isFinite(d) && d >= options.resolution.dmin - 1e-6 && d <= options.resolution.dmax + 1e-6;
+        });
+        if (!reflections.length) {
+            return { ok: false, error: 'No reflections within the requested resolution range.' };
+        }
     }
 
     const laueGroups = getLaueGroups();
@@ -136,6 +151,16 @@ export function analyzeHkl(text, options = {}) {
         }
     }
 
+    // Optionally force a Laue class explicitly.
+    if (options.laue) {
+        const lg = laueGroups.find(g => g.name === options.laue);
+        if (!lg) {
+            return { ok: false, error: `Laue class not found: ${options.laue}` };
+        }
+        usedLaueName = lg.name;
+        usedLaueOps = lg.settings[0].ops;
+    }
+
     // Merge under the chosen Laue class and generate the corrected HKL output
     // (SHELX format + merged XDS_ASCII) plus a merging report.
     let merge = null;
@@ -154,7 +179,7 @@ export function analyzeHkl(text, options = {}) {
             nObs: m.nObs,
             shelxHkl: writeShelxHkl(m.merged),
             xdsAscii: writeXdsAscii(m.merged, {
-                outputFile: 'MERGED.HKL',
+                outputFile: options.xdsOutput || 'structure_XDS.HKL',
                 cell,
                 spaceGroupNumber: usedSG ? usedSG.id : undefined,
                 spaceGroupName: usedSG ? usedSG.hm : undefined,

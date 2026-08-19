@@ -1,7 +1,9 @@
 #!/usr/bin/env node
-// jsSpace command-line interface.
+// jsSpace command-line interface — POINTLESS-style arguments.
+//
 // Usage:
-//   node src/js/jsSpace/cli.js <file.hkl>
+//   node src/js/jsSpace/cli.js --hklin <file.hkl> [options]
+//   node src/js/jsSpace/cli.js hklin <file.hkl> hklout <file.hkl> spacegroup C2 ...
 //
 // If the HKL file does not carry unit-cell parameters, jsSpace prompts for
 // them interactively. Pass --cell "a b c alpha beta gamma" to skip the prompt.
@@ -12,6 +14,38 @@ import readline from 'node:readline';
 
 import { analyzeHkl } from './index.js';
 import { parseHkl } from './hkl-parser.js';
+
+const VERSION = '1.0.0';
+
+const HELP = `
+jsSpace — space-group determination and reflection merging (POINTLESS-style CLI)
+
+Usage:
+  node src/js/jsSpace/cli.js --hklin <file.hkl> [options]
+
+Input / output:
+  --hklin <file>      Input HKL file (XDS_ASCII or SHELX five-column format)
+  --hklout <file>     Output merged HKL file, SHELX format (default: <input>_merged.hkl)
+  --xdsout <file>     Output merged HKL file, XDS_ASCII format (default: <input>_XDS.HKL)
+
+Space group:
+  --spacegroup <sg>   Force a specific space group (number or Hermann-Mauguin
+                      symbol, e.g. 14, "P 21/c", "P-1")
+  --laue <group>      Force a Laue class for merging (e.g. -1, 2/m, mmm, 4/mmm)
+
+Data:
+  --cell "a b c alpha beta gamma"   Unit cell (used when the file has none)
+  --resolution "lo hi"              Restrict analysis to a resolution range (A)
+  --sigthreshold <n>                I/sigma threshold for systematic absences (default 5)
+
+Misc:
+  --help, -h          Show this help
+  --version, -v       Show version
+
+Bare POINTLESS-style keywords (hklin, hklout, spacegroup, cell, ...) are also
+accepted. Without --hklout/--xdsout the merged files are written next to the
+input file.
+`;
 
 function printAnalysis(result) {
     if (!result.ok) {
@@ -24,7 +58,6 @@ function printAnalysis(result) {
     }
 
     const s = result.summary;
-    const fmt = (x) => (x === null || x === undefined ? '?' : String(x));
     console.log('');
     console.log('==============================================');
     console.log('  jsSpace  —  space-group determination');
@@ -99,26 +132,91 @@ async function promptCell() {
     return { a: v[0], b: v[1], c: v[2], alpha: v[3], beta: v[4], gamma: v[5] };
 }
 
+// Number of values consumed by each bare keyword / option.
+const N_VALUES = {
+    hklin: 1, hklout: 1, xdsout: 1, spacegroup: 1, sg: 1, laue: 1, sigthreshold: 1,
+    cell: 6, resolution: 2,
+};
+
+function parseCellString(s) {
+    const v = s.split(/\s+/).map(parseFloat);
+    if (v.length !== 6 || v.some(x => !Number.isFinite(x))) {
+        throw new Error('cell expects six numbers: a b c alpha beta gamma');
+    }
+    return { a: v[0], b: v[1], c: v[2], alpha: v[3], beta: v[4], gamma: v[5] };
+}
+
 function parseArgs(argv) {
-    const args = { file: null, cell: null, spaceGroup: null };
-    for (let i = 0; i < argv.length; i++) {
+    const args = { hklin: null, hklout: null, xdsout: null, cell: null, spaceGroup: null, laue: null, resolution: null, sigThreshold: 5, help: false, version: false };
+    let i = 0;
+    while (i < argv.length) {
         const a = argv[i];
-        if (a === '--cell' && argv[i + 1]) {
-            const v = argv[++i].split(/\s+/).map(parseFloat);
-            if (v.length === 6 && v.every(Number.isFinite)) {
-                args.cell = { a: v[0], b: v[1], c: v[2], alpha: v[3], beta: v[4], gamma: v[5] };
-            } else {
-                throw new Error('--cell expects six numbers: a b c alpha beta gamma');
-            }
-        } else if (a === '--space-group' || a === '--sg') {
-            if (argv[i + 1]) {
-                args.spaceGroup = argv[++i];
-            } else {
-                throw new Error('--space-group expects a number or Hermann-Mauguin symbol');
-            }
+        if (a === '--help' || a === '-h') { args.help = true; i++; continue; }
+        if (a === '--version' || a === '-v') { args.version = true; i++; continue; }
+
+        // --flag value / bare keyword
+        let key = null;
+        let n = null;
+        if (a.startsWith('--')) {
+            key = a.slice(2).toLowerCase();
+            if (key === 'space-group') key = 'spacegroup';
+            if (key === 'sg') key = 'spacegroup';
+            n = N_VALUES[key] !== undefined ? N_VALUES[key] : 1;
+        } else if (a === 'hklin' || a === 'hklout' || a === 'xdsout' || a === 'spacegroup' || a === 'laue'
+            || a === 'cell' || a === 'resolution' || a === 'sigthreshold') {
+            key = a;
+            n = N_VALUES[a];
         } else if (!a.startsWith('-')) {
-            args.file = a;
+            // Positional argument: treated as hklin.
+            args.hklin = a;
+            i++;
+            continue;
+        } else {
+            throw new Error(`Unknown option: ${a}`);
         }
+
+        const vals = [];
+        if (n === 1) {
+            if (i + 1 >= argv.length) {
+                throw new Error(`${a} expects ${n} value(s)`);
+            }
+            vals.push(argv[++i]);
+        } else {
+            // Multi-value options accept both "--cell 20 21 22 90 90 90" and a
+            // single quoted string "--cell \"20 21 22 90 90 90\"".
+            while (vals.length < n && i + 1 < argv.length) {
+                const next = argv[++i];
+                const parts = next.split(/\s+/).filter(Boolean);
+                for (const p of parts) {
+                    vals.push(p);
+                    if (vals.length >= n) break;
+                }
+            }
+            if (vals.length < n) {
+                throw new Error(`${a} expects ${n} value(s)`);
+            }
+        }
+
+        if (key === 'hklin') args.hklin = vals[0];
+        else if (key === 'hklout') args.hklout = vals[0];
+        else if (key === 'xdsout') args.xdsout = vals[0];
+        else if (key === 'spacegroup') args.spaceGroup = vals[0];
+        else if (key === 'laue') args.laue = vals[0];
+        else if (key === 'sigthreshold') {
+            const t = parseFloat(vals[0]);
+            if (!Number.isFinite(t)) throw new Error('sigthreshold expects a number');
+            args.sigThreshold = t;
+        } else if (key === 'cell') {
+            args.cell = parseCellString(vals.join(' '));
+        } else if (key === 'resolution') {
+            const lo = parseFloat(vals[0]), hi = parseFloat(vals[1]);
+            if (!Number.isFinite(lo) || !Number.isFinite(hi) || lo <= 0 || hi <= 0 || lo === hi) {
+                throw new Error('resolution expects two positive numbers: low high (A)');
+            }
+            // "low" = low resolution (large d), "high" = high resolution (small d).
+            args.resolution = { dmin: Math.min(lo, hi), dmax: Math.max(lo, hi) };
+        }
+        i++;
     }
     return args;
 }
@@ -129,13 +227,18 @@ async function main() {
         args = parseArgs(process.argv.slice(2));
     } catch (e) {
         console.error(`jsSpace: ${e.message}`);
+        console.error(HELP);
         process.exit(1);
     }
-    if (!args.file) {
-        console.error('Usage: node src/js/jsSpace/cli.js <file.hkl> [--cell "a b c alpha beta gamma"] [--space-group "14" | "P 21/c"]');
+    if (args.help) { console.log(HELP); process.exit(0); }
+    if (args.version) { console.log(`jsSpace version ${VERSION}`); process.exit(0); }
+    if (!args.hklin) {
+        console.error('jsSpace: no input HKL file given.');
+        console.error(HELP);
         process.exit(1);
     }
-    const filePath = path.resolve(args.file);
+
+    const filePath = path.resolve(args.hklin);
     if (!fs.existsSync(filePath)) {
         console.error(`jsSpace: file not found: ${filePath}`);
         process.exit(1);
@@ -156,14 +259,25 @@ async function main() {
         }
     }
 
-    const result = analyzeHkl(text, { cell, spaceGroup: args.spaceGroup });
+    const result = analyzeHkl(text, {
+        cell,
+        spaceGroup: args.spaceGroup,
+        laue: args.laue,
+        resolution: args.resolution,
+        sigThreshold: args.sigThreshold,
+    });
     printAnalysis(result);
 
-    // Write the corrected/merged HKL files next to the input file.
+    // Write the corrected/merged HKL files.
     if (result.ok && result.merge) {
-        const base = path.join(path.dirname(filePath), path.parse(filePath).name + '_merged');
-        const shelxPath = base + '.hkl';
-        const xdsPath = base + '.HKL';
+        const dir = path.dirname(filePath);
+        const base = path.parse(filePath).name;
+        const shelxPath = path.resolve(args.hklout || path.join(dir, base + '_merged.hkl'));
+        const xdsPath = path.resolve(args.xdsout || path.join(dir, base + '_XDS.HKL'));
+        // Keep the XDS header OUTPUT_FILE consistent with the written file.
+        result.merge.xdsAscii = result.merge.xdsAscii.replace(
+            /!OUTPUT_FILE=[^\n]*/,
+            '!OUTPUT_FILE=' + path.basename(xdsPath));
         fs.writeFileSync(shelxPath, result.merge.shelxHkl, 'utf8');
         fs.writeFileSync(xdsPath, result.merge.xdsAscii, 'utf8');
         console.log(`Merged HKL written to:`);

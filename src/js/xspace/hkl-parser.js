@@ -1,4 +1,4 @@
-// HKL file parsers for jsSpace.
+// HKL file parsers for xspace.
 // Supports XDS_ASCII.HKL (with ! header lines) and the standard SHELX
 // five-column format (H K L I SIG(I)).
 

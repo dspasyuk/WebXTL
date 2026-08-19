@@ -78,7 +78,7 @@ class WMOLApp {
             currentProject: null,
             fileTabs: {}, // keyed by filename -> { filename, type, editor, project, dirty }
             availablePrograms: [], // external programs detected on the server
-            jsSpaceIns: null, // { filename, content } generated SHELX .ins for SHELXT
+            xspaceIns: null, // { filename, content } generated SHELX .ins for SHELXT
             hklContent: null,
             hklName: null,
             fcfRawContent: null,
@@ -523,18 +523,18 @@ class WMOLApp {
         return res.json();
     }
 
-    // POST an HKL file to the jsSpace analysis endpoint.
+    // POST an HKL file to the xspace analysis endpoint.
     // `cell` is optional: "a b c alpha beta gamma" or null.
     // `spaceGroup` is optional: number or Hermann-Mauguin symbol, or null.
     // `signal` is an optional AbortSignal for cancellation.
-    async apiJsSpaceAnalyze(hklText, cell, spaceGroup, signal) {
+    async apiXspaceAnalyze(hklText, cell, spaceGroup, signal) {
         const formData = new FormData();
         formData.append('hkl', new Blob([hklText], { type: 'text/plain' }), 'data.hkl');
         if (cell) formData.append('cell', cell);
         if (spaceGroup !== undefined && spaceGroup !== null && spaceGroup !== '') {
             formData.append('spaceGroup', String(spaceGroup));
         }
-        const url = this.getApiUrl('/jsspace/analyze');
+        const url = this.getApiUrl('/xspace/analyze');
         let res;
         try {
             const combined = signal
@@ -550,7 +550,7 @@ class WMOLApp {
             const hint = (e && e.name === 'TimeoutError')
                 ? 'The analysis took too long and timed out.'
                 : 'Is the backend server running? (node server.js)';
-            throw new Error(`Could not reach jsSpace at ${url} — ${hint} (${e.message})`);
+            throw new Error(`Could not reach xspace at ${url} — ${hint} (${e.message})`);
         }
         if (!res.ok) throw new Error('Space-group analysis failed');
         return res.json();
@@ -2566,13 +2566,13 @@ class WMOLApp {
             menuRefineWeight.addEventListener('click', () => this.refineWeight());
         }
 
-        const menuJsSpace = document.getElementById('menu-jsspace');
-        if (menuJsSpace) {
-            menuJsSpace.addEventListener('click', () => this.runSpaceGroupAnalysis());
+        const menuXspace = document.getElementById('menu-xspace');
+        if (menuXspace) {
+            menuXspace.addEventListener('click', () => this.runSpaceGroupAnalysis());
         }
-        const menuJsSpaceForce = document.getElementById('menu-jsspace-force');
-        if (menuJsSpaceForce) {
-            menuJsSpaceForce.addEventListener('click', () => {
+        const menuXspaceForce = document.getElementById('menu-xspace-force');
+        if (menuXspaceForce) {
+            menuXspaceForce.addEventListener('click', () => {
                 const input = prompt(
                     'Force a specific space group.\nEnter a space group number or Hermann-Mauguin symbol\n(e.g. 14, or "P 21/c", "P-1", "C 2/c"):');
                 if (input === null || input.trim() === '') return;
@@ -4768,11 +4768,11 @@ class WMOLApp {
         const needsRes = inputs.includes('.res') || inputs.includes('.ins') || inputs.includes('.cif');
         if (needsRes) {
             const ext = inputs.includes('.cif') ? '.cif' : inputs.includes('.ins') ? '.ins' : '.res';
-            // Prefer the jsSpace-generated .ins (correct cell + space group,
+            // Prefer the xspace-generated .ins (correct cell + space group,
             // matching basename) for structure-solution programs.
             let content = null;
-            if (ext === '.ins' && this.state.jsSpaceIns) {
-                content = this.state.jsSpaceIns.content;
+            if (ext === '.ins' && this.state.xspaceIns) {
+                content = this.state.xspaceIns.content;
             } else if (this.state.editors.res) {
                 content = this.state.editors.res.getValue();
             }
@@ -4948,7 +4948,7 @@ class WMOLApp {
                 insText = this.applyFormulaToIns(insText, formula);
             }
             const insName = base + '_merged.ins';
-            this.state.jsSpaceIns = { filename: insName, content: insText };
+            this.state.xspaceIns = { filename: insName, content: insText };
             if (this.state.editors.res) {
                 this.state.editors.res.setValue(insText, -1);
                 this.state.loadedContent = insText;
@@ -5005,7 +5005,7 @@ class WMOLApp {
         return controller.signal;
     }
 
-    // Hide jsSpace-only controls (merged-HKL buttons, solution selector) so a
+    // Hide xspace-only controls (merged-HKL buttons, solution selector) so a
     // fresh results modal does not show leftovers from a previous run.
     resetResultsControls() {
         const b1 = document.getElementById('btn-load-merged-hkl');
@@ -5081,12 +5081,12 @@ class WMOLApp {
     }
 
     // Wire the "Download Merged HKL" and "Load Merged HKL for SHELXT" buttons
-    // shown after a jsSpace analysis.
+    // shown after a xspace analysis.
     wireMergedHklButtons(result) {
         const hasMerged = !!(result.merge && result.merge.shelxHkl);
         const btnDownload = document.getElementById('btn-download-merged-hkl');
         const btnLoad = document.getElementById('btn-load-merged-hkl');
-        // jsSpace results have no solution selector.
+        // xspace results have no solution selector.
         const selWrap = document.getElementById('solution-selector');
         if (selWrap) selWrap.classList.add('d-none');
         if (!hasMerged) {
@@ -5124,7 +5124,7 @@ class WMOLApp {
         }
     }
 
-    // Run the built-in jsSpace space-group determination on the current HKL
+    // Run the built-in xspace space-group determination on the current HKL
     // data and show the result in the results modal. `forced` optionally pins
     // a specific space group (number or Hermann-Mauguin symbol).
     async runSpaceGroupAnalysis(forced) {
@@ -5140,7 +5140,7 @@ class WMOLApp {
             btn.disabled = true;
         }
 
-        // Progress dialog (jsSpace can be slow on large datasets). It is only
+        // Progress dialog (xspace can be slow on large datasets). It is only
         // shown when an analysis is actually about to run — never for the
         // NO_CELL probe that just asks for the unit cell.
         const controller = new AbortController();
@@ -5151,19 +5151,19 @@ class WMOLApp {
         try {
             let result;
             if (hasCellInFile) {
-                this.showProgressDialog('Space-group determination (jsSpace)...',
+                this.showProgressDialog('Space-group determination (xspace)...',
                     'Analyzing Laue symmetry, centering and systematic absences.');
             }
-            result = await this.apiJsSpaceAnalyze(this.state.hklContent, null, forced, controller.signal);
+            result = await this.apiXspaceAnalyze(this.state.hklContent, null, forced, controller.signal);
 
             // The HKL file carries no unit-cell parameters: ask for them.
             if (result.error === 'NO_CELL') {
                 const input = prompt(
                     'This HKL file has no unit-cell parameters.\nEnter unit cell: a b c alpha beta gamma\n(e.g. 10.5 10.5 14.0 90 90 90)');
                 if (input === null) return; // cancelled - no analysis ran, no dialog
-                this.showProgressDialog('Space-group determination (jsSpace)...',
+                this.showProgressDialog('Space-group determination (xspace)...',
                     'Analyzing Laue symmetry, centering and systematic absences.');
-                result = await this.apiJsSpaceAnalyze(this.state.hklContent, input, forced, controller.signal);
+                result = await this.apiXspaceAnalyze(this.state.hklContent, input, forced, controller.signal);
             }
 
             if (!result.ok) {
@@ -5181,10 +5181,10 @@ class WMOLApp {
             }
         } catch (e) {
             if (e && e.name === 'AbortError') {
-                console.log('jsSpace analysis cancelled by user');
+                console.log('xspace analysis cancelled by user');
                 alert('Space-group analysis cancelled.');
             } else {
-                console.error('jsSpace analysis failed:', e);
+                console.error('xspace analysis failed:', e);
                 alert('Space-group analysis failed: ' + e.message);
             }
         } finally {
@@ -5196,7 +5196,7 @@ class WMOLApp {
         }
     }
 
-    // HTML summary card for the jsSpace result (top of the results modal).
+    // HTML summary card for the xspace result (top of the results modal).
     buildSpaceGroupSummary(result) {
         const s = result.summary;
         const b = result.best;
@@ -5232,7 +5232,7 @@ class WMOLApp {
                 <td class="fw-semibold ${ok ? 'text-success' : 'text-danger'}">${ok ? 'consistent' : 'INCONSISTENT (' + c.violations + ' violation(s))'}</td></tr>`;
         }
         return `<div class="border rounded p-2 bg-light mb-2">
-            <div class="fw-semibold small text-uppercase text-muted mb-1">Space-group determination (jsSpace)</div>
+            <div class="fw-semibold small text-uppercase text-muted mb-1">Space-group determination (xspace)</div>
             <table class="table table-sm table-borderless align-middle mb-1">
                 <tbody>
                     ${rows}
@@ -5243,11 +5243,11 @@ class WMOLApp {
         </div>`;
     }
 
-    // Plain-text report of the full jsSpace result (scrollable body).
+    // Plain-text report of the full xspace result (scrollable body).
     buildSpaceGroupReport(result) {
         const s = result.summary;
         const out = [];
-        out.push('jsSpace — space-group determination');
+        out.push('xspace — space-group determination');
         out.push('==============================================');
         out.push(`Format        : ${s.format}`);
         if (s.title) out.push(`Title         : ${s.title}`);

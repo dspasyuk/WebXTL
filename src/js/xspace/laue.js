@@ -1,4 +1,4 @@
-// Laue classes for jsSpace. The eleven centrosymmetric point groups are built
+// Laue classes for xspace. The eleven centrosymmetric point groups are built
 // from representative space groups in the space-groups.js dictionary, so we
 // never hard-code a potentially inconsistent symmetry table.
 

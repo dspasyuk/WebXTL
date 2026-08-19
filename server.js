@@ -7,7 +7,7 @@ import path from 'path';
 import { spawn } from 'child_process';
 import { fileURLToPath } from 'url';
 import { buildPublishCif, buildPublishCifFromTemplates, buildReportDocx, parseDevFile, parseCif } from './publish.js';
-import { analyzeHkl } from './src/js/jsSpace/index.js';
+import { analyzeHkl } from './src/js/xspace/index.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -438,19 +438,19 @@ app.post('/run/:program', upload.any(), async (req, res) => {
     }
 });
 
-// --- jsSpace: space-group determination (XPREP alternative) ---
+// --- xspace: space-group determination (XPREP alternative) ---
 
 /**
- * POST /jsspace/analyze
+ * POST /xspace/analyze
  * Upload an HKL file (multipart field 'hkl'); optionally provide the unit cell
  * in the JSON/field 'cell' as "a b c alpha beta gamma" or {a,b,c,alpha,beta,gamma},
  * and optionally force a space group with 'spaceGroup' (number or HM symbol,
  * e.g. 14 or "P 21/c").
- * Runs the built-in jsSpace space-group determination and returns the full
+ * Runs the built-in xspace space-group determination and returns the full
  * analysis (Laue class, centering, systematic absences, candidate space groups,
  * merged HKL output).
  */
-app.post('/jsspace/analyze', upload.fields([{ name: 'hkl', maxCount: 1 }]), (req, res) => {
+app.post('/xspace/analyze', upload.fields([{ name: 'hkl', maxCount: 1 }]), (req, res) => {
     try {
         if (!req.files || !req.files['hkl']) {
             return res.status(400).json({ error: 'An HKL file is required.' });
@@ -485,7 +485,7 @@ app.post('/jsspace/analyze', upload.fields([{ name: 'hkl', maxCount: 1 }]), (req
         const result = analyzeHkl(text, { cell, spaceGroup });
         res.json(result);
     } catch (error) {
-        console.error('jsspace analyze error:', error);
+        console.error('xspace analyze error:', error);
         res.status(500).json({ error: 'Failed to run space-group analysis', details: error.message });
     }
 });

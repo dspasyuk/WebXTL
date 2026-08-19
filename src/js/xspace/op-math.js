@@ -1,4 +1,4 @@
-// Symmetry operation mathematics for jsSpace.
+// Symmetry operation mathematics for xspace.
 // Handles parsing of Hermann-Mauguin symmetry-operation strings (as used in
 // the space-groups.js dictionary, e.g. "-y, x-y, z" or "-x+1/2, -y, z") into
 // 3x3 direct-space rotation matrices plus translations, and converts them into

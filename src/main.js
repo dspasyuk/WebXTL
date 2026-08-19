@@ -4873,27 +4873,45 @@ class WMOLApp {
         return mergedName;
     }
 
-    // Wire the "Download Merged HKL" button shown after a jsSpace analysis.
-    wireMergedHklDownload(result) {
-        const btn = document.getElementById('btn-download-merged-hkl');
-        if (!btn) return;
-        if (!result.merge || !result.merge.shelxHkl) {
-            btn.classList.add('d-none');
+    // Wire the "Download Merged HKL" and "Load Merged HKL for SHELXT" buttons
+    // shown after a jsSpace analysis.
+    wireMergedHklButtons(result) {
+        const hasMerged = !!(result.merge && result.merge.shelxHkl);
+        const btnDownload = document.getElementById('btn-download-merged-hkl');
+        const btnLoad = document.getElementById('btn-load-merged-hkl');
+        if (!hasMerged) {
+            if (btnDownload) btnDownload.classList.add('d-none');
+            if (btnLoad) btnLoad.classList.add('d-none');
             return;
         }
-        btn.classList.remove('d-none');
-        btn.onclick = () => {
-            let base = 'structure';
-            if (this.state.hklName) base = this.state.hklName.replace(/\.hkl$/i, '');
-            base = base.replace(/[^a-zA-Z0-9_-]/g, '_');
-            const blob = new Blob([result.merge.shelxHkl], { type: 'text/plain' });
-            const a = document.createElement('a');
-            a.href = URL.createObjectURL(blob);
-            a.download = base + '.hkl';
-            document.body.appendChild(a);
-            a.click();
-            setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 100);
-        };
+        if (btnDownload) {
+            btnDownload.classList.remove('d-none');
+            btnDownload.onclick = () => {
+                let base = 'structure';
+                if (this.state.hklName) base = this.state.hklName.replace(/\.hkl$/i, '');
+                base = base.replace(/[^a-zA-Z0-9_-]/g, '_');
+                const blob = new Blob([result.merge.shelxHkl], { type: 'text/plain' });
+                const a = document.createElement('a');
+                a.href = URL.createObjectURL(blob);
+                a.download = base + '.hkl';
+                document.body.appendChild(a);
+                a.click();
+                setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 100);
+            };
+        }
+        if (btnLoad) {
+            btnLoad.classList.remove('d-none');
+            btnLoad.onclick = () => {
+                const mergedName = this.applyMergedHkl(result);
+                const summary = document.getElementById('results-summary');
+                if (mergedName && summary) {
+                    const note = document.createElement('div');
+                    note.className = 'alert alert-success py-1 px-2 small mb-0 mt-1';
+                    note.textContent = `Merged HKL loaded as ${mergedName} — ready for SHELXD / SHELXT.`;
+                    summary.appendChild(note);
+                }
+            };
+        }
     }
 
     // Run the built-in jsSpace space-group determination on the current HKL
@@ -4933,18 +4951,8 @@ class WMOLApp {
             if (resultsContent && modalEl) {
                 resultsSummary.innerHTML = this.buildSpaceGroupSummary(result);
                 resultsContent.textContent = this.buildSpaceGroupReport(result);
-                this.wireMergedHklDownload(result);
+                this.wireMergedHklButtons(result);
                 new bootstrap.Modal(modalEl).show();
-            }
-
-            // Automatically load the corrected/merged HKL so the next step
-            // (e.g. SHELXD / SHELXT from the Programs menu) uses it.
-            const mergedName = this.applyMergedHkl(result);
-            if (mergedName && resultsSummary) {
-                resultsSummary.insertAdjacentHTML('beforeend',
-                    `<div class="alert alert-success py-1 px-2 small mb-0">
-                        Merged HKL auto-loaded as <strong>${mergedName}</strong> — ready for SHELXD / SHELXT.
-                     </div>`);
             }
         } catch (e) {
             console.error('jsSpace analysis failed:', e);

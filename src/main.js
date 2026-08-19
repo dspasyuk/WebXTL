@@ -4849,6 +4849,30 @@ class WMOLApp {
         }
     }
 
+    // Load the corrected/merged HKL (SHELX format) as the active HKL in the UI
+    // so subsequent steps (e.g. SHELXD / SHELXT) operate on it. Returns the
+    // new filename, or null if no merged HKL was produced.
+    applyMergedHkl(result) {
+        if (!result.merge || !result.merge.shelxHkl) return null;
+        let base = 'structure';
+        if (this.state.hklName) base = this.state.hklName.replace(/\.hkl$/i, '');
+        base = base.replace(/[^a-zA-Z0-9_-]/g, '_');
+        const mergedName = base + '_merged.hkl';
+
+        this.state.hklContent = result.merge.shelxHkl;
+        this.state.hklName = mergedName;
+
+        const statusHkl = document.getElementById('status-hkl');
+        if (statusHkl) {
+            statusHkl.classList.remove('bg-secondary');
+            statusHkl.classList.add('bg-success');
+            statusHkl.title = 'HKL Loaded (merged): ' + mergedName;
+        }
+        this.openFileTab(mergedName, result.merge.shelxHkl, 'hkl', null, false);
+        this.saveStateToLocalStorage();
+        return mergedName;
+    }
+
     // Wire the "Download Merged HKL" button shown after a jsSpace analysis.
     wireMergedHklDownload(result) {
         const btn = document.getElementById('btn-download-merged-hkl');
@@ -4911,6 +4935,16 @@ class WMOLApp {
                 resultsContent.textContent = this.buildSpaceGroupReport(result);
                 this.wireMergedHklDownload(result);
                 new bootstrap.Modal(modalEl).show();
+            }
+
+            // Automatically load the corrected/merged HKL so the next step
+            // (e.g. SHELXD / SHELXT from the Programs menu) uses it.
+            const mergedName = this.applyMergedHkl(result);
+            if (mergedName && resultsSummary) {
+                resultsSummary.insertAdjacentHTML('beforeend',
+                    `<div class="alert alert-success py-1 px-2 small mb-0">
+                        Merged HKL auto-loaded as <strong>${mergedName}</strong> — ready for SHELXD / SHELXT.
+                     </div>`);
             }
         } catch (e) {
             console.error('jsSpace analysis failed:', e);

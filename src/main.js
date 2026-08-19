@@ -4878,6 +4878,41 @@ class WMOLApp {
         }
     }
 
+    // Parse an element/formula input ("C H N O" or "C12 H16 N2 O4" or
+    // "C12H16N2O4") into { elements: [...], counts: [...] }.
+    parseFormula(input) {
+        const elements = [];
+        const counts = [];
+        const order = [];
+        const map = new Map();
+        const re = /([A-Z][a-z]?)(\d*)/g;
+        let m;
+        while ((m = re.exec(input)) !== null) {
+            const el = m[1];
+            const count = m[2] ? parseInt(m[2], 10) : 0;
+            if (!map.has(el)) { map.set(el, 0); order.push(el); }
+            map.set(el, map.get(el) + count);
+        }
+        for (const el of order) {
+            elements.push(el);
+            counts.push(map.get(el) || 0);
+        }
+        return { elements, counts };
+    }
+
+    // Replace the SFAC/UNIT lines of a generated SHELX .ins with the user's
+    // formula/elements. Returns the modified text (or the original if unparseable).
+    applyFormulaToIns(insText, input) {
+        const { elements, counts } = this.parseFormula(input || '');
+        if (!elements.length) return insText;
+        const unitCounts = elements.map((c, i) => counts[i] > 0 ? counts[i] : 20);
+        const sfacLine = 'SFAC ' + elements.join(' ');
+        const unitLine = 'UNIT ' + unitCounts.join(' ');
+        let out = insText.replace(/^SFAC.*$/m, sfacLine);
+        out = out.replace(/^UNIT.*$/m, unitLine);
+        return out;
+    }
+
     // Load the corrected/merged HKL (SHELX format) as the active HKL in the UI
     // so subsequent steps (e.g. SHELXD / SHELXT) operate on it. Also generates
     // a matching SHELX .ins with the correct cell/space group. Returns the
@@ -4903,16 +4938,25 @@ class WMOLApp {
         // Generate a matching SHELX .ins (same basename) so SHELXD / SHELXT
         // can be run directly with the correct unit cell and space group.
         if (result.merge.shelxIns) {
+            let insText = result.merge.shelxIns;
+            // The composition is not known: ask the user for the expected
+            // elements/formula instead of the generic scattering-factor list.
+            const formula = prompt(
+                'SHELXT: expected chemical elements / formula?\n' +
+                '(e.g. "C H N O" or "C12 H16 N2 O4". Leave empty to keep the generic list)');
+            if (formula !== null && formula.trim() !== '') {
+                insText = this.applyFormulaToIns(insText, formula);
+            }
             const insName = base + '_merged.ins';
-            this.state.jsSpaceIns = { filename: insName, content: result.merge.shelxIns };
+            this.state.jsSpaceIns = { filename: insName, content: insText };
             if (this.state.editors.res) {
-                this.state.editors.res.setValue(result.merge.shelxIns, -1);
-                this.state.loadedContent = result.merge.shelxIns;
+                this.state.editors.res.setValue(insText, -1);
+                this.state.loadedContent = insText;
                 this.state.loadedType = 'res';
                 this.state.loadedFilename = insName;
-                this.renderContent(result.merge.shelxIns, 'res');
+                this.renderContent(insText, 'res');
             }
-            this.openFileTab(insName, result.merge.shelxIns, 'res', null, false);
+            this.openFileTab(insName, insText, 'res', null, false);
         }
 
         this.saveStateToLocalStorage();

@@ -37,6 +37,8 @@ Data:
   --cell "a b c alpha beta gamma"   Unit cell (used when the file has none)
   --resolution "lo hi"              Restrict analysis to a resolution range (A)
   --sigthreshold <n>                I/sigma threshold for systematic absences (default 5)
+  --sfac "C H N O"                  Expected elements (or formula, e.g. "C12 H16 N2 O4")
+                                    used for the SHELXT .ins SFAC/UNIT lines
 
 Misc:
   --help, -h          Show this help
@@ -133,10 +135,11 @@ async function promptCell() {
 }
 
 // Number of values consumed by each bare keyword / option.
-const N_VALUES = {
-    hklin: 1, hklout: 1, xdsout: 1, spacegroup: 1, sg: 1, laue: 1, sigthreshold: 1,
-    cell: 6, resolution: 2,
-};
+    const N_VALUES = {
+        hklin: 1, hklout: 1, xdsout: 1, spacegroup: 1, sg: 1, laue: 1, sigthreshold: 1,
+        sfac: 1, formula: 1,
+        cell: 6, resolution: 2,
+    };
 
 function parseCellString(s) {
     const v = s.split(/\s+/).map(parseFloat);
@@ -146,8 +149,31 @@ function parseCellString(s) {
     return { a: v[0], b: v[1], c: v[2], alpha: v[3], beta: v[4], gamma: v[5] };
 }
 
+// Parse an element/formula input like "C H N O" or "C12 H16 N2 O4" into
+// { sfac: [symbols], unit: [counts] }.
+function parseSfacInput(input) {
+    const elements = [];
+    const counts = [];
+    const order = [];
+    const map = new Map();
+    const re = /([A-Z][a-z]?)(\d*)/g;
+    let m;
+    while ((m = re.exec(input)) !== null) {
+        const el = m[1];
+        const count = m[2] ? parseInt(m[2], 10) : 0;
+        if (!map.has(el)) { map.set(el, 0); order.push(el); }
+        map.set(el, map.get(el) + count);
+    }
+    if (!order.length) throw new Error(`Could not parse elements from: ${input}`);
+    for (const el of order) {
+        elements.push(el);
+        counts.push(map.get(el) || 20);
+    }
+    return { sfac: elements, unit: counts };
+}
+
 function parseArgs(argv) {
-    const args = { hklin: null, hklout: null, xdsout: null, cell: null, spaceGroup: null, laue: null, resolution: null, sigThreshold: 5, help: false, version: false };
+    const args = { hklin: null, hklout: null, xdsout: null, cell: null, spaceGroup: null, laue: null, resolution: null, sigThreshold: 5, sfac: null, help: false, version: false };
     let i = 0;
     while (i < argv.length) {
         const a = argv[i];
@@ -163,7 +189,7 @@ function parseArgs(argv) {
             if (key === 'sg') key = 'spacegroup';
             n = N_VALUES[key] !== undefined ? N_VALUES[key] : 1;
         } else if (a === 'hklin' || a === 'hklout' || a === 'xdsout' || a === 'spacegroup' || a === 'laue'
-            || a === 'cell' || a === 'resolution' || a === 'sigthreshold') {
+            || a === 'cell' || a === 'resolution' || a === 'sigthreshold' || a === 'sfac' || a === 'formula') {
             key = a;
             n = N_VALUES[a];
         } else if (!a.startsWith('-')) {
@@ -206,6 +232,8 @@ function parseArgs(argv) {
             const t = parseFloat(vals[0]);
             if (!Number.isFinite(t)) throw new Error('sigthreshold expects a number');
             args.sigThreshold = t;
+        } else if (key === 'sfac' || key === 'formula') {
+            args.sfac = vals[0];
         } else if (key === 'cell') {
             args.cell = parseCellString(vals.join(' '));
         } else if (key === 'resolution') {
@@ -259,12 +287,15 @@ async function main() {
         }
     }
 
+    const sfacOpts = args.sfac ? parseSfacInput(args.sfac) : {};
     const result = analyzeHkl(text, {
         cell,
         spaceGroup: args.spaceGroup,
         laue: args.laue,
         resolution: args.resolution,
         sigThreshold: args.sigThreshold,
+        sfac: sfacOpts.sfac,
+        unit: sfacOpts.unit,
     });
     printAnalysis(result);
 

@@ -74,7 +74,8 @@ function centeringOf(sg) {
 
 // Generate a SHELX instruction (.ins) file for structure-solution programs
 // (SHELXT / SHELXD / SHELXS) using the determined/forced space group and the
-// unit cell. The scattering-factor list is a generic default; edit as needed.
+// unit cell. `options.sfac` (element symbols) and `options.unit` (counts per
+// element) can override the generic scattering-factor list.
 export function writeShelxIns(usedSG, cell, options = {}) {
     const wl = options.wavelength || 0.71073;
     const title = (options.title || 'jsSpace').replace(/\s+/g, ' ');
@@ -92,8 +93,13 @@ export function writeShelxIns(usedSG, cell, options = {}) {
     for (const op of shelxSymmOps(usedSG.s, centrosymmetric)) {
         out.push(`SYMM ${op}`);
     }
-    out.push('SFAC C H N O F Na Mg Al Si P S Cl K Ca Fe Ni Cu Zn Br I');
-    out.push('UNIT 20 20 10 10 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2');
+    const defaultSfac = ['C', 'H', 'N', 'O', 'F', 'Na', 'Mg', 'Al', 'Si', 'P', 'S', 'Cl', 'K', 'Ca', 'Fe', 'Ni', 'Cu', 'Zn', 'Br', 'I'];
+    const sfac = options.sfac && options.sfac.length ? options.sfac : defaultSfac;
+    const unit = options.unit && options.unit.length === sfac.length
+        ? options.unit
+        : sfac.map(() => 20);
+    out.push('SFAC ' + sfac.join(' '));
+    out.push('UNIT ' + unit.join(' '));
     out.push('HKLF 4');
     out.push('TREF 50');
     out.push('END');
@@ -305,6 +311,8 @@ export function analyzeHkl(text, options = {}) {
             merge.shelxIns = writeShelxIns(fullSG, cell, {
                 wavelength: parsed.wavelength,
                 title: parsed.title || fullSG.hm,
+                sfac: options.sfac,
+                unit: options.unit,
             });
         }
     }

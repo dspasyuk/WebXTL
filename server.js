@@ -51,7 +51,7 @@ const RUN_TIMEOUT_MS = 300000;
 // program is only offered to the client when it is actually available.
 // `inputs` are the file extensions the client must supply; `outputs` are the
 // files collected from the project dir and returned to the client. `stdin`
-// is optional text piped to the process for interactive programs (PLATON).
+// is optional text piped to the process for interactive programs.
 const PROGRAMS = {
     shelxl: {
         label: 'SHELXL',
@@ -107,22 +107,6 @@ const PROGRAMS = {
         exe: 'shelxc',
         inputs: ['.hkl'],
         outputs: ['.hkl', '.lst'],
-        stdin: null,
-    },
-    platon: {
-        label: 'PLATON',
-        description: 'Structure validation and geometry analysis',
-        exe: 'platon',
-        inputs: ['.res', '.cif'],
-        outputs: ['.lis', '.txt', '.plt', '.res', '.fcf', '.cif', '.png'],
-        stdin: '\n',
-    },
-    xprep: {
-        label: 'XPREP',
-        description: 'Data preparation and space-group determination',
-        exe: 'xprep',
-        inputs: ['.hkl'],
-        outputs: ['.ins', '.res', '.txt', '.log'],
         stdin: null,
     },
 };

@@ -4734,8 +4734,8 @@ class WMOLApp {
         });
     }
 
-    // Run an external crystallography program (shelxl, platon, xprep, ...) on
-    // the currently loaded files and show the results in the results modal.
+    // Run an external crystallography program (shelxl, shelxt, ...) on the
+    // currently loaded files and show the results in the results modal.
     async runExternalProgram(program) {
         const inputs = program.inputs || [];
         const formData = new FormData();
@@ -4782,11 +4782,17 @@ class WMOLApp {
                 signal: AbortSignal.timeout(this.state.preferences.general.refineTimeout || 300000)
             });
             if (!response.ok) throw new Error(`Server error: ${response.statusText}`);
-            const data = await response.json();
+            let data;
+            try {
+                data = await response.json();
+            } catch (e) {
+                const txt = await response.text();
+                throw new Error('Server returned an invalid response: ' + txt.slice(0, 200));
+            }
             if (data.error) throw new Error(data.error);
 
             // Load the primary output back into the editor when the program produces it.
-            const primary = { shelxl: '.res', shelxs: '.res', shelxt: '.res', shelxd: '.res', shelxh: '.res', shelxe: '.res', platon: '.res', xprep: '.ins' }[program.id];
+            const primary = { shelxl: '.res', shelxs: '.res', shelxt: '.res', shelxd: '.res', shelxh: '.res', shelxe: '.res' }[program.id];
             if (primary && data.files) {
                 const key = Object.keys(data.files).find(k => k.toLowerCase().endsWith(primary));
                 if (key && this.state.editors.res) {

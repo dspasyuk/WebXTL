@@ -4846,6 +4846,13 @@ class WMOLApp {
             const resultsSummary = document.getElementById('results-summary');
             const modalEl = document.getElementById('resultsModal');
             if (resultsContent && modalEl) {
+                // Solution programs (SHELXT / SHELXD / SHELXS) may return several
+                // alternative structures; let the user pick one.
+                const isSolutionProgram = ['shelxt', 'shelxd', 'shelxs'].includes(program.id);
+                const resFiles = data.files ? Object.keys(data.files).filter(f => f.toLowerCase().endsWith('.res')) : [];
+                const solutions = isSolutionProgram ? this.parseShelxSolutions(data.stdout, resFiles) : [];
+                this.resetResultsControls();
+                this.populateSolutionSelector(solutions, data.files || {});
                 resultsContent.textContent = combinedOutput;
                 if (resultsSummary) {
                     resultsSummary.innerHTML = program.id === 'shelxl' && data.files
@@ -4954,12 +4961,90 @@ class WMOLApp {
         return controller.signal;
     }
 
+    // Hide jsSpace-only controls (merged-HKL buttons, solution selector) so a
+    // fresh results modal does not show leftovers from a previous run.
+    resetResultsControls() {
+        const b1 = document.getElementById('btn-load-merged-hkl');
+        const b2 = document.getElementById('btn-download-merged-hkl');
+        const sel = document.getElementById('solution-selector');
+        if (b1) b1.classList.add('d-none');
+        if (b2) b2.classList.add('d-none');
+        if (sel) sel.classList.add('d-none');
+    }
+
+    // Parse SHELXT / SHELXD solution rows from stdout and match them to the
+    // .res files returned by the server.
+    parseShelxSolutions(stdout, resFiles) {
+        const bases = new Set(resFiles.map(f => f.replace(/\.res$/i, '')));
+        const solutions = [];
+        for (const line of (stdout || '').split(/\r?\n/)) {
+            const tokens = line.trim().split(/\s+/).filter(Boolean);
+            if (tokens.length < 5) continue;
+            const idx = tokens.findIndex(t => bases.has(t));
+            if (idx === -1) continue;
+            const r1 = parseFloat(tokens[0]);
+            let sg = '';
+            for (let i = idx - 1; i >= 0; i--) {
+                const t = tokens[i];
+                if (['no', 'Fp', 'input', 'as', '&'].includes(t)) continue;
+                if (!isNaN(parseFloat(t))) continue;
+                sg = t;
+                break;
+            }
+            solutions.push({
+                base: tokens[idx],
+                filename: tokens[idx] + '.res',
+                r1: isNaN(r1) ? null : r1,
+                spaceGroup: sg || '?',
+                formula: tokens.slice(idx + 1).join(' '),
+            });
+        }
+        return solutions;
+    }
+
+    // Show a selector of structure solutions (e.g. from SHELXT) and load the
+    // chosen one into the editor / 3D view.
+    populateSolutionSelector(solutions, files) {
+        const wrap = document.getElementById('solution-selector');
+        const select = document.getElementById('solution-select');
+        if (!wrap || !select || !solutions.length) {
+            if (wrap) wrap.classList.add('d-none');
+            return;
+        }
+        select.innerHTML = solutions.map((s, i) => {
+            const r1 = s.r1 !== null ? `R1=${s.r1.toFixed(3)}` : '';
+            const label = `${s.base}: ${s.spaceGroup}${r1 ? '  ' + r1 : ''}${s.formula ? '  ' + s.formula : ''}`;
+            return `<option value="${s.filename}">${label}</option>`;
+        }).join('');
+        select.onchange = () => {
+            const filename = select.value;
+            if (files[filename]) this.loadSolutionToUi(filename, files);
+        };
+        wrap.classList.remove('d-none');
+    }
+
+    // Load a structure solution (.res) into the editor and 3D view.
+    loadSolutionToUi(filename, files) {
+        const content = files[filename];
+        if (!content || !this.state.editors.res) return;
+        this.state.editors.res.setValue(content, -1);
+        this.state.loadedContent = content;
+        this.state.loadedType = 'res';
+        this.state.loadedFilename = filename;
+        this.renderContent(content, 'res');
+        const statusEl = document.getElementById('status-bar-content');
+        if (statusEl) statusEl.textContent = `Solution loaded: ${filename}`;
+    }
+
     // Wire the "Download Merged HKL" and "Load Merged HKL for SHELXT" buttons
     // shown after a jsSpace analysis.
     wireMergedHklButtons(result) {
         const hasMerged = !!(result.merge && result.merge.shelxHkl);
         const btnDownload = document.getElementById('btn-download-merged-hkl');
         const btnLoad = document.getElementById('btn-load-merged-hkl');
+        // jsSpace results have no solution selector.
+        const selWrap = document.getElementById('solution-selector');
+        if (selWrap) selWrap.classList.add('d-none');
         if (!hasMerged) {
             if (btnDownload) btnDownload.classList.add('d-none');
             if (btnLoad) btnLoad.classList.add('d-none');
@@ -5295,6 +5380,7 @@ class WMOLApp {
 
                 if (resultsContent && modalEl) {
                     try {
+                        this.resetResultsControls();
                         resultsContent.textContent = combinedOutput;
                         if (resultsSummary) {
                             resultsSummary.innerHTML = this.buildRefinementSummary(data.files.lst || '');

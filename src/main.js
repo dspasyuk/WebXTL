@@ -77,6 +77,7 @@ class WMOLApp {
             fileId: 0, // Track file version to sync editor
             currentProject: null,
             fileTabs: {}, // keyed by filename -> { filename, type, editor, project, dirty }
+            availablePrograms: [], // external programs detected on the server
             hklContent: null,
             hklName: null,
             fcfRawContent: null,
@@ -512,6 +513,12 @@ class WMOLApp {
     async apiListProjectFiles(name) {
         const res = await fetch(this.getApiUrl(`/projects/${name}/files`));
         if (!res.ok) throw new Error('Failed to list project files');
+        return res.json();
+    }
+
+    async apiListPrograms() {
+        const res = await fetch(this.getApiUrl('/programs'));
+        if (!res.ok) throw new Error('Failed to list programs');
         return res.json();
     }
 
@@ -2535,6 +2542,15 @@ class WMOLApp {
             menuReportDocx.addEventListener('click', () => this.openPublishModal('report'));
         }
         this.wirePublishModal();
+
+        // --- External Programs Menu ---
+        const programsDropdown = document.getElementById('programsDropdown');
+        if (programsDropdown) {
+            programsDropdown.parentElement.addEventListener('show.bs.dropdown', () => {
+                this.loadPrograms();
+            });
+        }
+        this.loadPrograms();
 
         // --- Select Menu ---
         const menuDeselectAll = document.getElementById('menu-deselect-all');
@@ -4650,6 +4666,139 @@ class WMOLApp {
                     </div>
                     <div class="d-grid gap-2" style="grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));">${cells}</div>
                 </div>`;
+    }
+
+    // Fetch the external programs available on the server and populate the
+    // Programs menu. Programs only appear when their executable is present in
+    // the PATH of the server process.
+    async loadPrograms() {
+        try {
+            const { programs } = await this.apiListPrograms();
+            this.state.availablePrograms = programs || [];
+        } catch (e) {
+            console.error('Failed to list server programs:', e);
+            this.state.availablePrograms = [];
+        }
+        this.refreshProgramsMenu();
+    }
+
+    refreshProgramsMenu() {
+        const menu = document.getElementById('programs-menu');
+        if (!menu) return;
+        const programs = this.state.availablePrograms || [];
+        if (!programs.length) {
+            menu.innerHTML = '<li><span class="dropdown-item-text text-muted small">No external programs detected on server</span></li>';
+            return;
+        }
+        menu.innerHTML = programs.map(p => `
+            <li><a class="dropdown-item" href="#" data-program="${p.id}">
+                <div>${p.label}</div>
+                <div class="text-muted small">${p.description}</div>
+            </a></li>`).join('');
+        menu.querySelectorAll('a[data-program]').forEach(a => {
+            a.addEventListener('click', (e) => {
+                e.preventDefault();
+                const id = a.getAttribute('data-program');
+                const program = programs.find(p => p.id === id);
+                if (program) this.runExternalProgram(program);
+            });
+        });
+    }
+
+    // Run an external crystallography program (shelxl, platon, xprep, ...) on
+    // the currently loaded files and show the results in the results modal.
+    async runExternalProgram(program) {
+        const inputs = program.inputs || [];
+        const formData = new FormData();
+
+        let baseName = 'structure';
+        if (this.state.hklName) {
+            baseName = this.state.hklName.replace(/\.hkl$/i, '');
+        }
+        baseName = baseName.replace(/[^a-zA-Z0-9_-]/g, '_');
+
+        const needsRes = inputs.includes('.res') || inputs.includes('.ins') || inputs.includes('.cif');
+        if (needsRes) {
+            if (!this.state.editors.res) {
+                alert('No structure loaded.');
+                return;
+            }
+            const content = this.state.editors.res.getValue();
+            if (!content) {
+                alert('No structure loaded to run.');
+                return;
+            }
+            const ext = inputs.includes('.cif') ? '.cif' : inputs.includes('.ins') ? '.ins' : '.res';
+            formData.append(ext.slice(1), new Blob([content], { type: 'text/plain' }), baseName + ext);
+        }
+        if (inputs.includes('.hkl')) {
+            if (!this.state.hklContent) {
+                alert('No HKL file loaded. Please load an .hkl file first.');
+                return;
+            }
+            formData.append('hkl', new Blob([this.state.hklContent], { type: 'text/plain' }), baseName + '.hkl');
+        }
+
+        const btn = document.getElementById('tool-refine');
+        const originalIcon = btn ? btn.innerHTML : '';
+        if (btn) {
+            btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i>';
+            btn.disabled = true;
+        }
+
+        try {
+            const response = await fetch(this.getApiUrl(`/run/${program.id}`), {
+                method: 'POST',
+                body: formData,
+                signal: AbortSignal.timeout(this.state.preferences.general.refineTimeout || 300000)
+            });
+            if (!response.ok) throw new Error(`Server error: ${response.statusText}`);
+            const data = await response.json();
+            if (data.error) throw new Error(data.error);
+
+            // Load the primary output back into the editor when the program produces it.
+            const primary = { shelxl: '.res', platon: '.res', xprep: '.ins' }[program.id];
+            if (primary && data.files) {
+                const key = Object.keys(data.files).find(k => k.toLowerCase().endsWith(primary));
+                if (key && this.state.editors.res) {
+                    this.state.editors.res.setValue(data.files[key], -1);
+                    this.state.loadedContent = data.files[key];
+                    this.renderContent(data.files[key], 'res');
+                }
+            }
+
+            // Build combined output for display.
+            let combinedOutput = '';
+            if (data.stdout) combinedOutput += '--- STDOUT ---\n' + data.stdout + '\n\n';
+            if (data.stderr) combinedOutput += '--- STDERR ---\n' + data.stderr + '\n\n';
+            if (data.files) {
+                for (const [name, content] of Object.entries(data.files)) {
+                    combinedOutput += `--- ${name} ---\n${content}\n\n`;
+                }
+            }
+            if (!combinedOutput) combinedOutput = '(no output)';
+
+            const resultsContent = document.getElementById('results-content');
+            const resultsSummary = document.getElementById('results-summary');
+            const modalEl = document.getElementById('resultsModal');
+            if (resultsContent && modalEl) {
+                resultsContent.textContent = combinedOutput;
+                if (resultsSummary) {
+                    resultsSummary.innerHTML = program.id === 'shelxl' && data.files
+                        ? this.buildRefinementSummary(Object.values(data.files).join('\n'))
+                        : '';
+                }
+                new bootstrap.Modal(modalEl).show();
+            }
+        } catch (e) {
+            console.error(`Failed to run ${program.label}:`, e);
+            alert(`Failed to run ${program.label}: ${e.message}`);
+        } finally {
+            if (btn) {
+                btn.innerHTML = originalIcon || '<i class="fa-solid fa-flask"></i>';
+                btn.disabled = false;
+            }
+        }
     }
 
     async refineStructure() {

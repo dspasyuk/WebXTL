@@ -73,6 +73,12 @@ WebXTL is powered by a robust Node.js/Express backend that handles heavy lifting
 -   **Process Management**: Handles execution, captures standard output/error logs, and returns the refined structure (`.res`) and listing (`.lst`) files to the frontend.
 -   **Requirement**: The `shelxl` executable must be installed and accessible in the system PATH.
 
+**External Crystallography Programs**
+-   The server can run any installed crystallography tool, currently **SHELXL**, **PLATON**, and **XPREP** (`POST /run/:program`).
+-   **Automatic Detection**: At startup the server scans the system `PATH`; only programs whose executables are actually installed are exposed to the client (`GET /programs`) and shown in the **Programs** menu.
+-   **Generic Runner**: Uploads structure files to an isolated project directory, backs up existing files, spawns the program non-interactively (interactive tools such as PLATON receive a minimal batch input), and returns produced output files plus captured stdout/stderr.
+-   **Requirement**: Programs must be installed and accessible in the system PATH.
+
 **Project Management System**
 -   **Workspace Organization**: Automatically creates isolated project directories for each structure.
 -   **Multi-File Projects**: List and download arbitrary files within a project workspace.
@@ -93,6 +99,8 @@ WebXTL is powered by a robust Node.js/Express backend that handles heavy lifting
 -   `/projects/:name/publish-cif`: Generate a publication-ready CIF from user/device templates.
 -   `/projects/:name/report-docx`: Generate a crystallographic report as a `.docx` download.
 -   `/templates`: List available user (`.cif`) and device (`.dev`) templates for publishing.
+-   `/programs`: List the external crystallography programs available on the server.
+-   `/run/:program`: Run an external program (e.g. `shelxl`, `platon`, `xprep`) on uploaded files.
 -   `/refine`: Upload `.ins` and `.hkl` files to trigger a `shelxl` refinement job. Supports a `mode: 'weight'` option that optimizes the WGHT instruction over several cycles.
 
 ## Installation & Development

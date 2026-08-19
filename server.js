@@ -39,17 +39,89 @@ const DEVICE_DIR = path.join(TEMPLATES_DIR, 'device');
 // Serve static files from 'dist' directory
 app.use(express.static(path.join(__dirname, 'dist')));
 
-// Run SHELXL once on <basename> in <projectDir>. Resolves with { code, stdout, stderr }.
-function runShelxl(projectDir, basename) {
+// ---------------------------------------------------------------------------
+// External crystallography programs
+// ---------------------------------------------------------------------------
+
+// Hard timeout for any spawned crystallography program.
+const RUN_TIMEOUT_MS = 300000;
+
+// Registry of programs the server can run. `exe` is looked up in PATH; a
+// program is only offered to the client when it is actually available.
+// `inputs` are the file extensions the client must supply; `outputs` are the
+// files collected from the project dir and returned to the client. `stdin`
+// is optional text piped to the process for interactive programs (PLATON).
+const PROGRAMS = {
+    shelxl: {
+        label: 'SHELXL',
+        description: 'Least-squares structure refinement',
+        exe: 'shelxl',
+        inputs: ['.ins', '.hkl'],
+        outputs: ['.res', '.lst', '.fcf'],
+        stdin: null,
+    },
+    platon: {
+        label: 'PLATON',
+        description: 'Structure validation and geometry analysis',
+        exe: 'platon',
+        inputs: ['.res', '.cif'],
+        outputs: ['.lis', '.txt', '.plt', '.res', '.fcf', '.cif', '.png'],
+        stdin: '\n',
+    },
+    xprep: {
+        label: 'XPREP',
+        description: 'Data preparation and space-group determination',
+        exe: 'xprep',
+        inputs: ['.hkl'],
+        outputs: ['.ins', '.res', '.txt', '.log'],
+        stdin: null,
+    },
+};
+
+// Check whether an executable is reachable through the system PATH.
+function isExecutableAvailable(exe) {
+    const isWin = process.platform === 'win32';
+    const names = isWin ? [exe, `${exe}.exe`, `${exe}.cmd`, `${exe}.bat`] : [exe];
+    const dirs = (process.env.PATH || '').split(path.delimiter).filter(Boolean);
+    for (const dir of dirs) {
+        for (const name of names) {
+            try {
+                const p = path.join(dir, name);
+                if (fs.existsSync(p) && fs.statSync(p).isFile() && (isWin || (fs.statSync(p).mode & 0o111))) {
+                    return true;
+                }
+            } catch (e) { /* ignore */ }
+        }
+    }
+    return false;
+}
+
+// Programs that are present in the global environment (computed at startup).
+const availablePrograms = Object.keys(PROGRAMS).filter(id => isExecutableAvailable(PROGRAMS[id].exe));
+console.log(`Available crystallography programs: ${availablePrograms.length ? availablePrograms.join(', ') : 'none'}`);
+
+// Run <program> once on <basename> in <projectDir>. Resolves with { code, stdout, stderr }.
+// `stdin` is optional text piped to the process (needed by interactive programs).
+function runProgram(program, args, cwd, stdin) {
     return new Promise((resolve) => {
-        const shelxl = spawn('shelxl', [basename], { cwd: projectDir });
+        const child = spawn(program.exe, args, { cwd, stdio: stdin ? ['pipe', 'pipe', 'pipe'] : ['ignore', 'pipe', 'pipe'] });
         let stdout = '';
         let stderr = '';
-        shelxl.stdout.on('data', (d) => { stdout += d.toString(); });
-        shelxl.stderr.on('data', (d) => { stderr += d.toString(); });
-        shelxl.on('close', (code) => resolve({ code, stdout, stderr }));
-        shelxl.on('error', (err) => resolve({ code: -1, stdout, stderr: stderr + '\n' + err.message }));
+        const timer = setTimeout(() => { child.kill('SIGKILL'); }, RUN_TIMEOUT_MS);
+        child.stdout.on('data', (d) => { stdout += d.toString(); });
+        child.stderr.on('data', (d) => { stderr += d.toString(); });
+        child.on('close', (code) => { clearTimeout(timer); resolve({ code, stdout, stderr }); });
+        child.on('error', (err) => { clearTimeout(timer); resolve({ code: -1, stdout, stderr: stderr + '\n' + err.message }); });
+        if (stdin) {
+            child.stdin.write(stdin);
+            child.stdin.end();
+        }
     });
+}
+
+// Run SHELXL once on <basename> in <projectDir>. Resolves with { code, stdout, stderr }.
+function runShelxl(projectDir, basename) {
+    return runProgram(PROGRAMS.shelxl, [basename], projectDir);
 }
 
 // Parse the "Recommended weighting scheme: WGHT a b" line from a SHELXL .lst.
@@ -210,6 +282,95 @@ app.post('/refine', upload.fields([{ name: 'ins', maxCount: 1 }, { name: 'hkl', 
 
     } catch (error) {
         console.error(`[${jobId}] Unexpected error:`, error);
+        res.status(500).json({ error: 'Internal server error', details: error.message });
+    }
+});
+
+// --- External Program API ---
+
+// GET /programs
+// Returns the external crystallography programs available on the server
+// (only those whose executables are present in the global PATH).
+app.get('/programs', (req, res) => {
+    const programs = availablePrograms.map(id => ({
+        id,
+        label: PROGRAMS[id].label,
+        description: PROGRAMS[id].description,
+        inputs: PROGRAMS[id].inputs,
+    }));
+    res.json({ programs });
+});
+
+/**
+ * POST /run/:program
+ * Runs an external crystallography program on uploaded structure files.
+ * Uploaded files are moved into a project directory named after the basename
+ * of the first file (each stored as <basename><ext>).
+ * Returns { success, jobId, program, stdout, stderr, files: {name: content} }.
+ */
+app.post('/run/:program', upload.any(), async (req, res) => {
+    const jobId = uuidv4();
+    const programId = req.params.program;
+    const program = PROGRAMS[programId];
+
+    if (!program) {
+        return res.status(404).json({ error: `Unknown program: ${programId}` });
+    }
+    if (!availablePrograms.includes(programId)) {
+        return res.status(400).json({ error: `Program '${program.label}' is not available on this server.` });
+    }
+    if (!req.files || req.files.length === 0) {
+        return res.status(400).json({ error: 'At least one structure file is required.' });
+    }
+
+    try {
+        // Determine basename from the first uploaded file.
+        const first = req.files[0];
+        const basename = path.parse(first.originalname).name.replace(/[^a-zA-Z0-9_-]/g, '_');
+
+        const projectDir = path.join(PROJECTS_DIR, basename);
+        fs.mkdirSync(projectDir, { recursive: true });
+        const backupDir = path.join(projectDir, 'backup');
+        fs.mkdirSync(backupDir, { recursive: true });
+
+        // Move uploads into the project as <basename><ext>, backing up existing files.
+        for (const file of req.files) {
+            const ext = path.extname(file.originalname).toLowerCase();
+            const dest = path.join(projectDir, `${basename}${ext}`);
+            if (fs.existsSync(dest)) {
+                const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+                fs.copyFileSync(dest, path.join(backupDir, `${basename}_${timestamp}${ext}`));
+                fs.rmSync(dest);
+            }
+            fs.renameSync(file.path, dest);
+        }
+
+        console.log(`[${jobId}] Running ${program.label} on '${basename}'...`);
+        const r = await runProgram(program, [basename], projectDir, program.stdin);
+
+        const result = {
+            success: r.code === 0,
+            jobId: jobId,
+            program: programId,
+            stdout: r.stdout,
+            stderr: r.stderr,
+            files: {},
+        };
+
+        // Collect the output files defined for this program.
+        for (const ext of program.outputs) {
+            const p = path.join(projectDir, `${basename}${ext}`);
+            if (fs.existsSync(p) && fs.statSync(p).isFile() && fs.statSync(p).size < 5 * 1024 * 1024) {
+                try {
+                    result.files[`${basename}${ext}`] = fs.readFileSync(p, 'utf8');
+                } catch (e) { /* skip binary files */ }
+            }
+        }
+
+        console.log(`[${jobId}] ${program.label} finished with code ${r.code}`);
+        res.json(result);
+    } catch (error) {
+        console.error(`[${jobId}] ${programId} error:`, error);
         res.status(500).json({ error: 'Internal server error', details: error.message });
     }
 });

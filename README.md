@@ -109,10 +109,12 @@ WebXTL is powered by a robust Node.js/Express backend that handles heavy lifting
     ```
 
 3.  **Run in Development Mode**
-    Start the Vite development server with hot-reload:
+    Start both the backend server and the Vite dev server (with hot-reload) concurrently:
     ```bash
     npm run dev
     ```
+    - **Server**: Node.js backend on port 3000
+    - **Client**: Vite dev server with hot-reload (API calls go directly to the backend at `http://localhost:3000`)
 
 4.  **Build for Production**
     Compile the application for deployment:
@@ -121,7 +123,7 @@ WebXTL is powered by a robust Node.js/Express backend that handles heavy lifting
     ```
 
 5.  **Run Production Server**
-    Start the Node.js backend to serve the app and handle project requests:
+    Start the Node.js backend, which serves the built app from `dist/` and handles all project/publish/refine requests on one port:
     ```bash
     node server.js
     ```

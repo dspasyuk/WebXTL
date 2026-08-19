@@ -524,10 +524,14 @@ class WMOLApp {
 
     // POST an HKL file to the jsSpace analysis endpoint.
     // `cell` is optional: "a b c alpha beta gamma" or null.
-    async apiJsSpaceAnalyze(hklText, cell) {
+    // `spaceGroup` is optional: number or Hermann-Mauguin symbol, or null.
+    async apiJsSpaceAnalyze(hklText, cell, spaceGroup) {
         const formData = new FormData();
         formData.append('hkl', new Blob([hklText], { type: 'text/plain' }), 'data.hkl');
         if (cell) formData.append('cell', cell);
+        if (spaceGroup !== undefined && spaceGroup !== null && spaceGroup !== '') {
+            formData.append('spaceGroup', String(spaceGroup));
+        }
         const res = await fetch(this.getApiUrl('/jsspace/analyze'), { method: 'POST', body: formData });
         if (!res.ok) throw new Error('Space-group analysis failed');
         return res.json();
@@ -2546,6 +2550,15 @@ class WMOLApp {
         const menuJsSpace = document.getElementById('menu-jsspace');
         if (menuJsSpace) {
             menuJsSpace.addEventListener('click', () => this.runSpaceGroupAnalysis());
+        }
+        const menuJsSpaceForce = document.getElementById('menu-jsspace-force');
+        if (menuJsSpaceForce) {
+            menuJsSpaceForce.addEventListener('click', () => {
+                const input = prompt(
+                    'Force a specific space group.\nEnter a space group number or Hermann-Mauguin symbol\n(e.g. 14, or "P 21/c", "P-1", "C 2/c"):');
+                if (input === null || input.trim() === '') return;
+                this.runSpaceGroupAnalysis(input.trim());
+            });
         }
 
         // --- Publish Menu ---
@@ -4841,8 +4854,9 @@ class WMOLApp {
     }
 
     // Run the built-in jsSpace space-group determination on the current HKL
-    // data and show the result in the results modal.
-    async runSpaceGroupAnalysis() {
+    // data and show the result in the results modal. `forced` optionally pins
+    // a specific space group (number or Hermann-Mauguin symbol).
+    async runSpaceGroupAnalysis(forced) {
         if (!this.state.hklContent) {
             alert('No HKL file loaded. Please load an .hkl file first.');
             return;
@@ -4856,14 +4870,14 @@ class WMOLApp {
         }
 
         try {
-            let result = await this.apiJsSpaceAnalyze(this.state.hklContent, null);
+            let result = await this.apiJsSpaceAnalyze(this.state.hklContent, null, forced);
 
             // The HKL file carries no unit-cell parameters: ask for them.
             if (result.error === 'NO_CELL') {
                 const input = prompt(
                     'This HKL file has no unit-cell parameters.\nEnter unit cell: a b c alpha beta gamma\n(e.g. 10.5 10.5 14.0 90 90 90)');
                 if (input === null) return; // cancelled
-                result = await this.apiJsSpaceAnalyze(this.state.hklContent, input);
+                result = await this.apiJsSpaceAnalyze(this.state.hklContent, input, forced);
             }
 
             if (!result.ok) {
@@ -4874,8 +4888,6 @@ class WMOLApp {
             const resultsContent = document.getElementById('results-content');
             const resultsSummary = document.getElementById('results-summary');
             if (resultsContent && modalEl) {
-                const s = result.summary;
-                const b = result.best;
                 resultsSummary.innerHTML = this.buildSpaceGroupSummary(result);
                 resultsContent.textContent = this.buildSpaceGroupReport(result);
                 this.wireMergedHklDownload(result);
@@ -4909,14 +4921,31 @@ class WMOLApp {
         const cellTxt = cell ? `${cell.a} ${cell.b} ${cell.c}  ${cell.alpha} ${cell.beta} ${cell.gamma}` : '?';
         const rows = items.map(([k, v]) =>
             `<tr><td class="text-muted pe-3">${k}</td><td class="fw-semibold">${v}</td></tr>`).join('');
+        let sgRow = '';
+        if (s.forced) {
+            sgRow += `<tr><td class="text-muted pe-3">Forced space group</td>
+                <td class="fw-bold fs-6 text-primary">${b.hm} (No. ${b.id})</td></tr>`;
+            if (result.determined) {
+                sgRow += `<tr><td class="text-muted pe-3">Determined (auto)</td>
+                    <td class="fw-semibold">${result.determined.hm} (No. ${result.determined.id})</td></tr>`;
+            }
+        } else {
+            sgRow += `<tr><td class="text-muted pe-3">Best space group</td>
+                <td class="fw-bold fs-6 ${b ? 'text-success' : ''}">${b ? b.hm + ' (No. ' + b.id + ')' : 'indeterminate'}</td></tr>`;
+        }
+        if (result.merge && result.merge.consistency) {
+            const c = result.merge.consistency;
+            const ok = c.violations === 0;
+            sgRow += `<tr><td class="text-muted pe-3">Data consistency</td>
+                <td class="fw-semibold ${ok ? 'text-success' : 'text-danger'}">${ok ? 'consistent' : 'INCONSISTENT (' + c.violations + ' violation(s))'}</td></tr>`;
+        }
         return `<div class="border rounded p-2 bg-light mb-2">
             <div class="fw-semibold small text-uppercase text-muted mb-1">Space-group determination (jsSpace)</div>
             <table class="table table-sm table-borderless align-middle mb-1">
                 <tbody>
                     ${rows}
                     <tr><td class="text-muted pe-3">Unit cell</td><td class="fw-semibold">${cellTxt}</td></tr>
-                    <tr><td class="text-muted pe-3">Best space group</td>
-                        <td class="fw-bold fs-6 ${b ? 'text-success' : ''}">${b ? b.hm + ' (No. ' + b.id + ')' : 'indeterminate'}</td></tr>
+                    ${sgRow}
                 </tbody>
             </table>
         </div>`;
@@ -4935,6 +4964,9 @@ class WMOLApp {
         out.push(`Centering     : ${s.centering}`);
         out.push(`Centrosymmetric: ${s.centricity}  (<|E^2-1|> = ${s.centricityScore.toFixed(3)})`);
         out.push(`Laue class    : ${s.laueClass}  R(sym) = ${(s.laueRSym * 100).toFixed(2)} %`);
+        if (result.determined && s.forced) {
+            out.push(`Determined SG  : ${result.determined.hm} (No. ${result.determined.id})`);
+        }
         out.push('');
         out.push('R(sym) by Laue class:');
         for (const row of result.laueTable) {
@@ -4952,7 +4984,12 @@ class WMOLApp {
         }
         if (result.best) {
             out.push('');
-            out.push(`Best space group: ${result.best.hm}  (No. ${result.best.id})`);
+            out.push(`Best space group: ${result.best.hm}  (No. ${result.best.id})${s.forced ? '  [forced]' : ''}`);
+        }
+        if (result.merge && result.merge.consistency) {
+            const c = result.merge.consistency;
+            const ok = c.violations === 0;
+            out.push(`Data consistency: ${ok ? 'consistent with data' : 'INCONSISTENT (' + c.violations + ' violation(s))'}`);
         }
         if (result.merge && result.merge.report) {
             out.push('');

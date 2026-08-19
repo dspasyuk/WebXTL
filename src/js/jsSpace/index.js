@@ -11,8 +11,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { parseHkl } from './hkl-parser.js';
-import { buildLaueGroups } from './laue.js';
-import { analyzeSpaceGroup, crystalSystemFromCell } from './analyze.js';
+import { buildLaueGroups, sgLaueClass } from './laue.js';
+import { analyzeSpaceGroup, crystalSystemFromCell, scoreSpaceGroup } from './analyze.js';
 import { mergeReflections, computeMergeStatistics, writeShelxHkl, writeXdsAscii, buildPointlessReport } from './merge.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -42,11 +42,42 @@ export function getLaueGroups() {
     return cachedLaueGroups;
 }
 
+// Resolve a space group specified by number (e.g. 14) or Hermann-Mauguin /
+// Hall symbol (e.g. "P 21/c", "P21/c", "-P 2ybc"). Returns the first matching
+// dictionary entry or null.
+export function resolveSpaceGroup(sgData, spec) {
+    if (spec === undefined || spec === null || spec === '') return null;
+    if (typeof spec === 'number' && Number.isFinite(spec)) {
+        return sgData.find(g => g.id === spec) || null;
+    }
+    const str = String(spec).trim();
+    if (/^\d+$/.test(str)) {
+        return sgData.find(g => g.id === parseInt(str, 10)) || null;
+    }
+    const norm = str.replace(/\s+/g, ' ');
+    let g = sgData.find(x => x.hm === norm || x.hs === norm);
+    if (g) return g;
+    const ns = norm.replace(/\s+/g, '');
+    g = sgData.find(x => x.hm.replace(/\s+/g, '') === ns || x.hs.replace(/\s+/g, '') === ns);
+    if (g) return g;
+    // Try interpreting "P21/c" style without any spaces at all.
+    g = sgData.find(x => x.hm.replace(/[\s]*/g, '') === spec.replace(/[\s]*/g, ''));
+    if (g) return g;
+    return null;
+}
+
+// Centering letter (P/A/B/C/I/F/R) from a space group entry.
+function centeringOf(sg) {
+    return (sg.hm || ' ')[0].toUpperCase();
+}
+
 /**
  * Run the full jsSpace analysis on HKL file text.
- * options: { cell: {a,b,c,alpha,beta,gamma} } — only needed when the file
- * does not carry unit-cell parameters.
- * Returns { ok, error?, summary, spaceGroup }.
+ * options: {
+ *   cell: {a,b,c,alpha,beta,gamma},        // needed when the file has none
+ *   spaceGroup: number | string,           // optionally force a space group
+ * }
+ * Returns { ok, error?, summary, best, merge }.
  */
 export function analyzeHkl(text, options = {}) {
     let parsed;
@@ -77,23 +108,46 @@ export function analyzeHkl(text, options = {}) {
     }
 
     const laueGroups = getLaueGroups();
+    const sgData = loadSpaceGroups();
     const metric = crystalSystemFromCell(cell);
-    const result = analyzeSpaceGroup(loadSpaceGroups(), reflections, cell, { laueGroups });
+    const result = analyzeSpaceGroup(sgData, reflections, cell, { laueGroups });
 
-    const best = result.best;
+    // Optionally force a specific space group.
+    const forcedSG = options.spaceGroup !== undefined
+        ? resolveSpaceGroup(sgData, options.spaceGroup)
+        : null;
+    if (options.spaceGroup !== undefined && options.spaceGroup !== null && options.spaceGroup !== '' && !forcedSG) {
+        return { ok: false, error: `Space group not found: ${options.spaceGroup}` };
+    }
 
-    // Merge the reflections under the chosen Laue class and generate the
-    // corrected HKL output (SHELX format + merged XDS_ASCII) plus a
-    // POINTLESS-style merging report.
+    // The space group used for merging / output: the forced one if given,
+    // otherwise the best determined candidate.
+    let usedSG = forcedSG || result.best;
+    let usedLaueName = result.laue.name;
+    let usedLaueOps = result.laue.ops;
+
+    if (forcedSG) {
+        // Use the Laue class of the forced space group for merging.
+        const fl = sgLaueClass(forcedSG.s, laueGroups);
+        if (fl) {
+            const lg = laueGroups.find(g => g.name === fl);
+            usedLaueName = fl;
+            usedLaueOps = lg ? lg.settings[0].ops : result.laue.ops;
+        }
+    }
+
+    // Merge under the chosen Laue class and generate the corrected HKL output
+    // (SHELX format + merged XDS_ASCII) plus a POINTLESS-style report.
     let merge = null;
-    if (result.laue.ops) {
-        const m = mergeReflections(reflections, result.laue.ops, cell);
-        const stats = computeMergeStatistics(reflections, result.laue.ops, cell);
+    if (usedLaueOps) {
+        const m = mergeReflections(reflections, usedLaueOps, cell);
+        const stats = computeMergeStatistics(reflections, usedLaueOps, cell);
+        const usedCentering = forcedSG ? centeringOf(forcedSG) : result.centering;
         const sgInfo = {
-            hm: best ? best.hm : '?',
-            id: best ? best.id : 0,
-            laue: result.laue.name,
-            centering: result.centering,
+            hm: usedSG ? usedSG.hm : '?',
+            id: usedSG ? usedSG.id : 0,
+            laue: usedLaueName,
+            centering: usedCentering,
         };
         merge = {
             nUnique: m.nUnique,
@@ -102,8 +156,8 @@ export function analyzeHkl(text, options = {}) {
             xdsAscii: writeXdsAscii(m.merged, {
                 outputFile: 'MERGED.HKL',
                 cell,
-                spaceGroupNumber: best ? best.id : undefined,
-                spaceGroupName: best ? best.hm : undefined,
+                spaceGroupNumber: usedSG ? usedSG.id : undefined,
+                spaceGroupName: usedSG ? usedSG.hm : undefined,
                 wavelength: parsed.wavelength,
                 dmin: stats.dmin,
                 dmax: stats.dmax,
@@ -111,6 +165,16 @@ export function analyzeHkl(text, options = {}) {
             statistics: stats,
             report: buildPointlessReport(stats, sgInfo, cell),
         };
+        // Consistency of the (possibly forced) space group with the data.
+        const fullSG = usedSG && usedSG.id ? sgData.find(g => g.id === usedSG.id) : null;
+        if (fullSG) {
+            const sc = scoreSpaceGroup(fullSG, reflections, options.sigThreshold || 5);
+            merge.consistency = {
+                violations: sc.violations,
+                confirmedOps: sc.confirmedOps,
+                confirmedAbsences: sc.confirmedAbsences,
+            };
+        }
     }
 
     const summary = {
@@ -121,13 +185,14 @@ export function analyzeHkl(text, options = {}) {
         crystalSystem: result.crystalSystem,
         metricSystem: metric.system,
         uniqueAxis: metric.uniqueAxis,
-        laueClass: result.laue.name,
+        laueClass: usedLaueName,
         laueRSym: result.laue.rsym,
-        centering: result.centering,
+        centering: forcedSG ? centeringOf(forcedSG) : result.centering,
         centricity: result.centricity.centric ? 'centric' : (result.centricity.acentric ? 'acentric' : 'indeterminate'),
         centricityScore: result.centricity.score,
-        bestSpaceGroup: best ? best.hm : null,
-        bestSpaceGroupNumber: best ? best.id : null,
+        forced: !!forcedSG,
+        bestSpaceGroup: usedSG ? usedSG.hm : null,
+        bestSpaceGroupNumber: usedSG ? usedSG.id : null,
         merged: merge ? {
             nUnique: merge.nUnique,
             nObs: merge.nObs,
@@ -146,7 +211,9 @@ export function analyzeHkl(text, options = {}) {
         laueTable: result.laue.table,
         centeringResults: result.centeringResults,
         candidates: result.candidates.slice(0, 30),
-        best: result.best,
+        best: usedSG,
+        determined: result.best,
+        forced: forcedSG ? { id: forcedSG.id, hm: forcedSG.hm, hs: forcedSG.hs } : null,
         merge,
     };
 }

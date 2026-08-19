@@ -56,7 +56,16 @@ function printAnalysis(result) {
     }
     if (result.best) {
         console.log('----------------------------------------------');
-        console.log(`  Best space group  : ${result.best.hm}  (No. ${result.best.id})`);
+        const forced = result.summary && result.summary.forced ? '  [forced]' : '';
+        console.log(`  Best space group  : ${result.best.hm}  (No. ${result.best.id})${forced}`);
+        if (result.determined && result.summary && result.summary.forced) {
+            console.log(`  (determined       : ${result.determined.hm} (No. ${result.determined.id}))`);
+        }
+    }
+    if (result.merge && result.merge.consistency) {
+        const c = result.merge.consistency;
+        const ok = c.violations === 0 ? 'consistent with data' : `INCONSISTENT (${c.violations} violation(s))`;
+        console.log(`  Data consistency  : ${ok}`);
     }
     if (result.merge) {
         console.log('----------------------------------------------');
@@ -91,7 +100,7 @@ async function promptCell() {
 }
 
 function parseArgs(argv) {
-    const args = { file: null, cell: null };
+    const args = { file: null, cell: null, spaceGroup: null };
     for (let i = 0; i < argv.length; i++) {
         const a = argv[i];
         if (a === '--cell' && argv[i + 1]) {
@@ -100,6 +109,12 @@ function parseArgs(argv) {
                 args.cell = { a: v[0], b: v[1], c: v[2], alpha: v[3], beta: v[4], gamma: v[5] };
             } else {
                 throw new Error('--cell expects six numbers: a b c alpha beta gamma');
+            }
+        } else if (a === '--space-group' || a === '--sg') {
+            if (argv[i + 1]) {
+                args.spaceGroup = argv[++i];
+            } else {
+                throw new Error('--space-group expects a number or Hermann-Mauguin symbol');
             }
         } else if (!a.startsWith('-')) {
             args.file = a;
@@ -117,7 +132,7 @@ async function main() {
         process.exit(1);
     }
     if (!args.file) {
-        console.error('Usage: node src/js/jsSpace/cli.js <file.hkl> [--cell "a b c alpha beta gamma"]');
+        console.error('Usage: node src/js/jsSpace/cli.js <file.hkl> [--cell "a b c alpha beta gamma"] [--space-group "14" | "P 21/c"]');
         process.exit(1);
     }
     const filePath = path.resolve(args.file);
@@ -141,7 +156,7 @@ async function main() {
         }
     }
 
-    const result = analyzeHkl(text, { cell });
+    const result = analyzeHkl(text, { cell, spaceGroup: args.spaceGroup });
     printAnalysis(result);
 
     // Write the corrected/merged HKL files next to the input file.

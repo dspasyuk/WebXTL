@@ -440,9 +440,12 @@ app.post('/run/:program', upload.any(), async (req, res) => {
 /**
  * POST /jsspace/analyze
  * Upload an HKL file (multipart field 'hkl'); optionally provide the unit cell
- * in the JSON/field 'cell' as "a b c alpha beta gamma" or {a,b,c,alpha,beta,gamma}.
+ * in the JSON/field 'cell' as "a b c alpha beta gamma" or {a,b,c,alpha,beta,gamma},
+ * and optionally force a space group with 'spaceGroup' (number or HM symbol,
+ * e.g. 14 or "P 21/c").
  * Runs the built-in jsSpace space-group determination and returns the full
- * analysis (Laue class, centering, systematic absences, candidate space groups).
+ * analysis (Laue class, centering, systematic absences, candidate space groups,
+ * merged HKL output).
  */
 app.post('/jsspace/analyze', upload.fields([{ name: 'hkl', maxCount: 1 }]), (req, res) => {
     try {
@@ -469,7 +472,14 @@ app.post('/jsspace/analyze', upload.fields([{ name: 'hkl', maxCount: 1 }]), (req
             }
         }
 
-        const result = analyzeHkl(text, { cell });
+        let spaceGroup = null;
+        const sgField = req.body && req.body.spaceGroup;
+        if (sgField) {
+            if (typeof sgField === 'string' && sgField.trim() !== '') spaceGroup = sgField.trim();
+            else if (typeof sgField === 'number') spaceGroup = sgField;
+        }
+
+        const result = analyzeHkl(text, { cell, spaceGroup });
         res.json(result);
     } catch (error) {
         console.error('jsspace analyze error:', error);

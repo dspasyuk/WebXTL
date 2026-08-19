@@ -22,7 +22,7 @@ app.use(cors({
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization']
 }));
-app.use(express.json({ limit: '50mb' }));
+app.use(express.json({ limit: '100mb' }));
 
 // Configure Multer for file uploads
 const upload = multer({ dest: 'uploads/' });

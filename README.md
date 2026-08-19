@@ -79,8 +79,8 @@ WebXTL is powered by a robust Node.js/Express backend that handles heavy lifting
 -   **Generic Runner**: Uploads structure files to an isolated project directory, backs up existing files, spawns the program non-interactively, and returns produced output files (including suffixed outputs such as SHELXT's `name_a.res`) plus captured stdout/stderr.
 -   **Requirement**: Programs must be installed and accessible in the system PATH.
 
-**xspace — Built-in Space-Group Determination (XPREP alternative)**
--   A pure-JavaScript space-group determination engine (`src/js/xspace/`) that runs on the server with no external dependencies, usable both from the command line and the UI.
+**xrdspace — Built-in Space-Group Determination (XPREP alternative)**
+-   A pure-JavaScript space-group determination engine (`src/js/xrdspace/`) that runs on the server with no external dependencies, usable both from the command line and the UI.
 -   **HKL Parsing**: Reads **XDS_ASCII.HKL** (headers, unit cell, wavelength) and standard **SHELX** five-column HKL files.
 -   **Analysis**: Determines the crystal system from the unit-cell metric, the Laue class from R(sym) merging across all eleven Laue groups, the lattice centering (P/A/B/C/I/F/R) from reflection conditions, and ranks space-group candidates by systematic absences (screw axes and glide planes) plus a Wilson-style centrosymmetry test.
 -   **Corrected/Merged HKL Output**: Merges the reflections under the chosen Laue group (weighted mean intensities, scatter-aware sigmas) and writes:
@@ -88,17 +88,17 @@ WebXTL is powered by a robust Node.js/Express backend that handles heavy lifting
     - a **merged XDS_ASCII** file (`MERGE=TRUE`), plus
     - a **matching SHELX `.ins`** instruction file (same basename as the HKL, correct unit cell, space group LATT/SYMM). When the composition is unknown the UI asks for the expected elements/formula and builds the `SFAC`/`UNIT` lines from it (CLI: `--sfac "C H N O"` or `--formula "C12 H16 N2 O4"`), and
     - a **merging report** (R(merge), R(meas), R(pim), completeness, multiplicity, mean I/σ).
--   **Force a Space Group**: Override the automatic determination by pinning a specific space group — by number or Hermann-Mauguin symbol (e.g. `14`, `P 21/c`, `P-1`). xspace then merges under that group's Laue class, labels the output with the forced space group, and reports whether it is consistent with the data (`violations`) alongside the automatically-determined group.
--   **Missing Unit Cell**: When an HKL file carries no cell parameters, xspace asks for them (CLI prompt or UI dialog).
+-   **Force a Space Group**: Override the automatic determination by pinning a specific space group — by number or Hermann-Mauguin symbol (e.g. `14`, `P 21/c`, `P-1`). xrdspace then merges under that group's Laue class, labels the output with the forced space group, and reports whether it is consistent with the data (`violations`) alongside the automatically-determined group.
+-   **Missing Unit Cell**: When an HKL file carries no cell parameters, xrdspace asks for them (CLI prompt or UI dialog).
 -   **CLI** (POINTLESS-style arguments):
     ```bash
-    node src/js/xspace/cli.js --hklin <file.hkl> [--hklout out.hkl] [--xdsout out_XDS.HKL] \
+    node src/js/xrdspace/cli.js --hklin <file.hkl> [--hklout out.hkl] [--xdsout out_XDS.HKL] \
         [--spacegroup "14" | "P 21/c"] [--laue "2/m" | "mmm"] \
         [--cell "a b c alpha beta gamma"] [--resolution "lo hi"] [--help]
     ```
     Bare keywords (`hklin`, `hklout`, `spacegroup`, `cell`, ...) are also accepted. Default outputs: `<input>_merged.hkl` (SHELX) and `<input>_XDS.HKL` (XDS_ASCII).
--   **UI**: *Calculate → Space Group (xspace)* runs the analysis on the loaded HKL; *Calculate → Force Space Group (xspace)* prompts for a space group and pins it. Both show the full report with a *Download Merged HKL (SHELX)* button.
--   **API**: `POST /xspace/analyze` (multipart `hkl`, optional `cell`, optional `spaceGroup`) returns the analysis, merge statistics, and the generated `shelxHkl` / `xdsAscii` text.
+-   **UI**: *Calculate → Space Group (xrdspace)* runs the analysis on the loaded HKL; *Calculate → Force Space Group (xrdspace)* prompts for a space group and pins it. Both show the full report with a *Download Merged HKL (SHELX)* button.
+-   **API**: `POST /xrdspace/analyze` (multipart `hkl`, optional `cell`, optional `spaceGroup`) returns the analysis, merge statistics, and the generated `shelxHkl` / `xdsAscii` text.
 
 **Project Management System**
 -   **Workspace Organization**: Automatically creates isolated project directories for each structure.
@@ -122,7 +122,7 @@ WebXTL is powered by a robust Node.js/Express backend that handles heavy lifting
 -   `/templates`: List available user (`.cif`) and device (`.dev`) templates for publishing.
 -   `/programs`: List the external crystallography programs available on the server.
 -   `/run/:program`: Run an external program (e.g. `shelxl`, `shelxt`, `shelxd`) on uploaded files.
--   `/xspace/analyze`: Built-in xspace space-group determination on an uploaded HKL file (XDS_ASCII or SHELX format).
+-   `/xrdspace/analyze`: Built-in xrdspace space-group determination on an uploaded HKL file (XDS_ASCII or SHELX format).
 -   `/refine`: Upload `.ins` and `.hkl` files to trigger a `shelxl` refinement job. Supports a `mode: 'weight'` option that optimizes the WGHT instruction over several cycles.
 
 ## Installation & Development

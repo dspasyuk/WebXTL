@@ -1,11 +1,11 @@
 #!/usr/bin/env node
-// xspace command-line interface — POINTLESS-style arguments.
+// xrdspace command-line interface — POINTLESS-style arguments.
 //
 // Usage:
-//   node src/js/xspace/cli.js --hklin <file.hkl> [options]
-//   node src/js/xspace/cli.js hklin <file.hkl> hklout <file.hkl> spacegroup C2 ...
+//   node src/js/xrdspace/cli.js --hklin <file.hkl> [options]
+//   node src/js/xrdspace/cli.js hklin <file.hkl> hklout <file.hkl> spacegroup C2 ...
 //
-// If the HKL file does not carry unit-cell parameters, xspace prompts for
+// If the HKL file does not carry unit-cell parameters, xrdspace prompts for
 // them interactively. Pass --cell "a b c alpha beta gamma" to skip the prompt.
 
 import fs from 'node:fs';
@@ -18,10 +18,10 @@ import { parseHkl } from './hkl-parser.js';
 const VERSION = '1.0.0';
 
 const HELP = `
-xspace — space-group determination and reflection merging (POINTLESS-style CLI)
+xrdspace — space-group determination and reflection merging (POINTLESS-style CLI)
 
 Usage:
-  node src/js/xspace/cli.js --hklin <file.hkl> [options]
+  node src/js/xrdspace/cli.js --hklin <file.hkl> [options]
 
 Input / output:
   --hklin <file>      Input HKL file (XDS_ASCII or SHELX five-column format)
@@ -51,7 +51,7 @@ input file.
 
 function printAnalysis(result) {
     if (!result.ok) {
-        console.error(`xspace: ${result.error}`);
+        console.error(`xrdspace: ${result.error}`);
         if (result.error === 'NO_CELL') {
             console.error('  The HKL file does not contain unit-cell parameters.');
             console.error('  Run again with --cell "a b c alpha beta gamma" or provide them at the prompt.');
@@ -62,7 +62,7 @@ function printAnalysis(result) {
     const s = result.summary;
     console.log('');
     console.log('==============================================');
-    console.log('  xspace  —  space-group determination');
+    console.log('  xrdspace  —  space-group determination');
     console.log('==============================================');
     console.log(`  Format             : ${s.format}`);
     if (s.title) console.log(`  Title              : ${s.title}`);
@@ -254,21 +254,21 @@ async function main() {
     try {
         args = parseArgs(process.argv.slice(2));
     } catch (e) {
-        console.error(`xspace: ${e.message}`);
+        console.error(`xrdspace: ${e.message}`);
         console.error(HELP);
         process.exit(1);
     }
     if (args.help) { console.log(HELP); process.exit(0); }
-    if (args.version) { console.log(`xspace version ${VERSION}`); process.exit(0); }
+    if (args.version) { console.log(`xrdspace version ${VERSION}`); process.exit(0); }
     if (!args.hklin) {
-        console.error('xspace: no input HKL file given.');
+        console.error('xrdspace: no input HKL file given.');
         console.error(HELP);
         process.exit(1);
     }
 
     const filePath = path.resolve(args.hklin);
     if (!fs.existsSync(filePath)) {
-        console.error(`xspace: file not found: ${filePath}`);
+        console.error(`xrdspace: file not found: ${filePath}`);
         process.exit(1);
     }
     const text = fs.readFileSync(filePath, 'utf8');
@@ -277,11 +277,11 @@ async function main() {
     if (!cell) {
         const parsed = parseHkl(text);
         if (!parsed.cell) {
-            console.log('xspace: HKL file has no unit-cell parameters.');
+            console.log('xrdspace: HKL file has no unit-cell parameters.');
             try {
                 cell = await promptCell();
             } catch (e) {
-                console.error(`xspace: ${e.message}`);
+                console.error(`xrdspace: ${e.message}`);
                 process.exit(1);
             }
         }

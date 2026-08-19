@@ -1,4 +1,4 @@
-// HKL file parsers for xspace.
+// HKL file parsers for xrdspace.
 // Supports XDS_ASCII.HKL (with ! header lines) and the standard SHELX
 // five-column format (H K L I SIG(I)).
 

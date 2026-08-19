@@ -1,4 +1,4 @@
-// xspace — a JavaScript XPREP-style space-group determination tool.
+// xrdspace — a JavaScript XPREP-style space-group determination tool.
 //
 // Main entry point: loads the space-group dictionary, parses HKL files
 // (XDS_ASCII, SHELX), and runs the full space-group analysis.
@@ -78,7 +78,7 @@ function centeringOf(sg) {
 // element) can override the generic scattering-factor list.
 export function writeShelxIns(usedSG, cell, options = {}) {
     const wl = options.wavelength || 0.71073;
-    const title = (options.title || 'xspace').replace(/\s+/g, ' ');
+    const title = (options.title || 'xrdspace').replace(/\s+/g, ' ');
     const out = [];
     out.push(`TITL ${title}`);
     out.push(`CELL ${wl.toFixed(5)} ${cell.a} ${cell.b} ${cell.c} ${cell.alpha} ${cell.beta} ${cell.gamma}`);
@@ -181,7 +181,7 @@ function shelxSymmOps(ops, centrosymmetric) {
 }
 
 /**
- * Run the full xspace analysis on HKL file text.
+ * Run the full xrdspace analysis on HKL file text.
  * options: {
  *   cell: {a,b,c,alpha,beta,gamma},        // needed when the file has none
  *   spaceGroup: number | string,           // optionally force a space group

@@ -1,4 +1,4 @@
-// Space-group analysis core for xspace.
+// Space-group analysis core for xrdspace.
 // Implements an XPREP-style space-group determination:
 //   1. unit-cell metric  -> crystal system
 //   2. R(sym) merge      -> Laue class

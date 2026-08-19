@@ -79,6 +79,15 @@ WebXTL is powered by a robust Node.js/Express backend that handles heavy lifting
 -   **Generic Runner**: Uploads structure files to an isolated project directory, backs up existing files, spawns the program non-interactively (interactive tools such as PLATON receive a minimal batch input), and returns produced output files (including suffixed outputs such as SHELXT's `name_a.res`) plus captured stdout/stderr.
 -   **Requirement**: Programs must be installed and accessible in the system PATH.
 
+**jsSpace — Built-in Space-Group Determination (XPREP alternative)**
+-   A pure-JavaScript space-group determination engine (`src/js/jsSpace/`) that runs on the server with no external dependencies, usable both from the command line and the UI.
+-   **HKL Parsing**: Reads **XDS_ASCII.HKL** (headers, unit cell, wavelength) and standard **SHELX** five-column HKL files.
+-   **Analysis**: Determines the crystal system from the unit-cell metric, the Laue class from R(sym) merging across all eleven Laue groups, the lattice centering (P/A/B/C/I/F/R) from reflection conditions, and ranks space-group candidates by systematic absences (screw axes and glide planes) plus a Wilson-style centrosymmetry test.
+-   **Missing Unit Cell**: When an HKL file carries no cell parameters, jsSpace asks for them (CLI prompt or UI dialog).
+-   **CLI**: `node src/js/jsSpace/cli.js <file.hkl> [--cell "a b c alpha beta gamma"]`.
+-   **UI**: *Calculate → Space Group (jsSpace)* runs the analysis on the loaded HKL and shows the full report.
+-   **API**: `POST /jsspace/analyze` (multipart `hkl`, optional `cell`).
+
 **Project Management System**
 -   **Workspace Organization**: Automatically creates isolated project directories for each structure.
 -   **Multi-File Projects**: List and download arbitrary files within a project workspace.
@@ -101,6 +110,7 @@ WebXTL is powered by a robust Node.js/Express backend that handles heavy lifting
 -   `/templates`: List available user (`.cif`) and device (`.dev`) templates for publishing.
 -   `/programs`: List the external crystallography programs available on the server.
 -   `/run/:program`: Run an external program (e.g. `shelxl`, `shelxt`, `shelxd`, `platon`, `xprep`) on uploaded files.
+-   `/jsspace/analyze`: Built-in jsSpace space-group determination on an uploaded HKL file (XDS_ASCII or SHELX format).
 -   `/refine`: Upload `.ins` and `.hkl` files to trigger a `shelxl` refinement job. Supports a `mode: 'weight'` option that optimizes the WGHT instruction over several cycles.
 
 ## Installation & Development

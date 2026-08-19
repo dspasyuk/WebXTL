@@ -522,6 +522,17 @@ class WMOLApp {
         return res.json();
     }
 
+    // POST an HKL file to the jsSpace analysis endpoint.
+    // `cell` is optional: "a b c alpha beta gamma" or null.
+    async apiJsSpaceAnalyze(hklText, cell) {
+        const formData = new FormData();
+        formData.append('hkl', new Blob([hklText], { type: 'text/plain' }), 'data.hkl');
+        if (cell) formData.append('cell', cell);
+        const res = await fetch(this.getApiUrl('/jsspace/analyze'), { method: 'POST', body: formData });
+        if (!res.ok) throw new Error('Space-group analysis failed');
+        return res.json();
+    }
+
     async apiGetProjectFile(projectName, filename) {
         const res = await fetch(this.getApiUrl(`/projects/${projectName}/files/${filename}`));
         if (!res.ok) throw new Error('Failed to fetch project file');
@@ -2530,6 +2541,11 @@ class WMOLApp {
         const menuRefineWeight = document.getElementById('menu-refine-weight');
         if (menuRefineWeight) {
             menuRefineWeight.addEventListener('click', () => this.refineWeight());
+        }
+
+        const menuJsSpace = document.getElementById('menu-jsspace');
+        if (menuJsSpace) {
+            menuJsSpace.addEventListener('click', () => this.runSpaceGroupAnalysis());
         }
 
         // --- Publish Menu ---
@@ -4799,6 +4815,122 @@ class WMOLApp {
                 btn.disabled = false;
             }
         }
+    }
+
+    // Run the built-in jsSpace space-group determination on the current HKL
+    // data and show the result in the results modal.
+    async runSpaceGroupAnalysis() {
+        if (!this.state.hklContent) {
+            alert('No HKL file loaded. Please load an .hkl file first.');
+            return;
+        }
+
+        const btn = document.getElementById('tool-refine');
+        const originalIcon = btn ? btn.innerHTML : '';
+        if (btn) {
+            btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i>';
+            btn.disabled = true;
+        }
+
+        try {
+            let result = await this.apiJsSpaceAnalyze(this.state.hklContent, null);
+
+            // The HKL file carries no unit-cell parameters: ask for them.
+            if (result.error === 'NO_CELL') {
+                const input = prompt(
+                    'This HKL file has no unit-cell parameters.\nEnter unit cell: a b c alpha beta gamma\n(e.g. 10.5 10.5 14.0 90 90 90)');
+                if (input === null) return; // cancelled
+                result = await this.apiJsSpaceAnalyze(this.state.hklContent, input);
+            }
+
+            if (!result.ok) {
+                throw new Error(result.error || 'Space-group analysis failed');
+            }
+
+            const modalEl = document.getElementById('resultsModal');
+            const resultsContent = document.getElementById('results-content');
+            const resultsSummary = document.getElementById('results-summary');
+            if (resultsContent && modalEl) {
+                const s = result.summary;
+                const b = result.best;
+                resultsSummary.innerHTML = this.buildSpaceGroupSummary(result);
+                resultsContent.textContent = this.buildSpaceGroupReport(result);
+                new bootstrap.Modal(modalEl).show();
+            }
+        } catch (e) {
+            console.error('jsSpace analysis failed:', e);
+            alert('Space-group analysis failed: ' + e.message);
+        } finally {
+            if (btn) {
+                btn.innerHTML = originalIcon || '<i class="fa-solid fa-flask"></i>';
+                btn.disabled = false;
+            }
+        }
+    }
+
+    // HTML summary card for the jsSpace result (top of the results modal).
+    buildSpaceGroupSummary(result) {
+        const s = result.summary;
+        const b = result.best;
+        const cell = result.cell;
+        const fmt = (x) => x === null || x === undefined ? '?' : String(x);
+        const items = [
+            ['Crystal system', s.crystalSystem + (s.uniqueAxis ? ' (unique ' + s.uniqueAxis + ')' : '')],
+            ['Laue class', `${s.laueClass}  (R(sym) ${(s.laueRSym * 100).toFixed(2)} %)`],
+            ['Centering', s.centering],
+            ['Centrosymmetric', s.centricity],
+            ['Format', s.format],
+            ['Reflections', s.nReflections],
+        ];
+        const cellTxt = cell ? `${cell.a} ${cell.b} ${cell.c}  ${cell.alpha} ${cell.beta} ${cell.gamma}` : '?';
+        const rows = items.map(([k, v]) =>
+            `<tr><td class="text-muted pe-3">${k}</td><td class="fw-semibold">${v}</td></tr>`).join('');
+        return `<div class="border rounded p-2 bg-light mb-2">
+            <div class="fw-semibold small text-uppercase text-muted mb-1">Space-group determination (jsSpace)</div>
+            <table class="table table-sm table-borderless align-middle mb-1">
+                <tbody>
+                    ${rows}
+                    <tr><td class="text-muted pe-3">Unit cell</td><td class="fw-semibold">${cellTxt}</td></tr>
+                    <tr><td class="text-muted pe-3">Best space group</td>
+                        <td class="fw-bold fs-6 ${b ? 'text-success' : ''}">${b ? b.hm + ' (No. ' + b.id + ')' : 'indeterminate'}</td></tr>
+                </tbody>
+            </table>
+        </div>`;
+    }
+
+    // Plain-text report of the full jsSpace result (scrollable body).
+    buildSpaceGroupReport(result) {
+        const s = result.summary;
+        const out = [];
+        out.push('jsSpace — space-group determination');
+        out.push('==============================================');
+        out.push(`Format        : ${s.format}`);
+        if (s.title) out.push(`Title         : ${s.title}`);
+        out.push(`Reflections   : ${s.nReflections}`);
+        out.push(`Crystal system: ${s.crystalSystem}${s.uniqueAxis ? ' (unique ' + s.uniqueAxis + ')' : ''}`);
+        out.push(`Centering     : ${s.centering}`);
+        out.push(`Centrosymmetric: ${s.centricity}  (<|E^2-1|> = ${s.centricityScore.toFixed(3)})`);
+        out.push(`Laue class    : ${s.laueClass}  R(sym) = ${(s.laueRSym * 100).toFixed(2)} %`);
+        out.push('');
+        out.push('R(sym) by Laue class:');
+        for (const row of result.laueTable) {
+            out.push(`  ${String(row.name).padEnd(7)} order ${String(row.order).padStart(2)}  R(sym) = ${(row.rsym * 100).toFixed(2)} %${row.chosen ? '  <--' : ''}`);
+        }
+        out.push('');
+        out.push('Space-group candidates (systematic absences):');
+        if (!result.candidates.length) {
+            out.push('  (no candidates matched)');
+        } else {
+            for (const c of result.candidates.slice(0, 15)) {
+                const mark = result.best && c.id === result.best.id ? '  <-- best' : '';
+                out.push(`  ${String(c.id).padStart(3)}  ${c.hm.padEnd(20)} violations ${String(c.violations).padStart(4)}${mark}`);
+            }
+        }
+        if (result.best) {
+            out.push('');
+            out.push(`Best space group: ${result.best.hm}  (No. ${result.best.id})`);
+        }
+        return out.join('\n');
     }
 
     async refineStructure() {

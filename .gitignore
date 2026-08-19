@@ -5,6 +5,7 @@ uploads
 projects
 versions
 test
+HKLs
 .DS_Store
 *.log
 session-*

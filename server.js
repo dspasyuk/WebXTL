@@ -7,6 +7,7 @@ import path from 'path';
 import { spawn } from 'child_process';
 import { fileURLToPath } from 'url';
 import { buildPublishCif, buildPublishCifFromTemplates, buildReportDocx, parseDevFile, parseCif } from './publish.js';
+import { analyzeHkl } from './src/js/jsSpace/index.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -431,6 +432,48 @@ app.post('/run/:program', upload.any(), async (req, res) => {
     } catch (error) {
         console.error(`[${jobId}] ${programId} error:`, error);
         res.status(500).json({ error: 'Internal server error', details: error.message });
+    }
+});
+
+// --- jsSpace: space-group determination (XPREP alternative) ---
+
+/**
+ * POST /jsspace/analyze
+ * Upload an HKL file (multipart field 'hkl'); optionally provide the unit cell
+ * in the JSON/field 'cell' as "a b c alpha beta gamma" or {a,b,c,alpha,beta,gamma}.
+ * Runs the built-in jsSpace space-group determination and returns the full
+ * analysis (Laue class, centering, systematic absences, candidate space groups).
+ */
+app.post('/jsspace/analyze', upload.fields([{ name: 'hkl', maxCount: 1 }]), (req, res) => {
+    try {
+        if (!req.files || !req.files['hkl']) {
+            return res.status(400).json({ error: 'An HKL file is required.' });
+        }
+        const file = req.files['hkl'][0];
+        const text = fs.readFileSync(file.path, 'utf8');
+        fs.rmSync(file.path, { force: true }); // temp upload, no persistence
+
+        let cell = null;
+        const cellField = req.body && req.body.cell;
+        if (cellField) {
+            if (typeof cellField === 'string') {
+                const v = cellField.split(/\s+/).map(parseFloat);
+                if (v.length === 6 && v.every(Number.isFinite)) {
+                    cell = { a: v[0], b: v[1], c: v[2], alpha: v[3], beta: v[4], gamma: v[5] };
+                }
+            } else if (typeof cellField === 'object' && cellField.a) {
+                cell = {
+                    a: parseFloat(cellField.a), b: parseFloat(cellField.b), c: parseFloat(cellField.c),
+                    alpha: parseFloat(cellField.alpha), beta: parseFloat(cellField.beta), gamma: parseFloat(cellField.gamma),
+                };
+            }
+        }
+
+        const result = analyzeHkl(text, { cell });
+        res.json(result);
+    } catch (error) {
+        console.error('jsspace analyze error:', error);
+        res.status(500).json({ error: 'Failed to run space-group analysis', details: error.message });
     }
 });
 

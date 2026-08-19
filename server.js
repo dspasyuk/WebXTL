@@ -22,7 +22,7 @@ app.use(cors({
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization']
 }));
-app.use(express.json());
+app.use(express.json({ limit: '50mb' }));
 
 // Configure Multer for file uploads
 const upload = multer({ dest: 'uploads/' });
@@ -134,17 +134,28 @@ const availablePrograms = Object.keys(PROGRAMS).filter(id => isExecutableAvailab
 console.log(`Available crystallography programs: ${availablePrograms.length ? availablePrograms.join(', ') : 'none'}`);
 
 // Run <program> once on <basename> in <projectDir>. Resolves with { code, stdout, stderr }.
-// `stdin` is optional text piped to the process (needed by interactive programs).
-function runProgram(program, args, cwd, stdin) {
+// `stdin` is optional text piped to the process. `signal` is an optional
+// AbortSignal; when aborted (e.g. the client cancelled) the child is killed.
+function runProgram(program, args, cwd, stdin, signal) {
     return new Promise((resolve) => {
         const child = spawn(program.exe, args, { cwd, stdio: stdin ? ['pipe', 'pipe', 'pipe'] : ['ignore', 'pipe', 'pipe'] });
         let stdout = '';
         let stderr = '';
+        let aborted = false;
         const timer = setTimeout(() => { child.kill('SIGKILL'); }, RUN_TIMEOUT_MS);
+        const onAbort = () => { aborted = true; child.kill('SIGKILL'); };
+        if (signal) {
+            if (signal.aborted) onAbort();
+            else signal.addEventListener('abort', onAbort, { once: true });
+        }
+        const cleanup = () => {
+            clearTimeout(timer);
+            if (signal) signal.removeEventListener('abort', onAbort);
+        };
         child.stdout.on('data', (d) => { stdout += d.toString(); });
         child.stderr.on('data', (d) => { stderr += d.toString(); });
-        child.on('close', (code) => { clearTimeout(timer); resolve({ code, stdout, stderr }); });
-        child.on('error', (err) => { clearTimeout(timer); resolve({ code: -1, stdout, stderr: stderr + '\n' + err.message }); });
+        child.on('close', (code) => { cleanup(); resolve({ code, aborted, stdout, stderr }); });
+        child.on('error', (err) => { cleanup(); resolve({ code: -1, aborted, stdout, stderr: stderr + '\n' + err.message }); });
         if (stdin) {
             child.stdin.write(stdin);
             child.stdin.end();
@@ -153,8 +164,8 @@ function runProgram(program, args, cwd, stdin) {
 }
 
 // Run SHELXL once on <basename> in <projectDir>. Resolves with { code, stdout, stderr }.
-function runShelxl(projectDir, basename) {
-    return runProgram(PROGRAMS.shelxl, [basename], projectDir);
+function runShelxl(projectDir, basename, signal) {
+    return runProgram(PROGRAMS.shelxl, [basename], projectDir, undefined, signal);
 }
 
 // Parse the "Recommended weighting scheme: WGHT a b" line from a SHELXL .lst.
@@ -188,6 +199,10 @@ function updateWghtInstruction(filePath, a, b) {
  */
 app.post('/refine', upload.fields([{ name: 'ins', maxCount: 1 }, { name: 'hkl', maxCount: 1 }, { name: 'cycles', maxCount: 1 }, { name: 'mode', maxCount: 1 }]), async (req, res) => {
     const jobId = uuidv4(); // Still useful for logging
+
+    // Abort the spawned SHELXL process when the client disconnects / cancels.
+    const controller = new AbortController();
+    res.on('close', () => { if (!res.writableEnded) controller.abort(); });
 
     try {
         // Validate inputs
@@ -356,6 +371,10 @@ app.post('/run/:program', upload.any(), async (req, res) => {
         return res.status(400).json({ error: 'At least one structure file is required.' });
     }
 
+    // Abort the spawned program when the client disconnects / cancels.
+    const controller = new AbortController();
+    res.on('close', () => { if (!res.writableEnded) controller.abort(); });
+
     try {
         // Determine basename from the first uploaded file.
         const first = req.files[0];
@@ -381,7 +400,7 @@ app.post('/run/:program', upload.any(), async (req, res) => {
         }
 
         console.log(`[${jobId}] Running ${program.label} on '${basename}'...`);
-        const r = await runProgram(program, [basename], projectDir, program.stdin);
+        const r = await runProgram(program, [basename], projectDir, program.stdin, controller.signal);
 
         const result = {
             success: r.code === 0,

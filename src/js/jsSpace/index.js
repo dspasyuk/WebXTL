@@ -12,8 +12,9 @@ import { fileURLToPath } from 'node:url';
 
 import { parseHkl } from './hkl-parser.js';
 import { buildLaueGroups, sgLaueClass } from './laue.js';
-import { analyzeSpaceGroup, crystalSystemFromCell, scoreSpaceGroup } from './analyze.js';
+import { analyzeSpaceGroup, crystalSystemFromCell, scoreSpaceGroup, isCentrosymmetric } from './analyze.js';
 import { mergeReflections, computeMergeStatistics, writeShelxHkl, writeXdsAscii, buildMergingReport, dSpacing } from './merge.js';
+import { parseOperation } from './op-math.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -69,6 +70,108 @@ export function resolveSpaceGroup(sgData, spec) {
 // Centering letter (P/A/B/C/I/F/R) from a space group entry.
 function centeringOf(sg) {
     return (sg.hm || ' ')[0].toUpperCase();
+}
+
+// Generate a SHELX instruction (.ins) file for structure-solution programs
+// (SHELXT / SHELXD / SHELXS) using the determined/forced space group and the
+// unit cell. The scattering-factor list is a generic default; edit as needed.
+export function writeShelxIns(usedSG, cell, options = {}) {
+    const wl = options.wavelength || 0.71073;
+    const title = (options.title || 'jsSpace').replace(/\s+/g, ' ');
+    const out = [];
+    out.push(`TITL ${title}`);
+    out.push(`CELL ${wl.toFixed(5)} ${cell.a} ${cell.b} ${cell.c} ${cell.alpha} ${cell.beta} ${cell.gamma}`);
+    out.push('ZERR 1 0.001 0.001 0.001 0.001 0.001 0.001');
+    const lattNum = { P: 1, A: 2, B: 3, C: 4, I: 5, F: 6, R: 7 }[centeringOf(usedSG)] || 1;
+    const centrosymmetric = isCentrosymmetric(usedSG);
+    const sign = centrosymmetric ? -1 : 1;
+    out.push(`LATT ${sign * lattNum}`);
+    // Generating symmetry operations in SHELX convention (fraction first).
+    // For centrosymmetric space groups (LATT < 0) SHELX generates the
+    // inversion partners, so only one op from each inversion pair is written.
+    for (const op of shelxSymmOps(usedSG.s, centrosymmetric)) {
+        out.push(`SYMM ${op}`);
+    }
+    out.push('SFAC C H N O F Na Mg Al Si P S Cl K Ca Fe Ni Cu Zn Br I');
+    out.push('UNIT 20 20 10 10 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2 2');
+    out.push('HKLF 4');
+    out.push('TREF 50');
+    out.push('END');
+    return out.join('\n') + '\n';
+}
+
+// Format a fraction for SHELX (e.g. 1/2, 1/4, -1/2).
+function fmtFrac(v) {
+    const denoms = [1, 2, 3, 4, 6, 8, 12];
+    for (const d of denoms) {
+        const n = Math.round(v * d);
+        if (Math.abs(n - v * d) < 1e-9) {
+            return `${n}/${d}`;
+        }
+    }
+    return String(v);
+}
+
+// Format a symmetry component like "-x, 1/2+y, 1/2-z" (SHELX convention).
+function fmtComponent(cx, cy, cz, t) {
+    const out = [];
+    if (Math.abs(t) > 1e-9) {
+        out.push((t < 0 ? '-' : '') + fmtFrac(Math.abs(t)));
+    }
+    const vars = [['X', cx], ['Y', cy], ['Z', cz]];
+    for (const [name, coeff] of vars) {
+        if (Math.abs(coeff) < 1e-9) continue;
+        const sign = coeff < 0 ? '-' : (out.length ? '+' : '');
+        const mag = Math.abs(coeff);
+        out.push(sign + (Math.abs(mag - 1) < 1e-9 ? name : fmtFrac(mag) + name));
+    }
+    return out.join('') || '0';
+}
+
+function matIs(m, ref) {
+    for (let i = 0; i < 3; i++) for (let j = 0; j < 3; j++) {
+        if (Math.abs(m[i][j] - ref[i][j]) > 1e-9) return false;
+    }
+    return true;
+}
+
+function vecIs(t, v) {
+    return t.every(x => Math.abs(x - v) < 1e-9);
+}
+
+function matKey(m) {
+    return m.map(r => r.join(',')).join('|');
+}
+
+function negVec(t) {
+    return t.map(x => -x);
+}
+
+// Reduce the full list of general positions to the generating operations
+// expected in a SHELX .ins (identity omitted; for centrosymmetric groups only
+// one op per inversion pair).
+function shelxSymmOps(ops, centrosymmetric) {
+    const I = [[1, 0, 0], [0, 1, 0], [0, 0, 1]];
+    const mI = [[-1, 0, 0], [0, -1, 0], [0, 0, -1]];
+    const out = [];
+    const seen = new Set();
+    for (const opStr of ops) {
+        const p = parseOperation(opStr);
+        if (!p) continue;
+        if (matIs(p.R, I) && vecIs(p.t, 0)) continue;           // identity
+        if (centrosymmetric && matIs(p.R, mI) && vecIs(p.t, 0)) continue; // pure inversion
+        if (centrosymmetric) {
+            const partner = matKey(p.R.map((row, i) => row.map(v => -v))) + '|' + negVec(p.t).map(v => Math.round(v * 1e6) / 1e6).join(',');
+            if (seen.has(partner)) continue;
+            seen.add(matKey(p.R) + '|' + p.t.map(v => Math.round(v * 1e6) / 1e6).join(','));
+        }
+        const parts = [];
+        for (let i = 0; i < 3; i++) {
+            parts.push(fmtComponent(p.R[i][0], p.R[i][1], p.R[i][2], p.t[i]));
+        }
+        out.push(parts.join(', '));
+    }
+    return out;
 }
 
 /**
@@ -199,6 +302,10 @@ export function analyzeHkl(text, options = {}) {
                 confirmedOps: sc.confirmedOps,
                 confirmedAbsences: sc.confirmedAbsences,
             };
+            merge.shelxIns = writeShelxIns(fullSG, cell, {
+                wavelength: parsed.wavelength,
+                title: parsed.title || fullSG.hm,
+            });
         }
     }
 

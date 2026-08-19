@@ -78,6 +78,7 @@ class WMOLApp {
             currentProject: null,
             fileTabs: {}, // keyed by filename -> { filename, type, editor, project, dirty }
             availablePrograms: [], // external programs detected on the server
+            jsSpaceIns: null, // { filename, content } generated SHELX .ins for SHELXT
             hklContent: null,
             hklName: null,
             fcfRawContent: null,
@@ -525,7 +526,8 @@ class WMOLApp {
     // POST an HKL file to the jsSpace analysis endpoint.
     // `cell` is optional: "a b c alpha beta gamma" or null.
     // `spaceGroup` is optional: number or Hermann-Mauguin symbol, or null.
-    async apiJsSpaceAnalyze(hklText, cell, spaceGroup) {
+    // `signal` is an optional AbortSignal for cancellation.
+    async apiJsSpaceAnalyze(hklText, cell, spaceGroup, signal) {
         const formData = new FormData();
         formData.append('hkl', new Blob([hklText], { type: 'text/plain' }), 'data.hkl');
         if (cell) formData.append('cell', cell);
@@ -535,12 +537,16 @@ class WMOLApp {
         const url = this.getApiUrl('/jsspace/analyze');
         let res;
         try {
-            res = await fetch(url, {
-                method: 'POST',
-                body: formData,
-                signal: AbortSignal.timeout(180000)
-            });
+            const combined = signal
+                ? (typeof AbortSignal.any === 'function'
+                    ? AbortSignal.any([AbortSignal.timeout(180000), signal])
+                    : signal)
+                : AbortSignal.timeout(180000);
+            res = await fetch(url, { method: 'POST', body: formData, signal: combined });
         } catch (e) {
+            if (e && e.name === 'AbortError' && signal && signal.aborted) {
+                throw e; // user cancelled
+            }
             const hint = (e && e.name === 'TimeoutError')
                 ? 'The analysis took too long and timed out.'
                 : 'Is the backend server running? (node server.js)';
@@ -4761,16 +4767,19 @@ class WMOLApp {
 
         const needsRes = inputs.includes('.res') || inputs.includes('.ins') || inputs.includes('.cif');
         if (needsRes) {
-            if (!this.state.editors.res) {
-                alert('No structure loaded.');
-                return;
+            const ext = inputs.includes('.cif') ? '.cif' : inputs.includes('.ins') ? '.ins' : '.res';
+            // Prefer the jsSpace-generated .ins (correct cell + space group,
+            // matching basename) for structure-solution programs.
+            let content = null;
+            if (ext === '.ins' && this.state.jsSpaceIns) {
+                content = this.state.jsSpaceIns.content;
+            } else if (this.state.editors.res) {
+                content = this.state.editors.res.getValue();
             }
-            const content = this.state.editors.res.getValue();
             if (!content) {
                 alert('No structure loaded to run.');
                 return;
             }
-            const ext = inputs.includes('.cif') ? '.cif' : inputs.includes('.ins') ? '.ins' : '.res';
             formData.append(ext.slice(1), new Blob([content], { type: 'text/plain' }), baseName + ext);
         }
         if (inputs.includes('.hkl')) {
@@ -4788,11 +4797,18 @@ class WMOLApp {
             btn.disabled = true;
         }
 
+        // Progress dialog with cancel support.
+        const controller = new AbortController();
+        const cancelBtn = document.getElementById('btn-cancel-progress');
+        if (cancelBtn) cancelBtn.onclick = () => controller.abort();
+        this.showProgressDialog(`Running ${program.label}...`,
+            `This may take a while for large structures.`);
+
         try {
             const response = await fetch(this.getApiUrl(`/run/${program.id}`), {
                 method: 'POST',
                 body: formData,
-                signal: AbortSignal.timeout(this.state.preferences.general.refineTimeout || 300000)
+                signal: this.makeAbortSignal(controller)
             });
             if (!response.ok) throw new Error(`Server error: ${response.statusText}`);
             let data;
@@ -4839,19 +4855,26 @@ class WMOLApp {
                 new bootstrap.Modal(modalEl).show();
             }
         } catch (e) {
-            console.error(`Failed to run ${program.label}:`, e);
-            alert(`Failed to run ${program.label}: ${e.message}`);
+            if (e && e.name === 'AbortError') {
+                console.log(`${program.label} run cancelled by user`);
+                alert(`${program.label} run cancelled.`);
+            } else {
+                console.error(`Failed to run ${program.label}:`, e);
+                alert(`Failed to run ${program.label}: ${e.message}`);
+            }
         } finally {
             if (btn) {
                 btn.innerHTML = originalIcon || '<i class="fa-solid fa-flask"></i>';
                 btn.disabled = false;
             }
+            this.hideProgressDialog();
         }
     }
 
     // Load the corrected/merged HKL (SHELX format) as the active HKL in the UI
-    // so subsequent steps (e.g. SHELXD / SHELXT) operate on it. Returns the
-    // new filename, or null if no merged HKL was produced.
+    // so subsequent steps (e.g. SHELXD / SHELXT) operate on it. Also generates
+    // a matching SHELX .ins with the correct cell/space group. Returns the
+    // merged HKL filename, or null if no merged HKL was produced.
     applyMergedHkl(result) {
         if (!result.merge || !result.merge.shelxHkl) return null;
         let base = 'structure';
@@ -4869,8 +4892,66 @@ class WMOLApp {
             statusHkl.title = 'HKL Loaded (merged): ' + mergedName;
         }
         this.openFileTab(mergedName, result.merge.shelxHkl, 'hkl', null, false);
+
+        // Generate a matching SHELX .ins (same basename) so SHELXD / SHELXT
+        // can be run directly with the correct unit cell and space group.
+        if (result.merge.shelxIns) {
+            const insName = base + '_merged.ins';
+            this.state.jsSpaceIns = { filename: insName, content: result.merge.shelxIns };
+            if (this.state.editors.res) {
+                this.state.editors.res.setValue(result.merge.shelxIns, -1);
+                this.state.loadedContent = result.merge.shelxIns;
+                this.state.loadedType = 'res';
+                this.state.loadedFilename = insName;
+                this.renderContent(result.merge.shelxIns, 'res');
+            }
+            this.openFileTab(insName, result.merge.shelxIns, 'res', null, false);
+        }
+
         this.saveStateToLocalStorage();
         return mergedName;
+    }
+
+    // Show the progress dialog for long-running jobs (external programs,
+    // refinement). The elapsed-time counter updates every second.
+    showProgressDialog(title, subtitle) {
+        const el = document.getElementById('progressModal');
+        if (!el) return null;
+        document.getElementById('progress-title').textContent = title;
+        document.getElementById('progress-subtitle').textContent = subtitle || '';
+        const timeEl = document.getElementById('progress-time');
+        this._progressStart = Date.now();
+        if (this._progressInterval) clearInterval(this._progressInterval);
+        if (timeEl) timeEl.textContent = 'Elapsed: 0 s';
+        this._progressInterval = setInterval(() => {
+            if (!timeEl) return;
+            const s = Math.floor((Date.now() - this._progressStart) / 1000);
+            timeEl.textContent = `Elapsed: ${s} s`;
+        }, 1000);
+        const modal = new bootstrap.Modal(el);
+        modal.show();
+        return modal;
+    }
+
+    hideProgressDialog() {
+        if (this._progressInterval) {
+            clearInterval(this._progressInterval);
+            this._progressInterval = null;
+        }
+        const el = document.getElementById('progressModal');
+        if (el) {
+            const modal = bootstrap.Modal.getInstance(el);
+            if (modal) modal.hide();
+        }
+    }
+
+    // Combined abort signal: user cancel (controller) + server timeout.
+    makeAbortSignal(controller) {
+        const timeout = this.state.preferences.general.refineTimeout || 300000;
+        if (typeof AbortSignal.any === 'function') {
+            return AbortSignal.any([AbortSignal.timeout(timeout), controller.signal]);
+        }
+        return controller.signal;
     }
 
     // Wire the "Download Merged HKL" and "Load Merged HKL for SHELXT" buttons
@@ -4930,15 +5011,22 @@ class WMOLApp {
             btn.disabled = true;
         }
 
+        // Progress dialog (jsSpace can be slow on large datasets).
+        const controller = new AbortController();
+        const cancelBtn = document.getElementById('btn-cancel-progress');
+        if (cancelBtn) cancelBtn.onclick = () => controller.abort();
+        this.showProgressDialog('Space-group determination (jsSpace)...',
+            'Analyzing Laue symmetry, centering and systematic absences.');
+
         try {
-            let result = await this.apiJsSpaceAnalyze(this.state.hklContent, null, forced);
+            let result = await this.apiJsSpaceAnalyze(this.state.hklContent, null, forced, controller.signal);
 
             // The HKL file carries no unit-cell parameters: ask for them.
             if (result.error === 'NO_CELL') {
                 const input = prompt(
                     'This HKL file has no unit-cell parameters.\nEnter unit cell: a b c alpha beta gamma\n(e.g. 10.5 10.5 14.0 90 90 90)');
                 if (input === null) return; // cancelled
-                result = await this.apiJsSpaceAnalyze(this.state.hklContent, input, forced);
+                result = await this.apiJsSpaceAnalyze(this.state.hklContent, input, forced, controller.signal);
             }
 
             if (!result.ok) {
@@ -4955,13 +5043,19 @@ class WMOLApp {
                 new bootstrap.Modal(modalEl).show();
             }
         } catch (e) {
-            console.error('jsSpace analysis failed:', e);
-            alert('Space-group analysis failed: ' + e.message);
+            if (e && e.name === 'AbortError') {
+                console.log('jsSpace analysis cancelled by user');
+                alert('Space-group analysis cancelled.');
+            } else {
+                console.error('jsSpace analysis failed:', e);
+                alert('Space-group analysis failed: ' + e.message);
+            }
         } finally {
             if (btn) {
                 btn.innerHTML = originalIcon || '<i class="fa-solid fa-flask"></i>';
                 btn.disabled = false;
             }
+            this.hideProgressDialog();
         }
     }
 
@@ -5090,7 +5184,7 @@ class WMOLApp {
         formData.append('ins', insBlob, baseName + '.ins');
         formData.append('hkl', hklBlob, baseName + '.hkl');
 
-        await this.runRefinement(formData, 'tool-refine');
+        await this.runRefinement(formData, 'tool-refine', 'Refining structure (SHELXL)...');
     }
 
     // Weight (GOOF) refinement: prompts for the number of SHELXL cycles (default 3)
@@ -5131,12 +5225,13 @@ class WMOLApp {
         formData.append('cycles', String(cycles));
         formData.append('mode', 'weight');
 
-        await this.runRefinement(formData, 'tool-refine');
+        await this.runRefinement(formData, 'tool-refine', 'Weight (GOOF) refinement...');
     }
 
     // Shared refinement runner: POSTs form data to the server, updates the RES/LST
     // editors and shows the results modal. `btnId` is the toolbar button to spin.
-    async runRefinement(formData, btnId) {
+    // `title` is shown in the progress dialog.
+    async runRefinement(formData, btnId, title = 'Refining structure (SHELXL)...') {
         const btn = document.getElementById(btnId);
         const originalIcon = btn ? btn.innerHTML : '';
         if (btn) {
@@ -5144,11 +5239,17 @@ class WMOLApp {
             btn.disabled = true;
         }
 
+        // Progress dialog with cancel support.
+        const controller = new AbortController();
+        const cancelBtn = document.getElementById('btn-cancel-progress');
+        if (cancelBtn) cancelBtn.onclick = () => controller.abort();
+        this.showProgressDialog(title, 'SHELXL least-squares refinement in progress.');
+
         try {
             const response = await fetch(this.state.preferences.general.serverUrl, {
                 method: 'POST',
                 body: formData,
-                signal: AbortSignal.timeout(this.state.preferences.general.refineTimeout || 300000)
+                signal: this.makeAbortSignal(controller)
             });
 
             if (!response.ok) {
@@ -5210,13 +5311,19 @@ class WMOLApp {
             }
 
         } catch (e) {
-            console.error("Refinement failed:", e);
-            alert("Refinement failed: " + e.message);
+            if (e && e.name === 'AbortError') {
+                console.log("Refinement cancelled by user");
+                alert("Refinement cancelled.");
+            } else {
+                console.error("Refinement failed:", e);
+                alert("Refinement failed: " + e.message);
+            }
         } finally {
             if (btn) {
                 btn.innerHTML = originalIcon || '<i class="fa-solid fa-flask"></i>';
                 btn.disabled = false;
             }
+            this.hideProgressDialog();
         }
     }
 

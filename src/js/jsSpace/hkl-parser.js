@@ -100,7 +100,8 @@ export function parseHkl(text) {
         }
         if (header.SPACE_GROUP_NUMBER) spaceGroupNumber = parseInt(header.SPACE_GROUP_NUMBER, 10);
         if (header.SPACE_GROUP_NAME) spaceGroupName = header.SPACE_GROUP_NAME;
-        if (header.XRAY_WAVELENGTH) wavelength = parseFloat(header.XRAY_WAVELENGTH);
+        const wl = header['X-RAY_WAVELENGTH'] ?? header.XRAY_WAVELENGTH;
+        if (wl) wavelength = parseFloat(wl);
         merge = (header.MERGE || '').toUpperCase() === 'TRUE';
         friedelsLaw = (header.FRIEDELS_LAW || '').toUpperCase() === 'TRUE';
 

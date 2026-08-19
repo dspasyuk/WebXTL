@@ -672,6 +672,24 @@
         </div>
     </div>
 
+    <!-- Progress Modal (long-running external programs / refinement) -->
+    <div class="modal fade" id="progressModal" tabindex="-1" aria-hidden="true"
+        data-bs-backdrop="static" data-bs-keyboard="false">
+        <div class="modal-dialog modal-dialog-centered">
+            <div class="modal-content">
+                <div class="modal-body text-center p-4">
+                    <div class="spinner-border text-primary mb-3" role="status" style="width: 3rem; height: 3rem;"></div>
+                    <h5 id="progress-title" class="mb-1">Running...</h5>
+                    <p class="text-muted small mb-2" id="progress-subtitle"></p>
+                    <div class="text-muted small mb-3" id="progress-time">Elapsed: 0 s</div>
+                    <div>
+                        <button type="button" class="btn btn-outline-danger btn-sm" id="btn-cancel-progress">Cancel</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <!-- Publish Modal -->
     <div class="modal fade" id="publishModal" tabindex="-1" aria-hidden="true">
         <div class="modal-dialog modal-lg modal-dialog-scrollable">

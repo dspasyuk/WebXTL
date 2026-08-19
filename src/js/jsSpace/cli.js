@@ -274,15 +274,22 @@ async function main() {
         const base = path.parse(filePath).name;
         const shelxPath = path.resolve(args.hklout || path.join(dir, base + '_merged.hkl'));
         const xdsPath = path.resolve(args.xdsout || path.join(dir, base + '_XDS.HKL'));
+        const insPath = path.resolve(args.hklout ? args.hklout.replace(/\.hkl$/i, '.ins') : path.join(dir, base + '_merged.ins'));
         // Keep the XDS header OUTPUT_FILE consistent with the written file.
         result.merge.xdsAscii = result.merge.xdsAscii.replace(
             /!OUTPUT_FILE=[^\n]*/,
             '!OUTPUT_FILE=' + path.basename(xdsPath));
         fs.writeFileSync(shelxPath, result.merge.shelxHkl, 'utf8');
         fs.writeFileSync(xdsPath, result.merge.xdsAscii, 'utf8');
+        if (result.merge.shelxIns) {
+            fs.writeFileSync(insPath, result.merge.shelxIns, 'utf8');
+        }
         console.log(`Merged HKL written to:`);
         console.log(`  ${shelxPath}  (SHELX format, ready for SHELXD/SHELXT)`);
         console.log(`  ${xdsPath}  (merged XDS_ASCII)`);
+        if (result.merge.shelxIns) {
+            console.log(`  ${insPath}  (SHELX instructions, matching cell/space group)`);
+        }
     }
 }
 

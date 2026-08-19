@@ -5096,21 +5096,29 @@ class WMOLApp {
             btn.disabled = true;
         }
 
-        // Progress dialog (jsSpace can be slow on large datasets).
+        // Progress dialog (jsSpace can be slow on large datasets). It is only
+        // shown when an analysis is actually about to run — never for the
+        // NO_CELL probe that just asks for the unit cell.
         const controller = new AbortController();
         const cancelBtn = document.getElementById('btn-cancel-progress');
         if (cancelBtn) cancelBtn.onclick = () => controller.abort();
-        this.showProgressDialog('Space-group determination (jsSpace)...',
-            'Analyzing Laue symmetry, centering and systematic absences.');
+        const hasCellInFile = /!UNIT_CELL_CONSTANTS\s*=/.test(this.state.hklContent || '');
 
         try {
-            let result = await this.apiJsSpaceAnalyze(this.state.hklContent, null, forced, controller.signal);
+            let result;
+            if (hasCellInFile) {
+                this.showProgressDialog('Space-group determination (jsSpace)...',
+                    'Analyzing Laue symmetry, centering and systematic absences.');
+            }
+            result = await this.apiJsSpaceAnalyze(this.state.hklContent, null, forced, controller.signal);
 
             // The HKL file carries no unit-cell parameters: ask for them.
             if (result.error === 'NO_CELL') {
                 const input = prompt(
                     'This HKL file has no unit-cell parameters.\nEnter unit cell: a b c alpha beta gamma\n(e.g. 10.5 10.5 14.0 90 90 90)');
-                if (input === null) return; // cancelled
+                if (input === null) return; // cancelled - no analysis ran, no dialog
+                this.showProgressDialog('Space-group determination (jsSpace)...',
+                    'Analyzing Laue symmetry, centering and systematic absences.');
                 result = await this.apiJsSpaceAnalyze(this.state.hklContent, input, forced, controller.signal);
             }
 

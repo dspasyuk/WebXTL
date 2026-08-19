@@ -532,7 +532,20 @@ class WMOLApp {
         if (spaceGroup !== undefined && spaceGroup !== null && spaceGroup !== '') {
             formData.append('spaceGroup', String(spaceGroup));
         }
-        const res = await fetch(this.getApiUrl('/jsspace/analyze'), { method: 'POST', body: formData });
+        const url = this.getApiUrl('/jsspace/analyze');
+        let res;
+        try {
+            res = await fetch(url, {
+                method: 'POST',
+                body: formData,
+                signal: AbortSignal.timeout(180000)
+            });
+        } catch (e) {
+            const hint = (e && e.name === 'TimeoutError')
+                ? 'The analysis took too long and timed out.'
+                : 'Is the backend server running? (node server.js)';
+            throw new Error(`Could not reach jsSpace at ${url} — ${hint} (${e.message})`);
+        }
         if (!res.ok) throw new Error('Space-group analysis failed');
         return res.json();
     }

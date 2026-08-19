@@ -107,23 +107,88 @@ export function resolutionLimits(reflections, cell) {
 }
 
 // Number of unique reflections (under the Laue group) in the resolution shell
-// [dmin, dmax]. Used to compute completeness.
-export function expectedUniqueCount(cell, matrices, dmin, dmax) {
-    const hmax = Math.ceil(Math.max(cell.a, cell.b, cell.c) / dmin) + 1;
+// [dmin, dmax]. Used to compute completeness. Iterates only the indices that
+// can possibly fall inside the shell (per-(h,k) analytic l-bounds) so that
+// high-resolution data does not cause a full-cube scan.
+export function expectedUniqueCount(cell, matrices, dmin, dmax, maxCount = 3000000) {
+    const r = reciprocalCell(cell);
+    if (!r) return 0;
+    const aS = r.aS, bS = r.bS, cS = r.cS;
+    const cosA = r.cosA, cosB = r.cosB, cosG = r.cosG;
+    const Bmin = 1 / (dmax * dmax);
+    const Bmax = 1 / (dmin * dmin);
+
+    const A = cS * cS;
+    const hmax = Math.ceil(Math.sqrt(Bmax) / aS) + 1;
+    const kmax = Math.ceil(Math.sqrt(Bmax) / bS) + 1;
+
     const set = new Set();
+    let total = 0;
+
     for (let h = -hmax; h <= hmax; h++) {
-        for (let k = -hmax; k <= hmax; k++) {
-            for (let l = -hmax; l <= hmax; l++) {
-                if (h === 0 && k === 0 && l === 0) continue;
-                const d = dSpacing(h, k, l, cell);
-                if (!Number.isFinite(d)) continue;
-                if (d < dmin - 1e-6 || d > dmax + 1e-6) continue;
-                const { rep } = canonicalRep([h, k, l], matrices);
-                set.add(rep[0] + ',' + rep[1] + ',' + rep[2]);
+        for (let k = -kmax; k <= kmax; k++) {
+            // F(l) = A*l^2 + B*l + C,  C = fixed part, B = cross term in l.
+            const C = aS * aS * h * h + bS * bS * k * k + 2 * aS * bS * cosG * h * k;
+            const B = 2 * cS * (aS * cosB * h + bS * cosA * k);
+
+            // Roots of F = Bmax (outer l bounds).
+            const Dmax = B * B - 4 * A * (C - Bmax);
+            if (Dmax < 0) continue; // F(l) > Bmax for all l
+            const sD = Math.sqrt(Dmax);
+            const r1 = (-B - sD) / (2 * A);
+            const r2 = (-B + sD) / (2 * A);
+
+            // The F >= Bmin condition is automatically satisfied when F = Bmin
+            // has no real roots (F stays above Bmin for every l); otherwise the
+            // excluded zone is (s1, s2).
+            let segs;
+            const Dmin = B * B - 4 * A * (C - Bmin);
+            if (Dmin < 0) {
+                segs = [[r1, r2]];
+            } else {
+                const sD2 = Math.sqrt(Dmin);
+                const s1 = (-B - sD2) / (2 * A);
+                const s2 = (-B + sD2) / (2 * A);
+                segs = [[r1, Math.min(r2, s1)], [Math.max(r1, s2), r2]];
+            }
+
+            for (const [l0raw, l1raw] of segs) {
+                const l0 = Math.ceil(l0raw);
+                const l1 = Math.floor(l1raw);
+                if (l0 > l1) continue;
+                total += (l1 - l0 + 1);
+                if (total > maxCount) {
+                    // Extreme case: fall back to a coarse volume estimate so we
+                    // never scan the entire shell point by point.
+                    return Math.round(estimateUniqueCount(cell, matrices, dmin, dmax));
+                }
+                for (let l = l0; l <= l1; l++) {
+                    if (h === 0 && k === 0 && l === 0) continue;
+                    const F = A * l * l + B * l + C;
+                    if (F < Bmin || F > Bmax) continue;
+                    const { rep } = canonicalRep([h, k, l], matrices);
+                    set.add(rep[0] + ',' + rep[1] + ',' + rep[2]);
+                }
             }
         }
     }
     return set.size;
+}
+
+// Coarse volume-based estimate of the number of unique reflections in the
+// resolution shell (used only for pathologically large cases).
+export function estimateUniqueCount(cell, matrices, dmin, dmax) {
+    const r = reciprocalCell(cell);
+    if (!r) return 0;
+    const volRecip = Math.abs(
+        r.aS * r.bS * r.cS * Math.sqrt(
+            1 - r.cosA * r.cosA - r.cosB * r.cosB - r.cosG * r.cosG
+            + 2 * r.cosA * r.cosB * r.cosG
+        ));
+    if (!(volRecip > 0)) return 0;
+    const shellVol = (4 / 3) * Math.PI * (1 / (dmin * dmin * dmin) - 1 / (dmax * dmax * dmax));
+    const total = Math.max(1, shellVol / volRecip);
+    return total / matrices.length; // each orbit holds `order` reflections
 }
 
 // POINTLESS-style merging statistics.

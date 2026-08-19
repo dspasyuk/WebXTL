@@ -86,7 +86,7 @@ WebXTL is powered by a robust Node.js/Express backend that handles heavy lifting
 -   **Corrected/Merged HKL Output**: Merges the reflections under the chosen Laue group (weighted mean intensities, scatter-aware sigmas) and writes:
     - a **SHELX five-column HKL file** ready for **SHELXD / SHELXT / SHELXS** (verified end-to-end with SHELXT), and
     - a **merged XDS_ASCII** file (`MERGE=TRUE`), plus
-    - a **POINTLESS-style merging report** (R(merge), R(meas), R(pim), completeness, multiplicity, mean I/σ).
+    - a **merging report** (R(merge), R(meas), R(pim), completeness, multiplicity, mean I/σ).
 -   **Force a Space Group**: Override the automatic determination by pinning a specific space group — by number or Hermann-Mauguin symbol (e.g. `14`, `P 21/c`, `P-1`). jsSpace then merges under that group's Laue class, labels the output with the forced space group, and reports whether it is consistent with the data (`violations`) alongside the automatically-determined group.
 -   **Missing Unit Cell**: When an HKL file carries no cell parameters, jsSpace asks for them (CLI prompt or UI dialog).
 -   **CLI**: `node src/js/jsSpace/cli.js <file.hkl> [--cell "a b c alpha beta gamma"] [--space-group "14" | "P 21/c"]` — writes `<basename>_merged.hkl` and `<basename>_merged.HKL` next to the input.

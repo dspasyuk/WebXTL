@@ -2,7 +2,7 @@
 //
 // Produces a symmetry-corrected, merged HKL dataset in the SHELX five-column
 // format (H K L I SIG(I)) that can be fed directly into SHELXD / SHELXT /
-// SHELXS, plus a merged XDS_ASCII file, and a POINTLESS-style merging report.
+// SHELXS, plus a merged XDS_ASCII file, and a merging report.
 
 import { canonicalRep } from './op-math.js';
 
@@ -62,7 +62,7 @@ export function mergeReflections(reflections, matrices, cell, options = {}) {
         const I = w > 0 ? wsum / w : msum / n;
         // Combined sigma: weighted-mean sigma plus the sample scatter term
         // (standard error of the mean), so inconsistent observations inflate
-        // the merged sigma (mirrors POINTLESS / XSCALE error models).
+        // the merged sigma (combines the weighted-mean error with the scatter).
         let sem2 = 0;
         if (n > 1) {
             const mean = msum / n;
@@ -191,7 +191,7 @@ export function estimateUniqueCount(cell, matrices, dmin, dmax) {
     return total / matrices.length; // each orbit holds `order` reflections
 }
 
-// POINTLESS-style merging statistics.
+// Merging statistics (R(merge), R(meas), R(pim), completeness, ...).
 export function computeMergeStatistics(reflections, matrices, cell) {
     const { merged, nObs, nUnique, meanMultiplicity } = mergeReflections(reflections, matrices, cell);
     const { dmin, dmax } = resolutionLimits(reflections, cell);
@@ -281,12 +281,12 @@ export function writeXdsAscii(merged, header = {}) {
     return out.join('\n') + '\n';
 }
 
-// POINTLESS-like merging report text.
-export function buildPointlessReport(statistics, sgInfo, cell) {
+// Merging report text.
+export function buildMergingReport(statistics, sgInfo, cell) {
     const fmtPct = (x) => (x * 100).toFixed(1) + ' %';
     const fmt = (x, d = 2) => (x || 0).toFixed(d);
     const out = [];
-    out.push('POINTLESS-like merging report (jsSpace)');
+    out.push('Merging report (jsSpace)');
     out.push('======================================');
     out.push(`Space group       : ${sgInfo.hm} (No. ${sgInfo.id})`);
     out.push(`Laue group        : ${sgInfo.laue}`);

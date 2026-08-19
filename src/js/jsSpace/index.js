@@ -13,7 +13,7 @@ import { fileURLToPath } from 'node:url';
 import { parseHkl } from './hkl-parser.js';
 import { buildLaueGroups, sgLaueClass } from './laue.js';
 import { analyzeSpaceGroup, crystalSystemFromCell, scoreSpaceGroup } from './analyze.js';
-import { mergeReflections, computeMergeStatistics, writeShelxHkl, writeXdsAscii, buildPointlessReport } from './merge.js';
+import { mergeReflections, computeMergeStatistics, writeShelxHkl, writeXdsAscii, buildMergingReport } from './merge.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -137,7 +137,7 @@ export function analyzeHkl(text, options = {}) {
     }
 
     // Merge under the chosen Laue class and generate the corrected HKL output
-    // (SHELX format + merged XDS_ASCII) plus a POINTLESS-style report.
+    // (SHELX format + merged XDS_ASCII) plus a merging report.
     let merge = null;
     if (usedLaueOps) {
         const m = mergeReflections(reflections, usedLaueOps, cell);
@@ -163,7 +163,7 @@ export function analyzeHkl(text, options = {}) {
                 dmax: stats.dmax,
             }),
             statistics: stats,
-            report: buildPointlessReport(stats, sgInfo, cell),
+            report: buildMergingReport(stats, sgInfo, cell),
         };
         // Consistency of the (possibly forced) space group with the data.
         const fullSG = usedSG && usedSG.id ? sgData.find(g => g.id === usedSG.id) : null;

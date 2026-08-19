@@ -74,9 +74,9 @@ WebXTL is powered by a robust Node.js/Express backend that handles heavy lifting
 -   **Requirement**: The `shelxl` executable must be installed and accessible in the system PATH.
 
 **External Crystallography Programs**
--   The server can run any installed crystallography tool, currently **SHELXL**, **PLATON**, and **XPREP** (`POST /run/:program`).
+-   The server can run any installed crystallography tool, including the full **SHELX** suite (**SHELXL**, **SHELXS**, **SHELXT**, **SHELXD**, **SHELXH**, **SHELXE**, **SHELXC**), **PLATON**, and **XPREP** (`POST /run/:program`).
 -   **Automatic Detection**: At startup the server scans the system `PATH`; only programs whose executables are actually installed are exposed to the client (`GET /programs`) and shown in the **Programs** menu.
--   **Generic Runner**: Uploads structure files to an isolated project directory, backs up existing files, spawns the program non-interactively (interactive tools such as PLATON receive a minimal batch input), and returns produced output files plus captured stdout/stderr.
+-   **Generic Runner**: Uploads structure files to an isolated project directory, backs up existing files, spawns the program non-interactively (interactive tools such as PLATON receive a minimal batch input), and returns produced output files (including suffixed outputs such as SHELXT's `name_a.res`) plus captured stdout/stderr.
 -   **Requirement**: Programs must be installed and accessible in the system PATH.
 
 **Project Management System**
@@ -100,7 +100,7 @@ WebXTL is powered by a robust Node.js/Express backend that handles heavy lifting
 -   `/projects/:name/report-docx`: Generate a crystallographic report as a `.docx` download.
 -   `/templates`: List available user (`.cif`) and device (`.dev`) templates for publishing.
 -   `/programs`: List the external crystallography programs available on the server.
--   `/run/:program`: Run an external program (e.g. `shelxl`, `platon`, `xprep`) on uploaded files.
+-   `/run/:program`: Run an external program (e.g. `shelxl`, `shelxt`, `shelxd`, `platon`, `xprep`) on uploaded files.
 -   `/refine`: Upload `.ins` and `.hkl` files to trigger a `shelxl` refinement job. Supports a `mode: 'weight'` option that optimizes the WGHT instruction over several cycles.
 
 ## Installation & Development

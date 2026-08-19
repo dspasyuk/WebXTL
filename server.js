@@ -60,6 +60,54 @@ const PROGRAMS = {
         outputs: ['.res', '.lst', '.fcf'],
         stdin: null,
     },
+    shelxs: {
+        label: 'SHELXS',
+        description: 'Structure solution (Patterson / direct methods)',
+        exe: 'shelxs',
+        inputs: ['.ins', '.hkl'],
+        outputs: ['.res', '.lst'],
+        stdin: null,
+    },
+    shelxt: {
+        label: 'SHELXT',
+        description: 'Structure solution (dual-space methods)',
+        exe: 'shelxt',
+        inputs: ['.ins', '.hkl'],
+        outputs: ['.res', '.lst'],
+        stdin: null,
+    },
+    shelxd: {
+        label: 'SHELXD',
+        description: 'Heavy-atom / dual-space structure solution',
+        exe: 'shelxd',
+        inputs: ['.ins', '.hkl'],
+        outputs: ['.res', '.lst'],
+        stdin: null,
+    },
+    shelxh: {
+        label: 'SHELXH',
+        description: 'Least-squares refinement (macromolecular)',
+        exe: 'shelxh',
+        inputs: ['.ins', '.hkl'],
+        outputs: ['.res', '.lst', '.fcf'],
+        stdin: null,
+    },
+    shelxe: {
+        label: 'SHELXE',
+        description: 'SAD/MAD phasing and density modification',
+        exe: 'shelxe',
+        inputs: ['.hkl'],
+        outputs: ['.res', '.phs', '.psd', '.pdb', '.lst'],
+        stdin: null,
+    },
+    shelxc: {
+        label: 'SHELXC',
+        description: 'Data merging and preparation for SAD/MAD',
+        exe: 'shelxc',
+        inputs: ['.hkl'],
+        outputs: ['.hkl', '.lst'],
+        stdin: null,
+    },
     platon: {
         label: 'PLATON',
         description: 'Structure validation and geometry analysis',
@@ -334,9 +382,11 @@ app.post('/run/:program', upload.any(), async (req, res) => {
         fs.mkdirSync(backupDir, { recursive: true });
 
         // Move uploads into the project as <basename><ext>, backing up existing files.
+        const uploadedNames = [];
         for (const file of req.files) {
             const ext = path.extname(file.originalname).toLowerCase();
             const dest = path.join(projectDir, `${basename}${ext}`);
+            uploadedNames.push(`${basename}${ext}`);
             if (fs.existsSync(dest)) {
                 const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
                 fs.copyFileSync(dest, path.join(backupDir, `${basename}_${timestamp}${ext}`));
@@ -357,12 +407,21 @@ app.post('/run/:program', upload.any(), async (req, res) => {
             files: {},
         };
 
-        // Collect the output files defined for this program.
-        for (const ext of program.outputs) {
-            const p = path.join(projectDir, `${basename}${ext}`);
-            if (fs.existsSync(p) && fs.statSync(p).isFile() && fs.statSync(p).size < 5 * 1024 * 1024) {
+        // Collect the output files defined for this program. Programs may write
+        // suffixed files (e.g. SHELXT's name_a.res), so scan the whole project
+        // directory rather than only exact <basename><ext> names. Uploaded input
+        // files and the backup directory are skipped.
+        const outExts = program.outputs;
+        if (fs.existsSync(projectDir)) {
+            for (const f of fs.readdirSync(projectDir)) {
+                if (f === 'backup' || f.startsWith('.')) continue;
+                const full = path.join(projectDir, f);
+                if (!fs.statSync(full).isFile()) continue;
+                if (uploadedNames.includes(f)) continue;
+                if (!outExts.includes(path.extname(f).toLowerCase())) continue;
+                if (fs.statSync(full).size >= 5 * 1024 * 1024) continue;
                 try {
-                    result.files[`${basename}${ext}`] = fs.readFileSync(p, 'utf8');
+                    result.files[f] = fs.readFileSync(full, 'utf8');
                 } catch (e) { /* skip binary files */ }
             }
         }

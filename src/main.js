@@ -4757,7 +4757,7 @@ class WMOLApp {
             if (data.error) throw new Error(data.error);
 
             // Load the primary output back into the editor when the program produces it.
-            const primary = { shelxl: '.res', platon: '.res', xprep: '.ins' }[program.id];
+            const primary = { shelxl: '.res', shelxs: '.res', shelxt: '.res', shelxd: '.res', shelxh: '.res', shelxe: '.res', platon: '.res', xprep: '.ins' }[program.id];
             if (primary && data.files) {
                 const key = Object.keys(data.files).find(k => k.toLowerCase().endsWith(primary));
                 if (key && this.state.editors.res) {

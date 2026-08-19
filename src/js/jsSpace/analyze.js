@@ -85,12 +85,12 @@ export function computeRSym(reflections, matrices, maxReflections = 30000) {
 export function selectLaueClass(reflections, laueGroups) {
     const table = laueGroups.map(lg => {
         // For 2/m try all three settings and take the best R.
-        let best = { R: Infinity };
+        let best = { R: Infinity, ops: null };
         for (const s of lg.settings) {
             const r = computeRSym(reflections, s.ops);
-            if (r.R < best.R) best = r;
+            if (r.R < best.R) { best.R = r.R; best.ops = s.ops; best.nOrbits = r.nOrbits; }
         }
-        return { name: lg.name, order: lg.order, rsym: best.R, nOrbits: best.nOrbits };
+        return { name: lg.name, order: lg.order, rsym: best.R, nOrbits: best.nOrbits, ops: best.ops };
     });
     table.sort((a, b) => a.rsym - b.rsym);
 
@@ -113,7 +113,8 @@ export function selectLaueClass(reflections, laueGroups) {
         name: chosen,
         rsym: chosenRow ? chosenRow.rsym : 0,
         order: chosenRow ? chosenRow.order : 0,
-        table: table.map(t => ({ ...t, chosen: t.name === chosen })),
+        ops: chosenRow ? chosenRow.ops : null,
+        table: table.map(t => ({ name: t.name, order: t.order, rsym: t.rsym, nOrbits: t.nOrbits, chosen: t.name === chosen })),
     };
 }
 

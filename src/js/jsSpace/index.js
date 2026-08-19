@@ -13,6 +13,7 @@ import { fileURLToPath } from 'node:url';
 import { parseHkl } from './hkl-parser.js';
 import { buildLaueGroups } from './laue.js';
 import { analyzeSpaceGroup, crystalSystemFromCell } from './analyze.js';
+import { mergeReflections, computeMergeStatistics, writeShelxHkl, writeXdsAscii, buildPointlessReport } from './merge.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -80,6 +81,38 @@ export function analyzeHkl(text, options = {}) {
     const result = analyzeSpaceGroup(loadSpaceGroups(), reflections, cell, { laueGroups });
 
     const best = result.best;
+
+    // Merge the reflections under the chosen Laue class and generate the
+    // corrected HKL output (SHELX format + merged XDS_ASCII) plus a
+    // POINTLESS-style merging report.
+    let merge = null;
+    if (result.laue.ops) {
+        const m = mergeReflections(reflections, result.laue.ops, cell);
+        const stats = computeMergeStatistics(reflections, result.laue.ops, cell);
+        const sgInfo = {
+            hm: best ? best.hm : '?',
+            id: best ? best.id : 0,
+            laue: result.laue.name,
+            centering: result.centering,
+        };
+        merge = {
+            nUnique: m.nUnique,
+            nObs: m.nObs,
+            shelxHkl: writeShelxHkl(m.merged),
+            xdsAscii: writeXdsAscii(m.merged, {
+                outputFile: 'MERGED.HKL',
+                cell,
+                spaceGroupNumber: best ? best.id : undefined,
+                spaceGroupName: best ? best.hm : undefined,
+                wavelength: parsed.wavelength,
+                dmin: stats.dmin,
+                dmax: stats.dmax,
+            }),
+            statistics: stats,
+            report: buildPointlessReport(stats, sgInfo, cell),
+        };
+    }
+
     const summary = {
         format: parsed.format,
         title: parsed.title,
@@ -95,6 +128,15 @@ export function analyzeHkl(text, options = {}) {
         centricityScore: result.centricity.score,
         bestSpaceGroup: best ? best.hm : null,
         bestSpaceGroupNumber: best ? best.id : null,
+        merged: merge ? {
+            nUnique: merge.nUnique,
+            nObs: merge.nObs,
+            completeness: merge.statistics.completeness,
+            rMerge: merge.statistics.rMerge,
+            rPim: merge.statistics.rPim,
+            meanIsig: merge.statistics.meanIsig,
+            meanMultiplicity: merge.statistics.meanMultiplicity,
+        } : null,
     };
 
     return {
@@ -105,6 +147,7 @@ export function analyzeHkl(text, options = {}) {
         centeringResults: result.centeringResults,
         candidates: result.candidates.slice(0, 30),
         best: result.best,
+        merge,
     };
 }
 

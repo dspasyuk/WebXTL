@@ -58,7 +58,24 @@ function printAnalysis(result) {
         console.log('----------------------------------------------');
         console.log(`  Best space group  : ${result.best.hm}  (No. ${result.best.id})`);
     }
+    if (result.merge) {
+        console.log('----------------------------------------------');
+        console.log('  Merging statistics:');
+        const st = result.merge.statistics;
+        console.log(`    Resolution range : ${st.dmax.toFixed(2)} - ${st.dmin.toFixed(2)} A`);
+        console.log(`    Observations     : ${st.nObs}`);
+        console.log(`    Unique           : ${st.nUnique}`);
+        console.log(`    Multiplicity     : ${st.meanMultiplicity.toFixed(1)}`);
+        console.log(`    Completeness     : ${(st.completeness * 100).toFixed(1)} %`);
+        console.log(`    R(merge)         : ${(st.rMerge * 100).toFixed(2)} %`);
+        console.log(`    R(pim)           : ${(st.rPim * 100).toFixed(2)} %`);
+        console.log(`    Mean I/sigma(I)  : ${st.meanIsig.toFixed(1)}`);
+    }
     console.log('==============================================');
+    if (result.merge) {
+        console.log('');
+        console.log(result.merge.report);
+    }
 }
 
 async function promptCell() {
@@ -126,6 +143,18 @@ async function main() {
 
     const result = analyzeHkl(text, { cell });
     printAnalysis(result);
+
+    // Write the corrected/merged HKL files next to the input file.
+    if (result.ok && result.merge) {
+        const base = path.join(path.dirname(filePath), path.parse(filePath).name + '_merged');
+        const shelxPath = base + '.hkl';
+        const xdsPath = base + '.HKL';
+        fs.writeFileSync(shelxPath, result.merge.shelxHkl, 'utf8');
+        fs.writeFileSync(xdsPath, result.merge.xdsAscii, 'utf8');
+        console.log(`Merged HKL written to:`);
+        console.log(`  ${shelxPath}  (SHELX format, ready for SHELXD/SHELXT)`);
+        console.log(`  ${xdsPath}  (merged XDS_ASCII)`);
+    }
 }
 
 main();

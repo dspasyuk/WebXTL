@@ -83,10 +83,14 @@ WebXTL is powered by a robust Node.js/Express backend that handles heavy lifting
 -   A pure-JavaScript space-group determination engine (`src/js/jsSpace/`) that runs on the server with no external dependencies, usable both from the command line and the UI.
 -   **HKL Parsing**: Reads **XDS_ASCII.HKL** (headers, unit cell, wavelength) and standard **SHELX** five-column HKL files.
 -   **Analysis**: Determines the crystal system from the unit-cell metric, the Laue class from R(sym) merging across all eleven Laue groups, the lattice centering (P/A/B/C/I/F/R) from reflection conditions, and ranks space-group candidates by systematic absences (screw axes and glide planes) plus a Wilson-style centrosymmetry test.
+-   **Corrected/Merged HKL Output**: Merges the reflections under the chosen Laue group (weighted mean intensities, scatter-aware sigmas) and writes:
+    - a **SHELX five-column HKL file** ready for **SHELXD / SHELXT / SHELXS** (verified end-to-end with SHELXT), and
+    - a **merged XDS_ASCII** file (`MERGE=TRUE`), plus
+    - a **POINTLESS-style merging report** (R(merge), R(meas), R(pim), completeness, multiplicity, mean I/σ).
 -   **Missing Unit Cell**: When an HKL file carries no cell parameters, jsSpace asks for them (CLI prompt or UI dialog).
--   **CLI**: `node src/js/jsSpace/cli.js <file.hkl> [--cell "a b c alpha beta gamma"]`.
--   **UI**: *Calculate → Space Group (jsSpace)* runs the analysis on the loaded HKL and shows the full report.
--   **API**: `POST /jsspace/analyze` (multipart `hkl`, optional `cell`).
+-   **CLI**: `node src/js/jsSpace/cli.js <file.hkl> [--cell "a b c alpha beta gamma"]` — writes `<basename>_merged.hkl` and `<basename>_merged.HKL` next to the input.
+-   **UI**: *Calculate → Space Group (jsSpace)* runs the analysis on the loaded HKL, shows the full report, and offers a *Download Merged HKL (SHELX)* button.
+-   **API**: `POST /jsspace/analyze` (multipart `hkl`, optional `cell`) returns the analysis, merge statistics, and the generated `shelxHkl` / `xdsAscii` text.
 
 **Project Management System**
 -   **Workspace Organization**: Automatically creates isolated project directories for each structure.

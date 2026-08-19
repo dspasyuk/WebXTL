@@ -4817,6 +4817,29 @@ class WMOLApp {
         }
     }
 
+    // Wire the "Download Merged HKL" button shown after a jsSpace analysis.
+    wireMergedHklDownload(result) {
+        const btn = document.getElementById('btn-download-merged-hkl');
+        if (!btn) return;
+        if (!result.merge || !result.merge.shelxHkl) {
+            btn.classList.add('d-none');
+            return;
+        }
+        btn.classList.remove('d-none');
+        btn.onclick = () => {
+            let base = 'structure';
+            if (this.state.hklName) base = this.state.hklName.replace(/\.hkl$/i, '');
+            base = base.replace(/[^a-zA-Z0-9_-]/g, '_');
+            const blob = new Blob([result.merge.shelxHkl], { type: 'text/plain' });
+            const a = document.createElement('a');
+            a.href = URL.createObjectURL(blob);
+            a.download = base + '.hkl';
+            document.body.appendChild(a);
+            a.click();
+            setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 100);
+        };
+    }
+
     // Run the built-in jsSpace space-group determination on the current HKL
     // data and show the result in the results modal.
     async runSpaceGroupAnalysis() {
@@ -4855,6 +4878,7 @@ class WMOLApp {
                 const b = result.best;
                 resultsSummary.innerHTML = this.buildSpaceGroupSummary(result);
                 resultsContent.textContent = this.buildSpaceGroupReport(result);
+                this.wireMergedHklDownload(result);
                 new bootstrap.Modal(modalEl).show();
             }
         } catch (e) {
@@ -4929,6 +4953,11 @@ class WMOLApp {
         if (result.best) {
             out.push('');
             out.push(`Best space group: ${result.best.hm}  (No. ${result.best.id})`);
+        }
+        if (result.merge && result.merge.report) {
+            out.push('');
+            out.push('');
+            out.push(result.merge.report);
         }
         return out.join('\n');
     }

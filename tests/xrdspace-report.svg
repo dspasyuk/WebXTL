@@ -1,0 +1,75 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="420" viewBox="0 0 900 420" font-family="sans-serif">
+<rect x="0" y="0" width="900" height="420" fill="#ffffff"/>
+<text x="450" y="24" text-anchor="middle" font-size="18" font-weight="bold" fill="#222">xrdspace space-group determination vs COD (2000 structures)</text>
+<line x1="90" y1="350" x2="870" y2="350" stroke="#e5e5e5" stroke-width="1"/>
+<text x="82" y="354" text-anchor="end" font-size="11" fill="#666">0</text>
+<line x1="90" y1="272.5" x2="870" y2="272.5" stroke="#e5e5e5" stroke-width="1"/>
+<text x="82" y="276.5" text-anchor="end" font-size="11" fill="#666">156</text>
+<line x1="90" y1="195" x2="870" y2="195" stroke="#e5e5e5" stroke-width="1"/>
+<text x="82" y="199" text-anchor="end" font-size="11" fill="#666">313</text>
+<line x1="90" y1="117.5" x2="870" y2="117.5" stroke="#e5e5e5" stroke-width="1"/>
+<text x="82" y="121.5" text-anchor="end" font-size="11" fill="#666">469</text>
+<line x1="90" y1="40" x2="870" y2="40" stroke="#e5e5e5" stroke-width="1"/>
+<text x="82" y="44" text-anchor="end" font-size="11" fill="#666">625</text>
+<rect x="108.9" y="339.6" width="24.5" height="10.4" fill="#2e9e4f" rx="2"/>
+<text x="121.2" y="335.6" text-anchor="middle" font-size="11" fill="#333" font-weight="bold">21</text>
+<rect x="135.5" y="340.6" width="24.5" height="9.4" fill="#e0a800" rx="2"/>
+<text x="147.7" y="336.6" text-anchor="middle" font-size="11" fill="#333" font-weight="bold">19</text>
+<rect x="162.0" y="350.0" width="24.5" height="0.0" fill="#d64545" rx="2"/>
+<text x="164.7" y="366" text-anchor="middle" font-size="12" fill="#333">Triclinic</text>
+<text x="164.7" y="381" text-anchor="middle" font-size="11" fill="#888">n=40</text>
+<rect x="220.4" y="299.4" width="24.5" height="50.6" fill="#2e9e4f" rx="2"/>
+<text x="232.6" y="295.4" text-anchor="middle" font-size="11" fill="#333" font-weight="bold">102</text>
+<rect x="246.9" y="302.4" width="24.5" height="47.6" fill="#e0a800" rx="2"/>
+<text x="259.1" y="298.4" text-anchor="middle" font-size="11" fill="#333" font-weight="bold">96</text>
+<rect x="273.4" y="348.5" width="24.5" height="1.5" fill="#d64545" rx="2"/>
+<text x="285.7" y="344.5" text-anchor="middle" font-size="11" fill="#333" font-weight="bold">3</text>
+<text x="276.1" y="366" text-anchor="middle" font-size="12" fill="#333">Monoclinic</text>
+<text x="276.1" y="381" text-anchor="middle" font-size="11" fill="#888">n=202</text>
+<rect x="331.8" y="177.9" width="24.5" height="172.1" fill="#2e9e4f" rx="2"/>
+<text x="344.1" y="173.9" text-anchor="middle" font-size="11" fill="#333" font-weight="bold">347</text>
+<rect x="358.3" y="221.0" width="24.5" height="129.0" fill="#e0a800" rx="2"/>
+<text x="370.6" y="217.0" text-anchor="middle" font-size="11" fill="#333" font-weight="bold">260</text>
+<rect x="384.8" y="346.5" width="24.5" height="3.5" fill="#d64545" rx="2"/>
+<text x="397.1" y="342.5" text-anchor="middle" font-size="11" fill="#333" font-weight="bold">7</text>
+<text x="387.5" y="366" text-anchor="middle" font-size="12" fill="#333">Orthorhombic</text>
+<text x="387.5" y="381" text-anchor="middle" font-size="11" fill="#888">n=625</text>
+<rect x="443.2" y="243.9" width="24.5" height="106.1" fill="#2e9e4f" rx="2"/>
+<text x="455.5" y="239.9" text-anchor="middle" font-size="11" fill="#333" font-weight="bold">214</text>
+<rect x="469.7" y="255.3" width="24.5" height="94.7" fill="#e0a800" rx="2"/>
+<text x="482.0" y="251.3" text-anchor="middle" font-size="11" fill="#333" font-weight="bold">191</text>
+<rect x="496.3" y="333.1" width="24.5" height="16.9" fill="#d64545" rx="2"/>
+<text x="508.5" y="329.1" text-anchor="middle" font-size="11" fill="#333" font-weight="bold">34</text>
+<text x="498.9" y="366" text-anchor="middle" font-size="12" fill="#333">Tetragonal</text>
+<text x="498.9" y="381" text-anchor="middle" font-size="11" fill="#888">n=451</text>
+<rect x="554.7" y="303.4" width="24.5" height="46.6" fill="#2e9e4f" rx="2"/>
+<text x="566.9" y="299.4" text-anchor="middle" font-size="11" fill="#333" font-weight="bold">94</text>
+<rect x="581.2" y="270.1" width="24.5" height="79.9" fill="#e0a800" rx="2"/>
+<text x="593.4" y="266.1" text-anchor="middle" font-size="11" fill="#333" font-weight="bold">161</text>
+<rect x="607.7" y="330.2" width="24.5" height="19.8" fill="#d64545" rx="2"/>
+<text x="619.9" y="326.2" text-anchor="middle" font-size="11" fill="#333" font-weight="bold">40</text>
+<text x="610.4" y="366" text-anchor="middle" font-size="12" fill="#333">Trigonal</text>
+<text x="610.4" y="381" text-anchor="middle" font-size="11" fill="#888">n=296</text>
+<rect x="666.1" y="313.8" width="24.5" height="36.2" fill="#2e9e4f" rx="2"/>
+<text x="678.3" y="309.8" text-anchor="middle" font-size="11" fill="#333" font-weight="bold">73</text>
+<rect x="692.6" y="308.8" width="24.5" height="41.2" fill="#e0a800" rx="2"/>
+<text x="704.9" y="304.8" text-anchor="middle" font-size="11" fill="#333" font-weight="bold">83</text>
+<rect x="719.1" y="340.6" width="24.5" height="9.4" fill="#d64545" rx="2"/>
+<text x="731.4" y="336.6" text-anchor="middle" font-size="11" fill="#333" font-weight="bold">19</text>
+<text x="721.8" y="366" text-anchor="middle" font-size="12" fill="#333">Hexagonal</text>
+<text x="721.8" y="381" text-anchor="middle" font-size="11" fill="#888">n=186</text>
+<rect x="777.5" y="281.1" width="24.5" height="68.9" fill="#2e9e4f" rx="2"/>
+<text x="789.8" y="277.1" text-anchor="middle" font-size="11" fill="#333" font-weight="bold">139</text>
+<rect x="804.0" y="326.7" width="24.5" height="23.3" fill="#e0a800" rx="2"/>
+<text x="816.3" y="322.7" text-anchor="middle" font-size="11" fill="#333" font-weight="bold">47</text>
+<rect x="830.5" y="344.0" width="24.5" height="6.0" fill="#d64545" rx="2"/>
+<text x="842.8" y="340.0" text-anchor="middle" font-size="11" fill="#333" font-weight="bold">12</text>
+<text x="833.2" y="366" text-anchor="middle" font-size="12" fill="#333">Cubic</text>
+<text x="833.2" y="381" text-anchor="middle" font-size="11" fill="#888">n=200</text>
+<rect x="360" y="388" width="14" height="14" fill="#2e9e4f" rx="2"/>
+<text x="380" y="399" font-size="12" fill="#333">PASS</text>
+<rect x="490" y="388" width="14" height="14" fill="#e0a800" rx="2"/>
+<text x="510" y="399" font-size="12" fill="#333">NEAR</text>
+<rect x="620" y="388" width="14" height="14" fill="#d64545" rx="2"/>
+<text x="640" y="399" font-size="12" fill="#333">FAIL</text>
+</svg>

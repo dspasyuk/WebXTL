@@ -28,6 +28,7 @@ Input / output:
   --hklin <file>      Input HKL file (XDS_ASCII or SHELX five-column format)
   --hklout <file>     Output merged HKL file, SHELX format (default: <input>_merged.hkl)
   --xdsout <file>     Output merged HKL file, XDS_ASCII format (default: <input>_XDS.HKL)
+  --log <file>        Write all console output (the printed logs) to a file
 
 Space group:
   --spacegroup <sg>   Force a specific space group (number or Hermann-Mauguin
@@ -138,7 +139,7 @@ async function promptCell() {
 // Number of values consumed by each bare keyword / option.
     const N_VALUES = {
         hklin: 1, hklout: 1, xdsout: 1, spacegroup: 1, sg: 1, laue: 1, sigthreshold: 1,
-        sfac: 1, formula: 1,
+        sfac: 1, formula: 1, log: 1,
         cell: 6, resolution: 2,
     };
 
@@ -174,7 +175,7 @@ function parseSfacInput(input) {
 }
 
 function parseArgs(argv) {
-    const args = { hklin: null, hklout: null, xdsout: null, cell: null, spaceGroup: null, laue: null, resolution: null, sigThreshold: 5, sfac: null, help: false, version: false };
+    const args = { hklin: null, hklout: null, xdsout: null, cell: null, spaceGroup: null, laue: null, resolution: null, sigThreshold: 5, sfac: null, log: null, help: false, version: false };
     let i = 0;
     while (i < argv.length) {
         const a = argv[i];
@@ -190,7 +191,7 @@ function parseArgs(argv) {
             if (key === 'sg') key = 'spacegroup';
             n = N_VALUES[key] !== undefined ? N_VALUES[key] : 1;
         } else if (a === 'hklin' || a === 'hklout' || a === 'xdsout' || a === 'spacegroup' || a === 'laue'
-            || a === 'cell' || a === 'resolution' || a === 'sigthreshold' || a === 'sfac' || a === 'formula') {
+            || a === 'cell' || a === 'resolution' || a === 'sigthreshold' || a === 'sfac' || a === 'formula' || a === 'log') {
             key = a;
             n = N_VALUES[a];
         } else if (!a.startsWith('-')) {
@@ -227,6 +228,7 @@ function parseArgs(argv) {
         if (key === 'hklin') args.hklin = vals[0];
         else if (key === 'hklout') args.hklout = vals[0];
         else if (key === 'xdsout') args.xdsout = vals[0];
+        else if (key === 'log') args.log = vals[0];
         else if (key === 'spacegroup') args.spaceGroup = vals[0];
         else if (key === 'laue') args.laue = vals[0];
         else if (key === 'sigthreshold') {
@@ -250,6 +252,22 @@ function parseArgs(argv) {
     return args;
 }
 
+// Tee console output into a log file (synchronous writes so it is flushed even
+// on process.exit). The log file is truncated at the start of the run.
+function setupLogFile(logPath) {
+    const resolved = path.resolve(logPath);
+    try { fs.writeFileSync(resolved, ''); } catch (e) { /* ignore */ }
+    const origLog = console.log;
+    const origErr = console.error;
+    const fmt = (args) => args.map(a => typeof a === 'string' ? a : JSON.stringify(a)).join(' ');
+    const write = (line) => {
+        try { fs.appendFileSync(resolved, line + '\n', 'utf8'); } catch (e) { /* ignore */ }
+    };
+    console.log = (...args) => { origLog(...args); write(fmt(args)); };
+    console.error = (...args) => { origErr(...args); write(fmt(args)); };
+    return resolved;
+}
+
 async function main() {
     let args;
     try {
@@ -261,6 +279,10 @@ async function main() {
     }
     if (args.help) { console.log(HELP); process.exit(0); }
     if (args.version) { console.log(`xrdspace version ${VERSION}`); process.exit(0); }
+    if (args.log) {
+        const logPath = setupLogFile(args.log);
+        process.stdout.write(`Logging to: ${logPath}\n`);
+    }
     if (!args.hklin) {
         console.error('xrdspace: no input HKL file given.');
         console.error(HELP);

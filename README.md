@@ -93,7 +93,7 @@ WebXTL is powered by a robust Node.js/Express backend that handles heavy lifting
 -   **CLI** (POINTLESS-style arguments):
     ```bash
     node src/js/xrdspace/xrdspace.js --hklin <file.hkl> [--hklout out.hkl] [--xdsout out_XDS.HKL] \
-        [--spacegroup "14" | "P 21/c"] [--laue "2/m" | "mmm"] \
+        [--log out.log] [--spacegroup "14" | "P 21/c"] [--laue "2/m" | "mmm"] \
         [--cell "a b c alpha beta gamma"] [--resolution "lo hi"] [--help]
     ```
     Bare keywords (`hklin`, `hklout`, `spacegroup`, `cell`, ...) are also accepted. Default outputs: `<input>_merged.hkl` (SHELX) and `<input>_XDS.HKL` (XDS_ASCII).

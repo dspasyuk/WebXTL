@@ -2,8 +2,8 @@
 // xrdspace command-line interface — POINTLESS-style arguments.
 //
 // Usage:
-//   node src/js/xrdspace/cli.js --hklin <file.hkl> [options]
-//   node src/js/xrdspace/cli.js hklin <file.hkl> hklout <file.hkl> spacegroup C2 ...
+//   node src/js/xrdspace/xrdspace.js --hklin <file.hkl> [options]
+//   node src/js/xrdspace/xrdspace.js hklin <file.hkl> hklout <file.hkl> spacegroup C2 ...
 //
 // If the HKL file does not carry unit-cell parameters, xrdspace prompts for
 // them interactively. Pass --cell "a b c alpha beta gamma" to skip the prompt.
@@ -21,7 +21,7 @@ const HELP = `
 xrdspace — space-group determination and reflection merging (POINTLESS-style CLI)
 
 Usage:
-  node src/js/xrdspace/cli.js --hklin <file.hkl> [options]
+  node src/js/xrdspace/xrdspace.js --hklin <file.hkl> [options]
 
 Input / output:
   --hklin <file>      Input HKL file (XDS_ASCII or SHELX five-column format)

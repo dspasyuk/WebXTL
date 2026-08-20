@@ -92,7 +92,7 @@ WebXTL is powered by a robust Node.js/Express backend that handles heavy lifting
 -   **Missing Unit Cell**: When an HKL file carries no cell parameters, xrdspace asks for them (CLI prompt or UI dialog).
 -   **CLI** (POINTLESS-style arguments):
     ```bash
-    node src/js/xrdspace/cli.js --hklin <file.hkl> [--hklout out.hkl] [--xdsout out_XDS.HKL] \
+    node src/js/xrdspace/xrdspace.js --hklin <file.hkl> [--hklout out.hkl] [--xdsout out_XDS.HKL] \
         [--spacegroup "14" | "P 21/c"] [--laue "2/m" | "mmm"] \
         [--cell "a b c alpha beta gamma"] [--resolution "lo hi"] [--help]
     ```

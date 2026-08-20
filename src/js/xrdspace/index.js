@@ -3,7 +3,7 @@
 // Main entry point: loads the space-group dictionary, parses HKL files
 // (XDS_ASCII, SHELX), and runs the full space-group analysis.
 // Works both as a Node module (for the WebXTL server/UI) and from the CLI
-// (see cli.js).
+// (see xrdspace.js).
 
 import fs from 'node:fs';
 import vm from 'node:vm';

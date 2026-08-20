@@ -4,7 +4,7 @@
   "type": "module",
   "main": "bootstrap.bundle.min.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
+    "test": "node tests/xrdspace-cod.js",
     "dev": "concurrently -n server,client -c blue,green \"npm:server\" \"npm:client\"",
     "server": "node server.js",
     "client": "vite",

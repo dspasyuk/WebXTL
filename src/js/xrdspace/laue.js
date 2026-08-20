@@ -42,7 +42,9 @@ export const LAUE_BY_SYSTEM = {
     orthorhombic: ['mmm'],
     tetragonal: ['4/m', '4/mmm'],
     trigonal: ['-3', '-3m'],
-    hexagonal: ['6/m', '6/mmm'],
+    // Hexagonal axes can host either hexagonal or trigonal (hexagonal setting)
+    // space groups, so both Laue classes are candidates.
+    hexagonal: ['-3', '-3m', '6/m', '6/mmm'],
     cubic: ['m-3', 'm-3m'],
 };
 

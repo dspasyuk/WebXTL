@@ -13,7 +13,7 @@ import { fileURLToPath } from 'node:url';
 
 import { parseHkl } from './hkl-parser.js';
 import { buildLaueGroups, sgLaueClass } from './laue.js';
-import { analyzeSpaceGroup, crystalSystemFromCell, scoreSpaceGroup, isCentrosymmetric } from './analyze.js';
+import { analyzeSpaceGroup, crystalSystemFromCell, scoreSpaceGroup, isCentrosymmetric, laueClassOfSg } from './analyze.js';
 import { mergeReflections, computeMergeStatistics, writeShelxHkl, writeXdsAscii, buildMergingReport, dSpacing } from './merge.js';
 import { parseOperation } from './op-math.js';
 
@@ -253,7 +253,7 @@ export function analyzeHkl(text, options = {}) {
 
     if (forcedSG) {
         // Use the Laue class of the forced space group for merging.
-        const fl = sgLaueClass(forcedSG.s, laueGroups);
+        const fl = laueClassOfSg(forcedSG, laueGroups);
         if (fl) {
             const lg = laueGroups.find(g => g.name === fl);
             usedLaueName = fl;

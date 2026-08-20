@@ -49,7 +49,15 @@ export const LAUE_BY_SYSTEM = {
 };
 
 function matKey(m) {
-    return m.map(row => row.map(v => Math.round(v * 1e6) / 1e6).join(',')).join('|');
+    let out = '';
+    for (let i = 0; i < 3; i++) {
+        if (i) out += '|';
+        for (let j = 0; j < 3; j++) {
+            if (j) out += ',';
+            out += Math.round(m[i][j] * 1e6) / 1e6;
+        }
+    }
+    return out;
 }
 
 // Build the Laue groups from the dictionary data.
@@ -66,12 +74,14 @@ export function buildLaueGroups(sgData) {
         if (!settings.length) continue;
         // Primary setting = the first (for 2/m it is the unique-b setting).
         const primary = settings[0];
+        const opsSet = new Set();
+        for (const o of primary.ops) opsSet.add(matKey(o.M));
         groups.push({
             name,
             crystalSystem: LAUE_CRYSTAL_SYSTEM[name],
             order: primary.order,
             settings,
-            opsSet: new Set(primary.ops.map(o => matKey(o.M))),
+            opsSet,
         });
     }
     return groups;
@@ -96,7 +106,12 @@ export function sgLaueClass(sgOps, laueGroups) {
     };
     const keys = [...set];
     for (const key of keys) {
-        const m = key.split('|').map(row => row.split(',').map(parseFloat));
+        const rows = key.split('|');
+        const m = [[0, 0, 0], [0, 0, 0], [0, 0, 0]];
+        for (let i = 0; i < 3; i++) {
+            const cells = rows[i].split(',');
+            for (let j = 0; j < 3; j++) m[i][j] = parseFloat(cells[j]);
+        }
         set.add(matKey(invert(m)));
     }
     for (const lg of laueGroups) {

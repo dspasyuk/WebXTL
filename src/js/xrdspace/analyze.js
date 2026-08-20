@@ -51,14 +51,16 @@ export function crystalSystemFromCell(cell, tolLen = 0.005, tolAng = 1.0) {
 // matrices. `maxReflections` limits the data used (strong reflections first).
 export function computeRSym(reflections, matrices, maxReflections = 30000) {
     let list = reflections;
+    let limit = reflections.length;
     if (maxReflections && reflections.length > maxReflections) {
-        list = reflections
-            .slice()
-            .sort((a, b) => (Math.abs(b.I) || 0) - (Math.abs(a.I) || 0))
-            .slice(0, maxReflections);
+        // Copy once, sort in place by |I|, and only use the strongest ones.
+        list = reflections.slice();
+        list.sort((a, b) => (Math.abs(b.I) || 0) - (Math.abs(a.I) || 0));
+        limit = maxReflections;
     }
     const map = new Map();
-    for (const r of list) {
+    for (let i = 0; i < limit; i++) {
+        const r = list[i];
         const { rep } = canonicalRep([r.h, r.k, r.l], matrices);
         const key = rep[0] + ',' + rep[1] + ',' + rep[2];
         let grp = map.get(key);
@@ -76,7 +78,7 @@ export function computeRSym(reflections, matrices, maxReflections = 30000) {
     return {
         R: den > 0 ? num / den : 0,
         nOrbits: map.size,
-        nObs: list.length,
+        nObs: limit,
     };
 }
 
@@ -87,23 +89,28 @@ export function computeRSym(reflections, matrices, maxReflections = 30000) {
 // data (measured on -1). If none fit, fall back to a lower-symmetry class
 // (pseudo-symmetry, wrongly indexed / guessed cells).
 export function selectLaueClass(reflections, laueGroups, metricSystem) {
-    const table = laueGroups.map(lg => {
+    const table = [];
+    for (const lg of laueGroups) {
         // For 2/m try all three settings and take the best R.
         let best = { R: Infinity, ops: null };
         for (const s of lg.settings) {
             const r = computeRSym(reflections, s.ops);
             if (r.R < best.R) { best.R = r.R; best.ops = s.ops; best.nOrbits = r.nOrbits; }
         }
-        return { name: lg.name, order: lg.order, rsym: best.R, nOrbits: best.nOrbits, ops: best.ops };
-    });
+        table.push({ name: lg.name, order: lg.order, rsym: best.R, nOrbits: best.nOrbits, ops: best.ops });
+    }
 
     const baseRow = table.find(t => t.name === '-1');
     const baseR = baseRow ? baseRow.rsym : 0;
     const cap = Math.max(0.07, 2.0 * baseR);
 
-    const compatible = (LAUE_BY_SYSTEM[metricSystem] || []).slice();
-    const orderedCompat = compatible.map(n => table.find(t => t.name === n)).filter(Boolean)
-        .sort((a, b) => b.order - a.order);
+    const compatible = LAUE_BY_SYSTEM[metricSystem] || [];
+    const orderedCompat = [];
+    for (const n of compatible) {
+        const row = table.find(t => t.name === n);
+        if (row) orderedCompat.push(row);
+    }
+    orderedCompat.sort((a, b) => b.order - a.order);
 
     let chosen = null;
     // 1) metric-compatible Laue classes
@@ -122,12 +129,16 @@ export function selectLaueClass(reflections, laueGroups, metricSystem) {
     if (!chosen) chosen = table[0].name;
 
     const chosenRow = table.find(t => t.name === chosen);
+    const tableOut = [];
+    for (const t of table) {
+        tableOut.push({ name: t.name, order: t.order, rsym: t.rsym, nOrbits: t.nOrbits, chosen: t.name === chosen });
+    }
     return {
         name: chosen,
         rsym: chosenRow ? chosenRow.rsym : 0,
         order: chosenRow ? chosenRow.order : 0,
         ops: chosenRow ? chosenRow.ops : null,
-        table: table.map(t => ({ name: t.name, order: t.order, rsym: t.rsym, nOrbits: t.nOrbits, chosen: t.name === chosen })),
+        table: tableOut,
     };
 }
 
@@ -184,8 +195,10 @@ export function detectCentering(reflections, sigThreshold = 5) {
     }
     // Choose the most restrictive centering with no significant violations and
     // no meaningful weak-forbidden presence.
-    const zero = Object.values(results).filter(x =>
-        x.violations === 0 && x.weak <= Math.max(5, 0.15 * x.checked));
+    const zero = [];
+    for (const x of Object.values(results)) {
+        if (x.violations === 0 && x.weak <= Math.max(5, 0.15 * x.checked)) zero.push(x);
+    }
     const pool = zero.length ? zero : Object.values(results);
     pool.sort((a, b) => {
         const dr = CENTERING_RANK[b.centering] - CENTERING_RANK[a.centering];
@@ -239,7 +252,8 @@ export function scoreSpaceGroup(sg, reflections, sigThreshold = 5, maxReflection
     }
     const weakThreshold = 3;
     let nStrong = 0;
-    const opResults = conds.map(() => ({ violations: 0, weakAbsent: 0, allowed: 0, checked: 0 }));
+    const opResults = [];
+    for (let i = 0; i < conds.length; i++) opResults.push({ violations: 0, weakAbsent: 0, allowed: 0, checked: 0 });
 
     const max = maxReflections ? Math.min(reflections.length, maxReflections) : reflections.length;
     // Index bounds of the data (for detecting reflections missing from it).
@@ -442,9 +456,18 @@ export function analyzeSpaceGroup(sgData, reflections, cell, options = {}) {
     const laueCompatible = (LAUE_BY_SYSTEM[metric.system] || []).includes(laue.name);
     const crystalSystem = laueCompatible ? metric.system : (LAUE_CRYSTAL_SYSTEM[laue.name] || metric.system);
 
-    // Enumerate candidates: crystal system + centering + Laue class.
+    // Enumerate candidates: crystal system + centering. The R-merge Laue class
+    // is a strong hint, but on partial data it can under-detect higher symmetry
+    // (e.g. -3 instead of -3m). We therefore score candidates from ALL
+    // metric-compatible Laue classes and let the systematic absences pick the
+    // right one; the selected Laue is used as a tie-breaker only.
+    const compatibleLaues = LAUE_BY_SYSTEM[crystalSystem] || [];
     let candidates = enumerateCandidates(sgData, laueGroups, crystalSystem, centering);
-    candidates = candidates.filter(c => !c.laue || c.laue === laue.name);
+    const kept = [];
+    for (const c of candidates) {
+        if (!c.laue || compatibleLaues.includes(c.laue)) kept.push(c);
+    }
+    candidates = kept;
     if (!candidates.length) {
         // Relax: just crystal system + centering.
         candidates = enumerateCandidates(sgData, laueGroups, crystalSystem, centering);
@@ -458,7 +481,8 @@ export function analyzeSpaceGroup(sgData, reflections, cell, options = {}) {
     for (const c of candidates) {
         // Score every setting of this space group number (e.g. P 1 21/c 1 vs
         // P 1 21/n 1 vs P 1 21/a 1 are all No. 14) and keep the best.
-        const settings = sgData.filter(g => g.id === c.id);
+        const settings = [];
+        for (const g of sgData) if (g.id === c.id) settings.push(g);
         let bestSc = null;
         for (const s of settings.length ? settings : [c]) {
             const sc = scoreSpaceGroup(s, reflections, options.sigThreshold || 5);
@@ -472,15 +496,32 @@ export function analyzeSpaceGroup(sgData, reflections, cell, options = {}) {
         c.confirmedAbsences = bestSc.confirmedAbsences;
         c.centric = isCentrosymmetric(c);
         c.centricMatch = useCentricity ? (c.centric === centricity.centric) : 1;
+        // Prefer candidates in the R-merge-selected Laue class on a tie.
+        c.laueMatch = c.laue === laue.name ? 1 : 0;
     }
     candidates.sort((a, b) =>
         a.violations - b.violations ||
         b.confirmedOps - a.confirmedOps ||
         b.confirmedAbsences - a.confirmedAbsences ||
+        b.laueMatch - a.laueMatch ||
         b.centricMatch - a.centricMatch ||
         a.id - b.id);
 
     const best = candidates.length ? candidates[0] : null;
+
+    const candidatesOut = [];
+    for (const c of candidates) {
+        candidatesOut.push({
+            id: c.id,
+            hm: c.hm,
+            hs: c.hs,
+            laue: c.laue,
+            centric: c.centric,
+            violations: c.violations,
+            confirmedOps: c.confirmedOps,
+            confirmedAbsences: c.confirmedAbsences,
+        });
+    }
 
     return {
         cell,
@@ -490,16 +531,7 @@ export function analyzeSpaceGroup(sgData, reflections, cell, options = {}) {
         centering,
         centricity,
         centeringResults,
-        candidates: candidates.map(c => ({
-            id: c.id,
-            hm: c.hm,
-            hs: c.hs,
-            laue: c.laue,
-            centric: c.centric,
-            violations: c.violations,
-            confirmedOps: c.confirmedOps,
-            confirmedAbsences: c.confirmedAbsences,
-        })),
+        candidates: candidatesOut,
         best: best ? { id: best.id, hm: best.hm, hs: best.hs } : null,
     };
 }

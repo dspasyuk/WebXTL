@@ -129,11 +129,7 @@ async function promptCell() {
     const ask = (q) => new Promise(res => rl.question(q, res));
     const a = await ask('Unit cell a b c alpha beta gamma (e.g. 10.5 10.5 14.0 90 90 90): ');
     rl.close();
-    const v = a.trim().split(/\s+/).map(parseFloat);
-    if (v.length !== 6 || v.some(x => !Number.isFinite(x))) {
-        throw new Error('Invalid unit cell. Expected six numbers: a b c alpha beta gamma.');
-    }
-    return { a: v[0], b: v[1], c: v[2], alpha: v[3], beta: v[4], gamma: v[5] };
+    return parseCellInput(a);
 }
 
 // Number of values consumed by each bare keyword / option.
@@ -143,10 +139,27 @@ async function promptCell() {
         cell: 6, resolution: 2,
     };
 
-function parseCellString(s) {
-    const v = s.split(/\s+/).map(parseFloat);
-    if (v.length !== 6 || v.some(x => !Number.isFinite(x))) {
-        throw new Error('cell expects six numbers: a b c alpha beta gamma');
+// Split a string on whitespace with a single pass.
+function splitWs(s) {
+    const out = [];
+    let cur = '';
+    for (let i = 0; i < s.length; i++) {
+        const c = s.charCodeAt(i);
+        if (c === 32 || c === 9) {
+            if (cur) { out.push(cur); cur = ''; }
+        } else cur += s[i];
+    }
+    if (cur) out.push(cur);
+    return out;
+}
+
+function parseCellInput(s) {
+    const toks = splitWs(String(s));
+    if (toks.length !== 6) throw new Error('cell expects six numbers: a b c alpha beta gamma');
+    const v = [0, 0, 0, 0, 0, 0];
+    for (let i = 0; i < 6; i++) {
+        v[i] = parseFloat(toks[i]);
+        if (!Number.isFinite(v[i])) throw new Error('cell expects six numbers: a b c alpha beta gamma');
     }
     return { a: v[0], b: v[1], c: v[2], alpha: v[3], beta: v[4], gamma: v[5] };
 }
@@ -214,7 +227,7 @@ function parseArgs(argv) {
             // single quoted string "--cell \"20 21 22 90 90 90\"".
             while (vals.length < n && i + 1 < argv.length) {
                 const next = argv[++i];
-                const parts = next.split(/\s+/).filter(Boolean);
+                const parts = splitWs(next);
                 for (const p of parts) {
                     vals.push(p);
                     if (vals.length >= n) break;
@@ -238,7 +251,7 @@ function parseArgs(argv) {
         } else if (key === 'sfac' || key === 'formula') {
             args.sfac = vals[0];
         } else if (key === 'cell') {
-            args.cell = parseCellString(vals.join(' '));
+            args.cell = parseCellInput(vals.join(' '));
         } else if (key === 'resolution') {
             const lo = parseFloat(vals[0]), hi = parseFloat(vals[1]);
             if (!Number.isFinite(lo) || !Number.isFinite(hi) || lo <= 0 || hi <= 0 || lo === hi) {
@@ -259,7 +272,14 @@ function setupLogFile(logPath) {
     try { fs.writeFileSync(resolved, ''); } catch (e) { /* ignore */ }
     const origLog = console.log;
     const origErr = console.error;
-    const fmt = (args) => args.map(a => typeof a === 'string' ? a : JSON.stringify(a)).join(' ');
+    const fmt = (args) => {
+        let out = '';
+        for (let i = 0; i < args.length; i++) {
+            if (i) out += ' ';
+            out += typeof args[i] === 'string' ? args[i] : JSON.stringify(args[i]);
+        }
+        return out;
+    };
     const write = (line) => {
         try { fs.appendFileSync(resolved, line + '\n', 'utf8'); } catch (e) { /* ignore */ }
     };

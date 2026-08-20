@@ -96,9 +96,11 @@ export function writeShelxIns(usedSG, cell, options = {}) {
     }
     const defaultSfac = ['C', 'H', 'N', 'O', 'F', 'Na', 'Mg', 'Al', 'Si', 'P', 'S', 'Cl', 'K', 'Ca', 'Fe', 'Ni', 'Cu', 'Zn', 'Br', 'I'];
     const sfac = options.sfac && options.sfac.length ? options.sfac : defaultSfac;
-    const unit = options.unit && options.unit.length === sfac.length
-        ? options.unit
-        : sfac.map(() => 20);
+    let unit = options.unit && options.unit.length === sfac.length ? options.unit : null;
+    if (!unit) {
+        unit = [];
+        for (let i = 0; i < sfac.length; i++) unit.push(20);
+    }
     out.push('SFAC ' + sfac.join(' '));
     out.push('UNIT ' + unit.join(' '));
     out.push('HKLF 4');
@@ -147,11 +149,31 @@ function vecIs(t, v) {
 }
 
 function matKey(m) {
-    return m.map(r => r.join(',')).join('|');
+    let out = '';
+    for (let i = 0; i < m.length; i++) {
+        if (i) out += '|';
+        for (let j = 0; j < m[i].length; j++) {
+            if (j) out += ',';
+            out += m[i][j];
+        }
+    }
+    return out;
 }
 
 function negVec(t) {
-    return t.map(x => -x);
+    const out = [];
+    for (let i = 0; i < t.length; i++) out.push(-t[i]);
+    return out;
+}
+
+// Serialize a vector of values rounded to 6 decimals (for set membership keys).
+function vecKey(t) {
+    let out = '';
+    for (let i = 0; i < t.length; i++) {
+        if (i) out += ',';
+        out += Math.round(t[i] * 1e6) / 1e6;
+    }
+    return out;
 }
 
 // Reduce the full list of general positions to the generating operations
@@ -168,9 +190,11 @@ function shelxSymmOps(ops, centrosymmetric) {
         if (matIs(p.R, I) && vecIs(p.t, 0)) continue;           // identity
         if (centrosymmetric && matIs(p.R, mI) && vecIs(p.t, 0)) continue; // pure inversion
         if (centrosymmetric) {
-            const partner = matKey(p.R.map((row, i) => row.map(v => -v))) + '|' + negVec(p.t).map(v => Math.round(v * 1e6) / 1e6).join(',');
+            // Inversion partner matrix: -R, and -t.
+            const negR = [[-p.R[0][0], -p.R[0][1], -p.R[0][2]], [-p.R[1][0], -p.R[1][1], -p.R[1][2]], [-p.R[2][0], -p.R[2][1], -p.R[2][2]]];
+            const partner = matKey(negR) + '|' + vecKey(negVec(p.t));
             if (seen.has(partner)) continue;
-            seen.add(matKey(p.R) + '|' + p.t.map(v => Math.round(v * 1e6) / 1e6).join(','));
+            seen.add(matKey(p.R) + '|' + vecKey(p.t));
         }
         const parts = [];
         for (let i = 0; i < 3; i++) {
@@ -223,10 +247,13 @@ export function analyzeHkl(text, options = {}) {
 
     // Optionally restrict to a resolution range.
     if (options.resolution && options.resolution.dmin && options.resolution.dmax) {
-        reflections = reflections.filter(r => {
+        const filtered = [];
+        const dmin = options.resolution.dmin, dmax = options.resolution.dmax;
+        for (const r of reflections) {
             const d = dSpacing(r.h, r.k, r.l, cell);
-            return Number.isFinite(d) && d >= options.resolution.dmin - 1e-6 && d <= options.resolution.dmax + 1e-6;
-        });
+            if (Number.isFinite(d) && d >= dmin - 1e-6 && d <= dmax + 1e-6) filtered.push(r);
+        }
+        reflections = filtered;
         if (!reflections.length) {
             return { ok: false, error: 'No reflections within the requested resolution range.' };
         }

@@ -52,7 +52,11 @@ export function mergeReflections(reflections, matrices, cell, options = {}) {
     }
     const merged = [];
     for (const [key, arr] of map) {
-        const [h, k, l] = key.split(',').map(Number);
+        const c1 = key.indexOf(',');
+        const c2 = key.indexOf(',', c1 + 1);
+        const h = parseInt(key.slice(0, c1), 10);
+        const k = parseInt(key.slice(c1 + 1, c2), 10);
+        const l = parseInt(key.slice(c2 + 1), 10);
         // Weighted mean intensity (1/sigma^2 weights).
         let wsum = 0, w = 0, n = arr.length, msum = 0;
         for (const o of arr) {

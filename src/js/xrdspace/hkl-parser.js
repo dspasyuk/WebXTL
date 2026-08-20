@@ -11,6 +11,23 @@ export const HKL_FORMAT = {
     UNKNOWN: 'unknown',
 };
 
+// Split a line into whitespace-separated tokens with a single pass (avoids the
+// per-line allocations of split(/\s+/).filter(Boolean) on large reflection files).
+function tokenize(s) {
+    const out = [];
+    let cur = '';
+    for (let i = 0; i < s.length; i++) {
+        const c = s.charCodeAt(i);
+        if (c === 32 || c === 9 || c === 13) {
+            if (cur) { out.push(cur); cur = ''; }
+        } else {
+            cur += s[i];
+        }
+    }
+    if (cur) out.push(cur);
+    return out;
+}
+
 // Parse an XDS_ASCII header value like "!UNIT_CELL_CONSTANTS= 19.236 15.537 ..."
 function parseXdsHeader(lines) {
     const header = {};
@@ -99,7 +116,7 @@ function parseCodRefln(lines) {
     for (let i = dataStart; i < lines.length; i++) {
         const raw = lines[i].trim();
         if (raw === '' || raw.startsWith('_') || raw.startsWith('loop_') || raw.startsWith('data_') || raw.startsWith('#')) break;
-        const row = raw.split(/\s+/).filter(Boolean);
+        const row = tokenize(raw);
         const h = parseInt(row[idx.h], 10);
         const k = parseInt(row[idx.k], 10);
         const l = parseInt(row[idx.l], 10);
@@ -145,7 +162,7 @@ export function detectFormat(text) {
         if (!line || line.startsWith('#')) continue;
         if (line.startsWith('!')) hasXds = true;
         if (line.startsWith('_refln_')) hasCodRefln = true;
-        const tokens = line.split(/\s+/).filter(Boolean);
+        const tokens = tokenize(line);
         if (tokens.length >= 5 && /^-?\d/.test(tokens[0])) hasShelx = true;
     }
     if (hasCodRefln) return HKL_FORMAT.COD;
@@ -181,9 +198,12 @@ export function parseHkl(text) {
         title = header.OUTPUT_FILE || '';
         const ucc = header.UNIT_CELL_CONSTANTS;
         if (ucc) {
-            const v = ucc.split(/\s+/).map(parseFloat);
-            if (v.length >= 6) {
-                cell = { a: v[0], b: v[1], c: v[2], alpha: v[3], beta: v[4], gamma: v[5] };
+            const toks = tokenize(ucc);
+            if (toks.length >= 6) {
+                cell = {
+                    a: parseFloat(toks[0]), b: parseFloat(toks[1]), c: parseFloat(toks[2]),
+                    alpha: parseFloat(toks[3]), beta: parseFloat(toks[4]), gamma: parseFloat(toks[5]),
+                };
             }
         }
         if (header.SPACE_GROUP_NUMBER) spaceGroupNumber = parseInt(header.SPACE_GROUP_NUMBER, 10);
@@ -196,7 +216,7 @@ export function parseHkl(text) {
         for (const raw of lines) {
             const line = raw.trim();
             if (!line || line.startsWith('!')) continue;
-            const tokens = line.split(/\s+/);
+            const tokens = tokenize(line);
             const r = parseXdsLine(tokens);
             if (r) reflections.push(r);
         }
@@ -204,7 +224,7 @@ export function parseHkl(text) {
         for (const raw of lines) {
             const line = raw.trim();
             if (!line || line.startsWith('!') || line.startsWith('#')) continue;
-            const tokens = line.split(/\s+/);
+            const tokens = tokenize(line);
             const r = parseShelxLine(tokens);
             if (r) reflections.push(r);
         }

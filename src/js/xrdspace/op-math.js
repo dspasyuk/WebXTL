@@ -43,7 +43,8 @@ export function parseComponent(str) {
 // Parse an operation string ("-y, x-y, z") into { R: 3x3 matrix, t: [tx,ty,tz] }.
 // R[i][j] is the coefficient of variable j (0=x,1=y,2=z) in coordinate i.
 export function parseOperation(opString) {
-    const parts = String(opString).split(',').map(s => s.trim());
+    const parts = [];
+    for (const s of String(opString).split(',')) parts.push(s.trim());
     if (parts.length !== 3) return null;
     const R = [
         [0, 0, 0],

@@ -1,3 +1,4 @@
+// Copyright (c) 2026 Denis Spasyuk. MIT License.
 // xrdspace — a JavaScript XPREP-style space-group determination tool.
 //
 // Main entry point: loads the space-group dictionary, parses HKL files

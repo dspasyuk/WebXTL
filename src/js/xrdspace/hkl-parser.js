@@ -1,3 +1,4 @@
+// Copyright (c) 2026 Denis Spasyuk. MIT License.
 // HKL file parsers for xrdspace.
 // Supports XDS_ASCII.HKL (with ! header lines) and the standard SHELX
 // five-column format (H K L I SIG(I)).

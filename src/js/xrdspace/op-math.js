@@ -1,3 +1,4 @@
+// Copyright (c) 2026 Denis Spasyuk. MIT License.
 // Symmetry operation mathematics for xrdspace.
 // Handles parsing of Hermann-Mauguin symmetry-operation strings (as used in
 // the space-groups.js dictionary, e.g. "-y, x-y, z" or "-x+1/2, -y, z") into

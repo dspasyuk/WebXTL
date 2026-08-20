@@ -1,3 +1,4 @@
+// Copyright (c) 2026 Denis Spasyuk. MIT License.
 // Laue classes for xrdspace. The eleven centrosymmetric point groups are built
 // from representative space groups in the space-groups.js dictionary, so we
 // never hard-code a potentially inconsistent symmetry table.

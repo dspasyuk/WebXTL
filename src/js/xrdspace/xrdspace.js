@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+// Copyright (c) 2026 Denis Spasyuk. MIT License.
 // xrdspace command-line interface — POINTLESS-style arguments.
 //
 // Usage:

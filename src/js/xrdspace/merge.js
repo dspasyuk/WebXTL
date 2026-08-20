@@ -1,3 +1,4 @@
+// Copyright (c) 2026 Denis Spasyuk. MIT License.
 // Reflection merging and output generation for xrdspace.
 //
 // Produces a symmetry-corrected, merged HKL dataset in the SHELX five-column

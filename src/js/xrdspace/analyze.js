@@ -1,3 +1,4 @@
+// Copyright (c) 2026 Denis Spasyuk. MIT License.
 // Space-group analysis core for xrdspace.
 // Implements an XPREP-style space-group determination:
 //   1. unit-cell metric  -> crystal system

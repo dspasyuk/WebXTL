@@ -11,7 +11,7 @@ import { LAUE_BY_SYSTEM, LAUE_CRYSTAL_SYSTEM } from './laue.js';
 
 // --- crystal system from unit cell ---
 
-export function crystalSystemFromCell(cell, tolLen = 0.03, tolAng = 1.0) {
+export function crystalSystemFromCell(cell, tolLen = 0.005, tolAng = 1.0) {
     const { a, b, c, alpha, beta, gamma } = cell;
     const eqLen = (x, y) => Math.abs(x - y) <= tolLen * Math.max(Math.abs(x), Math.abs(y));
     const is90 = (x) => Math.abs(x - 90) <= tolAng;
@@ -29,7 +29,9 @@ export function crystalSystemFromCell(cell, tolLen = 0.03, tolAng = 1.0) {
     if (eqLen(a, b) && eqLen(b, c) && Math.abs(alpha - beta) <= tolAng && Math.abs(beta - gamma) <= tolAng && !is90(alpha)) {
         return { system: 'trigonal', uniqueAxis: null }; // rhombohedral setting
     }
-    if (!eqLen(a, b) && !eqLen(a, c) && !eqLen(b, c) && is90(alpha) && is90(beta) && is90(gamma)) {
+    // Orthorhombic: all angles 90. Pseudo-symmetric lengths (e.g. a ~ c) are
+    // still orthorhombic once the stricter tetragonal/cubic tests failed.
+    if (is90(alpha) && is90(beta) && is90(gamma)) {
         return { system: 'orthorhombic', uniqueAxis: null };
     }
     // monoclinic: exactly one angle differs from 90
@@ -165,6 +167,10 @@ export function detectCentering(reflections, sigThreshold = 5) {
                     const isig = Math.abs(r.I) / r.sig;
                     if (isig > sigThreshold) violations++;
                     else if (isig > 0) weak++;
+                } else {
+                    // No sigma available (e.g. some COD files): any present
+                    // forbidden reflection is evidence the centering is wrong.
+                    violations++;
                 }
             }
         }

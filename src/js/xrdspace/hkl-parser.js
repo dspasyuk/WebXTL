@@ -63,9 +63,12 @@ function parseCodRefln(lines) {
     let dataStart = 0;
     for (let i = 0; i < lines.length; i++) {
         if (lines[i].trim() !== 'loop_') continue;
+        // Collect the header block: consecutive lines starting with '_'
+        // (some COD files interleave non-_refln_ keys such as
+        // _pd_refln_wavelength_id inside the reflection loop).
         const hdrs = [];
         let j = i + 1;
-        while (j < lines.length && lines[j].trim().startsWith('_refln_')) {
+        while (j < lines.length && lines[j].trim().startsWith('_')) {
             hdrs.push(lines[j].trim());
             j++;
         }
@@ -82,8 +85,12 @@ function parseCodRefln(lines) {
         l: headers.indexOf('_refln_index_l'),
         fsq: headers.indexOf('_refln_F_squared_meas'),
         fsq_sig: headers.indexOf('_refln_F_squared_sigma'),
+        int: headers.indexOf('_refln_intensity_meas'),
+        int_sig: headers.indexOf('_refln_intensity_sigma'),
         f: headers.indexOf('_refln_F_meas'),
         f_sig: headers.indexOf('_refln_F_meas_sigma'),
+        fobs: headers.indexOf('_refln_f_obs'),
+        fobs_sig: headers.indexOf('_refln_f_obs_sigma') >= 0 ? headers.indexOf('_refln_f_obs_sigma') : headers.indexOf('_refln_F_sigma'),
         f_calc: headers.indexOf('_refln_F_squared_calc'),
     };
     if (idx.h < 0 || idx.k < 0 || idx.l < 0) return [];
@@ -97,17 +104,24 @@ function parseCodRefln(lines) {
         const k = parseInt(row[idx.k], 10);
         const l = parseInt(row[idx.l], 10);
         if (isNaN(h) || isNaN(k) || isNaN(l)) continue;
+        const get = (i, d = 0) => (i >= 0 && row[i] !== undefined && row[i] !== '.') ? parseFloat(row[i]) : NaN;
         let I, sig;
-        if (idx.fsq >= 0 && row[idx.fsq] !== undefined && row[idx.fsq] !== '.') {
-            I = parseFloat(row[idx.fsq]);
-            sig = (idx.fsq_sig >= 0 && row[idx.fsq_sig] !== undefined) ? parseFloat(row[idx.fsq_sig]) : 0;
-        } else if (idx.f >= 0 && row[idx.f] !== undefined && row[idx.f] !== '.') {
-            const F = parseFloat(row[idx.f]);
-            const sF = (idx.f_sig >= 0 && row[idx.f_sig] !== undefined) ? parseFloat(row[idx.f_sig]) : 0;
+        if (!isNaN(get(idx.fsq))) {
+            I = get(idx.fsq);
+            sig = get(idx.fsq_sig);
+        } else if (!isNaN(get(idx.int))) {
+            I = get(idx.int);
+            sig = get(idx.int_sig);
+        } else if (!isNaN(get(idx.f))) {
+            const F = get(idx.f);
             I = F * F;
-            sig = 2 * F * sF;
-        } else if (idx.f_calc >= 0 && row[idx.f_calc] !== undefined && row[idx.f_calc] !== '.') {
-            I = parseFloat(row[idx.f_calc]);
+            sig = 2 * F * get(idx.f_sig);
+        } else if (!isNaN(get(idx.fobs))) {
+            const F = get(idx.fobs);
+            I = F * F;
+            sig = 2 * F * get(idx.fobs_sig);
+        } else if (!isNaN(get(idx.f_calc))) {
+            I = get(idx.f_calc);
             sig = 0;
         } else {
             continue;

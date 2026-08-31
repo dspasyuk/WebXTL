@@ -1,10 +1,10 @@
 {
   "total": 2000,
-  "pass": 990,
-  "near": 857,
-  "fail": 115,
+  "pass": 877,
+  "near": 1041,
+  "fail": 44,
   "skip": 38,
-  "rate": 94.1,
+  "rate": 97.8,
   "bySystem": {
     "triclinic": {
       "total": 40,
@@ -29,30 +29,30 @@
     },
     "tetragonal": {
       "total": 451,
-      "pass": 214,
-      "near": 191,
-      "fail": 34,
+      "pass": 168,
+      "near": 252,
+      "fail": 19,
       "skip": 12
     },
     "trigonal": {
       "total": 296,
-      "pass": 94,
-      "near": 161,
-      "fail": 40,
+      "pass": 43,
+      "near": 248,
+      "fail": 4,
       "skip": 1
     },
     "hexagonal": {
       "total": 186,
-      "pass": 73,
-      "near": 83,
-      "fail": 19,
+      "pass": 85,
+      "near": 89,
+      "fail": 1,
       "skip": 11
     },
     "cubic": {
       "total": 200,
-      "pass": 139,
-      "near": 47,
-      "fail": 12,
+      "pass": 111,
+      "near": 77,
+      "fail": 10,
       "skip": 2
     }
   }

@@ -48,7 +48,20 @@ export class DensityRenderer {
         
         const resolution = Math.max(resX, resY, resZ);
         
-        this.mesh = new MarchingCubes(resolution, this.material, true, true, 100000);
+        // Cap resolution so the polygon buffers stay within a reasonable size:
+        // density blobs render smoothly well below this, and the cap prevents a
+        // noisy/large map from exploding the vertex count (and the tab memory).
+        const MAX_RES = 48;
+        const mcRes = Math.min(resolution, MAX_RES);
+
+        // Worst-case marching-cubes triangle count for a resolution r is
+        // (r-1)^3 * 5. Size the buffers for that (with headroom) so the mesh is
+        // never truncated - THREE silently drops vertices written past the
+        // buffer end, which left the map empty when a structure produced more
+        // than the old hard-coded 100000 polygons.
+        const maxPolyCount = Math.max(100000, Math.ceil(Math.pow(mcRes - 1, 3) * 5 * 1.1));
+
+        this.mesh = new MarchingCubes(mcRes, this.material, true, true, maxPolyCount);
         this.mesh.userData.isMap = true; 
         
         const field = this.mesh.field;
@@ -71,12 +84,12 @@ export class DensityRenderer {
         
         const radiusSq = radius ? radius * radius : Infinity;
         
-        for (let k = 0; k < resolution; k++) { // z
-            for (let j = 0; j < resolution; j++) { // y
-                for (let i = 0; i < resolution; i++) { // x
-                    const u = i / resolution;
-                    const v = j / resolution;
-                    const w = k / resolution;
+        for (let k = 0; k < mcRes; k++) { // z
+            for (let j = 0; j < mcRes; j++) { // y
+                for (let i = 0; i < mcRes; i++) { // x
+                    const u = i / mcRes;
+                    const v = j / mcRes;
+                    const w = k / mcRes;
                     
                     // Map u (0..1) to fractional coordinate
                     const fracX = minFrac.x + u * dFracX;
@@ -93,7 +106,7 @@ export class DensityRenderer {
                                        2*dx*dy*g12 + 2*dx*dz*g13 + 2*dy*dz*g23;
                                        
                         if (distSq > radiusSq) {
-                            field[k * resolution * resolution + j * resolution + i] = -1000; // Mask out
+                            field[k * mcRes * mcRes + j * mcRes + i] = -1000; // Mask out
                             continue;
                         }
                     }
@@ -105,7 +118,7 @@ export class DensityRenderer {
                     
                     const val = this.sampleGrid(data, nx, ny, nz, gx, gy, gz);
                     
-                    const idx = k * resolution * resolution + j * resolution + i;
+                    const idx = k * mcRes * mcRes + j * mcRes + i;
                     field[idx] = val;
                 }
             }

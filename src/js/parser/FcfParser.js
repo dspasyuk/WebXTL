@@ -61,10 +61,17 @@ export class FcfParser {
                         else if (field.includes('_index_k')) refln.k = parseInt(val);
                         else if (field.includes('_index_l')) refln.l = parseInt(val);
                         else if (field.includes('_F_squared_calc')) refln.Fc2 = parseFloat(val);
+                        else if (field.includes('_F_calc')) refln.Fc = parseFloat(val);
                         else if (field.includes('_F_squared_meas')) refln.Fo2 = parseFloat(val);
+                        else if (field.includes('_F_meas')) refln.Fo = parseFloat(val);
                         else if (field.includes('_F_squared_sigma')) refln.sigma = parseFloat(val);
                         else if (field.includes('_observed_status')) refln.status = val;
+                        else if (field.includes('_phase_calc')) refln.phase = parseFloat(val);
                     }
+                    // Normalize F/F^2 variants: SHELXL LIST 4 writes *_F_squared_*,
+                    // LIST 6 writes *_F_* (amplitudes). Downstream code expects F^2.
+                    if (refln.Fc2 === undefined && refln.Fc !== undefined) refln.Fc2 = refln.Fc * refln.Fc;
+                    if (refln.Fo2 === undefined && refln.Fo !== undefined) refln.Fo2 = refln.Fo * refln.Fo;
                     this.data.reflections.push(refln);
                 } else if (isSymmLoop) {
                      this.data.symmetry.push(line.replace(/'/g, ''));

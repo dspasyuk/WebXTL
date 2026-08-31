@@ -256,6 +256,10 @@ export function computeMergeStatistics(reflections, matrices, cell) {
 export function writeShelxHkl(merged) {
     const lines = [];
     for (const r of merged) {
+        // Skip the origin reflection (0,0,0): SHELXL stops reading the HKL
+        // file entirely if it is present (reports 0 reflections / NO REFLECTION
+        // DATA); it derives F(000) from the UNIT instruction instead.
+        if (r.h === 0 && r.k === 0 && r.l === 0) continue;
         lines.push(`${String(r.h).padStart(4)}${String(r.k).padStart(4)}${String(r.l).padStart(4)}${r.I.toFixed(2).padStart(10)}${r.sig.toFixed(2).padStart(8)}`);
     }
     return lines.join('\n') + '\n';
@@ -280,6 +284,8 @@ export function writeXdsAscii(merged, header = {}) {
     if (header.dmin) out.push(`!INCLUDE_RESOLUTION_RANGE= ${header.dmax || 50} ${header.dmin}`);
     // In a merged XDS_ASCII file columns 6-8 hold ISIGMA(I) placeholders.
     for (const r of merged) {
+        // Skip the origin reflection for consistency with writeShelxHkl.
+        if (r.h === 0 && r.k === 0 && r.l === 0) continue;
         out.push(`${r.h} ${r.k} ${r.l} ${r.I.toFixed(2)} ${r.sig.toFixed(2)} 0.000 0.000 0.000 0.000 0.000 ${r.multiplicity || 1}`);
     }
     out.push('!END_OF_DATA');

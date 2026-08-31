@@ -897,6 +897,38 @@
         </div>
     </div>
 
+    <!-- Relabel Atoms Modal -->
+    <div class="modal fade" id="relabelModal" tabindex="-1" aria-hidden="true">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title">Relabel Atoms</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                    <div class="mb-3">
+                        <label for="relabel-element-input" class="form-label">Atom Type (element)</label>
+                        <input type="text" class="form-control" id="relabel-element-input"
+                            placeholder="Leave empty to keep each atom's own element (e.g. C)">
+                        <div class="form-text">Leave empty to renumber each atom keeping its current element type
+                            (C3XR becomes C1). Enter an element (e.g. C) to force all relabeled atoms to that type.</div>
+                    </div>
+                    <div class="mb-3">
+                        <label for="relabel-suffix-input" class="form-label">Suffix Letters (optional)</label>
+                        <input type="text" class="form-control" id="relabel-suffix-input"
+                            placeholder="e.g. A for disorder parts (C1A, C2A, ...)">
+                        <div class="form-text">Letters appended after the number, e.g. for disordered parts.</div>
+                    </div>
+                    <div class="form-text text-muted" id="relabel-scope-hint"></div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                    <button type="button" class="btn btn-primary" id="btn-perform-relabel">Relabel</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <!-- Fragment Placement Panel (floating overlay, non-blocking) -->
     <div id="fragmentPlacementPanel" class="position-fixed bg-light border rounded shadow-sm overflow-auto"
         style="display:none; top:100px; right:12px; width:270px; z-index:1050; padding:10px;">

@@ -3,8 +3,8 @@
 // xrdspace command-line interface — POINTLESS-style arguments.
 //
 // Usage:
-//   node src/js/xrdspace/xrdspace.js --hklin <file.hkl> [options]
-//   node src/js/xrdspace/xrdspace.js hklin <file.hkl> hklout <file.hkl> spacegroup C2 ...
+//   node src/xrdspace.js --hklin <file.hkl> [options]
+//   node src/xrdspace.js hklin <file.hkl> hklout <file.hkl> spacegroup C2 ...
 //
 // If the HKL file does not carry unit-cell parameters, xrdspace prompts for
 // them interactively. Pass --cell "a b c alpha beta gamma" to skip the prompt.
@@ -12,9 +12,14 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import readline from 'node:readline';
+import { fileURLToPath } from 'node:url';
 
 import { analyzeHkl } from './index.js';
 import { parseHkl } from './hkl-parser.js';
+import { searchByCell } from './cell-search.js';
+import { loadPdbLookup, validateSpaceGroupAgainstPdb } from './pdb-lookup.js';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const VERSION = '1.0.0';
 
@@ -22,13 +27,27 @@ const HELP = `
 xrdspace — space-group determination and reflection merging (POINTLESS-style CLI)
 
 Usage:
-  node src/js/xrdspace/xrdspace.js --hklin <file.hkl> [options]
+  node src/xrdspace.js --hklin <file.hkl> [options]
+  node src/xrdspace.js --codsearch|--pdbsearch|--search --cell "a b c alpha beta gamma" [options]
 
 Input / output:
   --hklin <file>      Input HKL file (XDS_ASCII or SHELX five-column format)
   --hklout <file>     Output merged HKL file, SHELX format (default: <input>_merged.hkl)
   --xdsout <file>     Output merged HKL file, XDS_ASCII format (default: <input>_XDS.HKL)
   --log <file>        Write all console output (the printed logs) to a file
+
+Unit-cell database search (no HKL file needed):
+  --search            Search BOTH the Crystallography Open Database (COD) and the
+                      RCSB Protein Data Bank (PDB) for structures with a unit cell
+                      matching the given --cell. Needs --cell "a b c alpha beta gamma".
+  --codsearch         Search only the COD.
+  --pdbsearch         Search only the PDB.
+  --tol <pct>         Relative length tolerance in % for the cell match (default 1.0).
+                      Real crystals vary by fractions of an Angstrom, so a few % is
+                      usually appropriate. PDB does not store esds on the cell, so a
+                      slightly wider tolerance helps there.
+  --tol-angle <deg>   Angle tolerance in degrees (default 1.5).
+  --limit <n>         Maximum number of matches to report (default 20).
 
 Space group:
   --spacegroup <sg>   Force a specific space group (number or Hermann-Mauguin
@@ -41,6 +60,27 @@ Data:
   --sigthreshold <n>                I/sigma threshold for systematic absences (default 5)
   --sfac "C H N O"                  Expected elements (or formula, e.g. "C12 H16 N2 O4")
                                     used for the SHELXT .ins SFAC/UNIT lines
+
+Space-group selection:
+  --chiral                          Restrict candidates to the 65 chiral (Sohncke)
+                                    space groups. This is the DEFAULT for
+                                    macromolecular cells (volume > 64000 A^3,
+                                    about 40x40x40 A); use --no-chiral to allow
+                                    non-chiral groups anyway.
+  --no-chiral                       Allow non-chiral (centrosymmetric / mirror)
+                                    space groups even for large cells.
+
+PDB space-group validation:
+  --valid                           Validate the determined space group against an
+                                    offline PDB unit-cell / space-group lookup
+                                    table. No network access at validation time:
+                                    reports VERIFIED / MISMATCH / AMBIGUOUS
+                                    (enantiomorph) / INDETERMINATE, with the space
+                                    groups the PDB assigns to cells matching
+                                    --cell. Uses --tol / --tol-angle for the match.
+  --pdb-table <file>                Path to the PDB lookup table (default:
+                                    data/pdb-cells.json). Build it once with:
+                                      node scripts/build-pdb-table.js
 
 Misc:
   --help, -h          Show this help
@@ -74,6 +114,7 @@ function printAnalysis(result) {
     console.log(`  Crystal system     : ${s.crystalSystem}${s.uniqueAxis ? ' (unique ' + s.uniqueAxis + ')' : ''}`);
     console.log(`  Lattice centering  : ${s.centering}`);
     console.log(`  Centrosymmetric    : ${s.centricity}  (<|E^2-1|> = ${s.centricityScore.toFixed(3)})`);
+    if (s.chiral) console.log('  Chiral restriction : on (Sohncke space groups only)');
     console.log(`  Laue class         : ${s.laueClass}   R(sym) = ${(s.laueRSym * 100).toFixed(2)} %`);
     console.log('----------------------------------------------');
     console.log('  R(sym) by Laue class:');
@@ -135,8 +176,10 @@ async function promptCell() {
 // Number of values consumed by each bare keyword / option.
     const N_VALUES = {
         hklin: 1, hklout: 1, xdsout: 1, spacegroup: 1, sg: 1, laue: 1, sigthreshold: 1,
-        sfac: 1, formula: 1, log: 1,
+        sfac: 1, formula: 1, log: 1, tol: 1, 'tol-angle': 1, limit: 1, 'pdb-table': 1,
         cell: 6, resolution: 2,
+        chiral: 0, 'no-chiral': 0, nochiral: 0, valid: 0,
+        search: 0, codsearch: 0, pdbsearch: 0,
     };
 
 // Split a string on whitespace with a single pass.
@@ -188,7 +231,7 @@ function parseSfacInput(input) {
 }
 
 function parseArgs(argv) {
-    const args = { hklin: null, hklout: null, xdsout: null, cell: null, spaceGroup: null, laue: null, resolution: null, sigThreshold: 5, sfac: null, log: null, help: false, version: false };
+    const args = { hklin: null, hklout: null, xdsout: null, cell: null, spaceGroup: null, laue: null, resolution: null, sigThreshold: 5, sfac: null, log: null, chiral: null, help: false, version: false, search: null, codsearch: false, pdbsearch: false, tol: 1.0, tolAngle: 1.5, limit: 20, valid: false, pdbTable: null };
     let i = 0;
     while (i < argv.length) {
         const a = argv[i];
@@ -202,9 +245,14 @@ function parseArgs(argv) {
             key = a.slice(2).toLowerCase();
             if (key === 'space-group') key = 'spacegroup';
             if (key === 'sg') key = 'spacegroup';
+            if (key === 'tolerance' || key === 'tol') key = 'tol';
+            if (key === 'tolerance-angle' || key === 'tolangle' || key === 'tolang') key = 'tol-angle';
             n = N_VALUES[key] !== undefined ? N_VALUES[key] : 1;
         } else if (a === 'hklin' || a === 'hklout' || a === 'xdsout' || a === 'spacegroup' || a === 'laue'
-            || a === 'cell' || a === 'resolution' || a === 'sigthreshold' || a === 'sfac' || a === 'formula' || a === 'log') {
+            || a === 'cell' || a === 'resolution' || a === 'sigthreshold' || a === 'sfac' || a === 'formula' || a === 'log'
+            || a === 'chiral' || a === 'no-chiral' || a === 'nochiral'
+            || a === 'search' || a === 'codsearch' || a === 'pdbsearch' || a === 'tol' || a === 'tol-angle' || a === 'limit'
+            || a === 'valid' || a === 'pdb-table') {
             key = a;
             n = N_VALUES[a];
         } else if (!a.startsWith('-')) {
@@ -242,7 +290,26 @@ function parseArgs(argv) {
         else if (key === 'hklout') args.hklout = vals[0];
         else if (key === 'xdsout') args.xdsout = vals[0];
         else if (key === 'log') args.log = vals[0];
-        else if (key === 'spacegroup') args.spaceGroup = vals[0];
+        else if (key === 'valid') args.valid = true;
+        else if (key === 'pdb-table') args.pdbTable = vals[0];
+        else if (key === 'chiral') args.chiral = true;
+        else if (key === 'no-chiral' || key === 'nochiral') args.chiral = false;
+        else if (key === 'search') args.search = true;
+        else if (key === 'codsearch') args.codsearch = true;
+        else if (key === 'pdbsearch') args.pdbsearch = true;
+        else if (key === 'tol') {
+            const t = parseFloat(vals[0]);
+            if (!Number.isFinite(t) || t <= 0) throw new Error('tol expects a positive number (% length tolerance)');
+            args.tol = t;
+        } else if (key === 'tol-angle') {
+            const t = parseFloat(vals[0]);
+            if (!Number.isFinite(t) || t <= 0) throw new Error('tol-angle expects a positive number (degrees)');
+            args.tolAngle = t;
+        } else if (key === 'limit') {
+            const n = parseInt(vals[0], 10);
+            if (!Number.isFinite(n) || n <= 0) throw new Error('limit expects a positive integer');
+            args.limit = n;
+        } else if (key === 'spacegroup') args.spaceGroup = vals[0];
         else if (key === 'laue') args.laue = vals[0];
         else if (key === 'sigthreshold') {
             const t = parseFloat(vals[0]);
@@ -288,6 +355,119 @@ function setupLogFile(logPath) {
     return resolved;
 }
 
+function fmtCell(cell, decimals = 2) {
+    const n = (v, d) => (Number.isFinite(v) ? v.toFixed(d) : '?');
+    return `${n(cell.a, decimals)} ${n(cell.b, decimals)} ${n(cell.c, decimals)}  ${n(cell.alpha, 1)} ${n(cell.beta, 1)} ${n(cell.gamma, 1)}`;
+}
+
+function printCellSearch(queryCell, args) {
+    const databases = args.databases && args.databases.length
+        ? args.databases
+        : (() => {
+            const d = [];
+            if (args.search || args.codsearch) d.push('COD');
+            if (args.search || args.pdbsearch) d.push('PDB');
+            return d;
+        })();
+
+    console.log('');
+    console.log('==============================================');
+    console.log('  xrdspace  —  unit-cell database search');
+    console.log('==============================================');
+    console.log(`  Query cell         : ${fmtCell(queryCell, 3)}`);
+    console.log(`  Databases          : ${databases.join(', ')}`);
+    console.log(`  Length tolerance   : ${args.tol}%   angle tolerance: ${args.tolAngle} deg`);
+    console.log(`  Match score        : 100 - (max rel. length dev % + max angle dev deg)`);
+    console.log('----------------------------------------------');
+    if (!args.settings) {
+        console.log('  No search settings were generated for this cell.');
+        console.log('==============================================');
+        return;
+    }
+    console.log(`  Standard settings  : ${args.settings.length}`);
+    console.log('----------------------------------------------');
+
+    if (!args.results || !args.results.length) {
+        console.log('  No matching structures found in the searched databases.');
+        console.log('  (Try a wider --tol / --tol-angle.)');
+    } else {
+        console.log(`  Rank   Match  DB    ID      Space group      a       b       c    alpha  beta  gamma`);
+        console.log(`  ${'-'.repeat(96)}`);
+        let rank = 0;
+        for (const r of args.results) {
+            rank++;
+            const sg = r.spaceGroup && r.spaceGroup.hm ? r.spaceGroup.hm : (r.spaceGroup && r.spaceGroup.number ? `#${r.spaceGroup.number}` : '?');
+            const cell = r.cell;
+            console.log(`  ${String(rank).padStart(4)}  ${r.match.toFixed(1).padStart(5)}%  ${r.database.padEnd(3)}  ${String(r.id).padEnd(7)}  ${sg.padEnd(14)}  ${fmtCell(cell)}`);
+            const desc = r.title || r.chemname || r.mineral || r.formula || r.journal || '';
+            if (desc) console.log(`       ${desc}`);
+            const extra = [];
+            if (r.spaceGroup && r.spaceGroup.number) extra.push(`space group #${r.spaceGroup.number}`);
+            if (r.formula && !desc) extra.push(`formula ${r.formula}`);
+            if (r.journal) extra.push(r.journal);
+            if (r.year) extra.push(r.year);
+            if (r.esd) {
+                const e = r.esd;
+                extra.push(`esd(a,b,c) = ${e.a ? e.a.toExponential(1) : '-'} ${e.b ? e.b.toExponential(1) : '-'} ${e.c ? e.c.toExponential(1) : '-'}`);
+            }
+            if (r.doi) extra.push(r.doi);
+            if (extra.length) console.log(`       ${extra.join('  ·  ')}`);
+        }
+    }
+    if (args.total != null && args.total > args.results.length) {
+        console.log('----------------------------------------------');
+        console.log(`  ${args.total} matching entries found in total; showing top ${args.results.length}.`);
+    }
+    if (args.errors && args.errors.length) {
+        console.log('----------------------------------------------');
+        for (const e of args.errors) console.log(`  search error: ${e}`);
+    }
+    console.log('==============================================');
+}
+
+function printPdbValidation(v, opts) {
+    console.log('');
+    console.log('==============================================');
+    console.log('  xrdspace  —  PDB space-group validation');
+    console.log('==============================================');
+    console.log(`  Lookup table      : ${opts.tablePath} (${opts.tableCount} entries)`);
+    console.log(`  Query cell        : ${fmtCell(v.queryCell, 3)}`);
+    console.log(`  Tolerances        : ${opts.tol}% lengths, ${opts.tolAngle} deg angles`);
+    if (v.total === 0) {
+        console.log('  Matching PDB      : none');
+        console.log('----------------------------------------------');
+        console.log('  Result            : INDETERMINATE');
+        console.log('    No PDB structure matches this cell. (widen --tol / --tol-angle,');
+        console.log('    or rebuild the table with  node scripts/build-pdb-table.js)');
+        console.log('==============================================');
+        return;
+    }
+    console.log(`  Matching PDB      : ${v.total} entr${v.total === 1 ? 'y' : 'ies'}`);
+    console.log(`  PDB space groups  : ${v.sgCounts.map(s => s.hm ? `${s.hm} (No. ${s.sg}) x${s.count}` : `No. ${s.sg} x${s.count}`).join(', ')}`);
+    const shown = v.matches.slice(0, 5);
+    if (shown.length) {
+        console.log(`  Matches           : ${shown.map(m => `${m.id} (No. ${m.sg})`).join(', ')}${v.total > shown.length ? `, +${v.total - shown.length} more` : ''}`);
+    }
+    console.log('----------------------------------------------');
+    const d = opts.determined;
+    console.log(`  Determined SG     : ${d ? `${d.hm} (No. ${d.id})` : `No. ${v.determinedSg}`}`);
+    if (opts.forcedHm) console.log(`  (forced for output: ${opts.forcedHm})`);
+    if (v.verdict === 'verified') {
+        console.log('  Result            : VERIFIED');
+        console.log(`    PDB assigns this cell to space group No. ${v.determinedSg}.`);
+    } else if (v.verdict === 'enantiomorph') {
+        console.log('  Result            : AMBIGUOUS (enantiomorph)');
+        console.log(`    PDB assigns this cell to No. ${v.enantiomorphOf}; Nos. ${v.determinedSg} and ${v.enantiomorphOf} are`);
+        console.log('    an enantiomorphic pair and cannot be told apart from the diffraction');
+        console.log('    pattern alone (only by anomalous scattering).');
+    } else if (v.verdict === 'mismatch') {
+        console.log('  Result            : MISMATCH');
+        console.log(`    PDB structures with this cell are in space group${v.sgNumbers.length === 1 ? '' : 's'} ${v.sgNumbers.join(', ')};`);
+        console.log(`    No. ${v.determinedSg} was determined. Check the indexing / space-group assignment.`);
+    }
+    console.log('==============================================');
+}
+
 async function main() {
     let args;
     try {
@@ -303,6 +483,38 @@ async function main() {
         const logPath = setupLogFile(args.log);
         process.stdout.write(`Logging to: ${logPath}\n`);
     }
+
+    // Unit-cell database search mode: --search / --codsearch / --pdbsearch.
+    if (args.search || args.codsearch || args.pdbsearch) {
+        let cell = args.cell;
+        if (!cell) {
+            console.error('xrdspace: cell search needs a query cell. Use --cell "a b c alpha beta gamma".');
+            process.exit(1);
+        }
+        const databases = [];
+        if (args.search) databases.push('COD', 'PDB');
+        if (args.codsearch) databases.push('COD');
+        if (args.pdbsearch) databases.push('PDB');
+        const queryCell = {
+            a: cell.a, b: cell.b, c: cell.c,
+            alpha: cell.alpha, beta: cell.beta, gamma: cell.gamma,
+        };
+        try {
+            const tol = args.tol / 100;
+            const r = await searchByCell(queryCell, {
+                databases,
+                tolLen: tol,
+                tolAng: args.tolAngle,
+                limit: args.limit,
+            });
+            printCellSearch(queryCell, { ...r, tol: args.tol, tolAngle: args.tolAngle, limit: args.limit });
+        } catch (e) {
+            console.error(`xrdspace: cell search failed: ${e.message}`);
+            process.exit(1);
+        }
+        process.exit(0);
+    }
+
     if (!args.hklin) {
         console.error('xrdspace: no input HKL file given.');
         console.error(HELP);
@@ -339,8 +551,37 @@ async function main() {
         sigThreshold: args.sigThreshold,
         sfac: sfacOpts.sfac,
         unit: sfacOpts.unit,
+        chiral: args.chiral,
     });
     printAnalysis(result);
+
+    // Validate the determined space group against the offline PDB lookup table.
+    if (result.ok && args.valid) {
+        const tablePath = path.resolve(args.pdbTable || path.join(__dirname, '..', 'data', 'pdb-cells.json'));
+        if (!fs.existsSync(tablePath)) {
+            console.error(`xrdspace: PDB lookup table not found: ${tablePath}`);
+            console.error(`  Build it once with:  node scripts/build-pdb-table.js`);
+            process.exit(1);
+        }
+        const table = loadPdbLookup(tablePath);
+        const determined = result.determined || result.best;
+        if (!determined) {
+            console.error('xrdspace: no space group determined to validate.');
+            process.exit(1);
+        }
+        const v = validateSpaceGroupAgainstPdb(table, result.cell, determined.id, {
+            tolLen: args.tol / 100,
+            tolAng: args.tolAngle,
+        });
+        printPdbValidation(v, {
+            tablePath,
+            tableCount: table.entries.length,
+            tol: args.tol,
+            tolAngle: args.tolAngle,
+            determined,
+            forcedHm: result.forced ? `${result.forced.hm} (No. ${result.forced.id})` : null,
+        });
+    }
 
     // Write the corrected/merged HKL files.
     if (result.ok && result.merge) {

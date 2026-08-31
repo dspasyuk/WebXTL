@@ -96,7 +96,7 @@ class WMOLApp {
                 general: {
                     uiFontSize: 14,
                     serverUrl: 'http://localhost:3000/refine',
-                    refineTimeout: 300000,
+                    refineTimeout: 180000,
                     restoreSession: true,
                     autoSave: true
                 },
@@ -143,7 +143,8 @@ class WMOLApp {
                     autoShow: false
                 }
             },
-            selectionOrder: [] // Track order of selected rows
+            selectionOrder: [], // Track order of selected rows
+            lastStructureTabKey: null // Most recently shown structure file tab (.ins/.res/.cif)
         };
 
         // Bind methods
@@ -1305,141 +1306,11 @@ class WMOLApp {
         });
 
         // Relabel Atoms (Ctrl-L)
-        // Relabel Atoms (Ctrl-L)
         editor.commands.addCommand({
             name: 'relabelAtoms',
             bindKey: {win: 'Ctrl-L', mac: 'Command-L'},
             exec: (editor) => {
-                // Support multi-selection
-                const ranges = editor.selection.getAllRanges();
-                if (ranges.length === 0 || (ranges.length === 1 && ranges[0].isEmpty())) {
-                    alert("Please select atoms to relabel.");
-                    return;
-                }
-                
-                const prefix = prompt("Enter atom prefix (e.g. C):", "C");
-                if (!prefix) return;
-
-                // Determine element type from prefix (remove digits)
-                const element = prefix.replace(/[0-9]/g, '');
-                if (!element) {
-                    alert("Invalid prefix. Must contain an element symbol.");
-                    return;
-                }
-
-                const doc = editor.getSession().getDocument();
-                let sfacIndex = -1;
-                let sfacLineIndex = -1;
-                let sfacElements = [];
-
-                // Find SFAC line
-                for (let i = 0; i < doc.getLength(); i++) {
-                    const line = doc.getLine(i).trim();
-                    if (line.startsWith('SFAC')) {
-                        sfacLineIndex = i;
-                        const parts = line.split(/\s+/);
-                        // SFAC can be "SFAC C H O" or "SFAC C 1.2 3.4 ..." (scattering factors)
-                        // We assume standard "SFAC E1 E2..." format for now as per user request context
-                        // If parts[1] is a number, it's the explicit format, which is harder to handle.
-                        // Let's assume element symbols.
-                        sfacElements = parts.slice(1);
-                        break;
-                    }
-                }
-
-                if (sfacLineIndex === -1) {
-                    // No SFAC found? Create one? Or warn?
-                    // Let's assume valid SHELX file has SFAC. If not, we can't easily assign index.
-                    // But maybe we can just default to 1 if not found, or insert SFAC.
-                    // For now, let's try to find the element in the existing list.
-                } else {
-                    // Check if element exists (case insensitive)
-                    const existingIndex = sfacElements.findIndex(e => e.toUpperCase() === element.toUpperCase());
-                    if (existingIndex !== -1) {
-                        sfacIndex = existingIndex + 1; // 1-based
-                    } else {
-                        // Add new element to SFAC
-                        sfacElements.push(element);
-                        sfacIndex = sfacElements.length;
-                        
-                        // Update SFAC line in document
-                        const newSfacLine = `SFAC ${sfacElements.join(' ')}`;
-                        doc.removeInLine(sfacLineIndex, 0, doc.getLine(sfacLineIndex).length);
-                        doc.insertInLine({row: sfacLineIndex, column: 0}, newSfacLine);
-                    }
-                }
-
-                let counter = 1;
-                
-                // Sync selectionOrder with current Ace selection before processing
-                const currentAceRows = new Set();
-                ranges.forEach(r => {
-                    for (let i = r.start.row; i <= r.end.row; i++) {
-                        currentAceRows.add(i);
-                    }
-                });
-
-                // 1. Remove items from order that are no longer selected in Ace
-                this.state.selectionOrder = this.state.selectionOrder.filter(r => currentAceRows.has(r));
-                
-                // 2. Add items from Ace that are missing in order (append them)
-                currentAceRows.forEach(r => {
-                    if (!this.state.selectionOrder.includes(r)) {
-                        this.state.selectionOrder.push(r);
-                    }
-                });
-
-                try {
-                    // Iterate over selectionOrder to process atoms in order
-                    this.state.selectionOrder.forEach(row => {
-                        const line = doc.getLine(row);
-                        // Assume atom name is first token
-                        const parts = line.trim().split(/\s+/);
-                        const keywords = ['TITL', 'CELL', 'ZERR', 'LATT', 'SYMM', 'SFAC', 'UNIT', 'HFIX', 'BOND', 'CONF', 'MPLA', 'HTAB', 'EQIV', 'CONN', 'PART', 'AFIX', 'RESI', 'MOLE', 'PLAN', 'SIZE', 'TEMP', 'WGHT', 'FVAR', 'HKLF', 'END', 'REM', 'Q', 'OMIT', 'DISP', 'ISOR', 'RIGI', 'SIMU', 'DELU', 'DANG', 'BUMP', 'TWIN', 'BASF'];
-                        
-                        // Check if it's an atom line (starts with letter, not keyword)
-                        // Also skip lines starting with = (continuation)
-                        if (parts.length > 0 && /^[A-Za-z]+/.test(parts[0]) && !keywords.includes(parts[0].toUpperCase()) && !line.trim().startsWith('=')) {
-                            // Replace first token
-                            const oldLabel = parts[0];
-                            const newLabel = prefix + counter;
-                            
-                            // Find index of oldLabel in line
-                            const match = line.match(new RegExp(`\\b${oldLabel}\\b`));
-                            if (match) {
-                                // Replace label
-                                let newLine = line.substring(0, match.index) + newLabel + line.substring(match.index + oldLabel.length);
-                                
-                                // Update SFAC index (2nd token) if we found a valid sfacIndex
-                                if (sfacIndex !== -1) {
-                                    const sfacRegex = new RegExp(`(${newLabel}\\s+)(\\d+)`);
-                                    const sfacMatch = newLine.match(sfacRegex);
-                                    if (sfacMatch) {
-                                        const replacement = sfacMatch[1] + sfacIndex;
-                                        newLine = newLine.replace(sfacMatch[0], replacement);
-                                    }
-                                }
-
-                                // Apply change immediately
-                                doc.removeInLine(row, 0, line.length);
-                                doc.insertInLine({row: row, column: 0}, newLine);
-                                counter++;
-                            }
-                        }
-                    });
-
-                    // Force update
-                    this.tryRender('res');
-                } catch (e) {
-                    console.error("Error in relabelAtoms:", e);
-                    alert("An error occurred while relabeling atoms.");
-                } finally {
-                    // Force update
-                    this.tryRender('res');
-                    
-                    // Deselect all atoms after relabeling
-                    this.deselectAll();
-                }
+                this.openRelabelDialog(editor);
             }
         });
 
@@ -2286,6 +2157,250 @@ class WMOLApp {
         }
     }
 
+    getRelabelKeywords() {
+        return ['TITL', 'CELL', 'ZERR', 'LATT', 'SYMM', 'SFAC', 'UNIT', 'HFIX', 'BOND', 'CONF', 'MPLA', 'HTAB', 'EQIV', 'CONN', 'PART', 'AFIX', 'RESI', 'MOLE', 'PLAN', 'SIZE', 'TEMP', 'WGHT', 'FVAR', 'HKLF', 'END', 'REM', 'Q', 'OMIT', 'DISP', 'ISOR', 'RIGI', 'SIMU', 'DELU', 'DANG', 'BUMP', 'TWIN', 'BASF'];
+    }
+
+    // Parse SFAC line(s) from the document into an ordered list of element symbols
+    getSfacElements(lines) {
+        const sfacElements = [];
+        lines.forEach(line => {
+            const parts = line.trim().split(/\s+/);
+            if (parts.length > 0 && parts[0].toUpperCase() === 'SFAC') {
+                for (let i = 1; i < parts.length; i++) {
+                    if (isNaN(parseFloat(parts[i]))) {
+                        sfacElements.push(parts[i].toUpperCase());
+                    }
+                }
+            }
+        });
+        return sfacElements;
+    }
+
+    // Return { label, element, num } for an atom line, or null if it's not an atom line
+    parseRelabelAtomLine(line, sfacElements) {
+        if (!line || line.trim().startsWith('=')) return null;
+        const parts = line.trim().split(/\s+/);
+        if (parts.length < 2) return null;
+        if (!/^[A-Za-z]+/.test(parts[0])) return null;
+        if (this.getRelabelKeywords().includes(parts[0].toUpperCase())) return null;
+
+        const label = parts[0];
+        let element = null;
+
+        const sfacIndex = parseInt(parts[1]);
+        if (!isNaN(sfacIndex) && sfacIndex > 0 && sfacIndex <= sfacElements.length) {
+            element = sfacElements[sfacIndex - 1];
+        } else {
+            const m = label.match(/^[A-Za-z]+/);
+            if (m) element = m[0].toUpperCase();
+        }
+        // Q-peaks are always 'Q' regardless of SFAC
+        if (/^Q/i.test(label)) element = 'Q';
+
+        if (!element) return null;
+
+        const numMatch = label.match(/\d+/);
+        const num = numMatch ? parseInt(numMatch[0], 10) : 0;
+
+        return { label, element, num };
+    }
+
+    // Largest number currently used for a given element across the whole document
+    getMaxNumberForElement(lines, sfacElements, element) {
+        let max = 0;
+        lines.forEach(line => {
+            const atom = this.parseRelabelAtomLine(line, sfacElements);
+            if (atom && atom.element === element && atom.num > max) {
+                max = atom.num;
+            }
+        });
+        return max;
+    }
+
+    openRelabelDialog(editor) {
+        const modalEl = document.getElementById('relabelModal');
+        if (!modalEl) return;
+        const modal = new bootstrap.Modal(modalEl);
+        const elInput = document.getElementById('relabel-element-input');
+        const sufInput = document.getElementById('relabel-suffix-input');
+        if (elInput) elInput.value = '';
+        if (sufInput) sufInput.value = '';
+
+        // Show the scope in the hint
+        const hint = document.getElementById('relabel-scope-hint');
+        if (hint) {
+            let scope = 'No atoms selected - all atoms will be relabeled.';
+            if (editor) {
+                const ranges = editor.selection.getAllRanges();
+                const hasSelection = ranges.length > 0 && !(ranges.length === 1 && ranges[0].isEmpty());
+                if (hasSelection) {
+                    const doc = editor.getSession().getDocument();
+                    const lines = doc.getAllLines();
+                    const sfacElements = this.getSfacElements(lines);
+                    const count = this.state.selectionOrder.filter(r => this.parseRelabelAtomLine(doc.getLine(r), sfacElements) !== null).length;
+                    scope = count > 0 ? `${count} selected atom(s) will be relabeled.` : 'No atoms selected - all atoms will be relabeled.';
+                }
+            }
+            hint.textContent = scope;
+        }
+
+        modal.show();
+        modalEl.addEventListener('shown.bs.modal', () => {
+            if (elInput) elInput.focus();
+        }, { once: true });
+    }
+
+    performRelabel() {
+        const editor = this.state.editors.res;
+        if (!editor) return;
+
+        const doc = editor.getSession().getDocument();
+        const lines = doc.getAllLines();
+        const sfacElements = this.getSfacElements(lines);
+
+        const elInput = document.getElementById('relabel-element-input');
+        const sufInput = document.getElementById('relabel-suffix-input');
+        const elementInput = elInput ? elInput.value.trim() : '';
+        const suffix = sufInput ? sufInput.value.trim() : '';
+
+        // Forced element (when the user types an element in the input field)
+        let forceElement = null;
+        if (elementInput) {
+            const m = elementInput.match(/^[A-Za-z]+/);
+            if (m) {
+                forceElement = m[0].toUpperCase();
+            } else {
+                alert("Invalid atom type. Enter an element symbol such as C, N or O.");
+                return;
+            }
+        }
+
+        // Determine which rows to relabel
+        const ranges = editor.selection.getAllRanges();
+        const hasSelection = ranges.length > 0 && !(ranges.length === 1 && ranges[0].isEmpty());
+        let rows = [];
+
+        if (!hasSelection) {
+            // All atoms, in document order
+            lines.forEach((line, i) => {
+                if (this.parseRelabelAtomLine(line, sfacElements)) rows.push(i);
+            });
+        } else {
+            // Sync selectionOrder with current Ace selection
+            const currentAceRows = new Set();
+            ranges.forEach(r => {
+                if (!r.isEmpty()) {
+                    for (let i = r.start.row; i <= r.end.row; i++) {
+                        currentAceRows.add(i);
+                    }
+                }
+            });
+            this.state.selectionOrder = this.state.selectionOrder.filter(r => currentAceRows.has(r));
+            currentAceRows.forEach(r => {
+                if (!this.state.selectionOrder.includes(r)) {
+                    this.state.selectionOrder.push(r);
+                }
+            });
+            this.state.selectionOrder.forEach(r => {
+                if (this.parseRelabelAtomLine(doc.getLine(r), sfacElements)) rows.push(r);
+            });
+        }
+
+        if (rows.length === 0) {
+            alert("No atoms found to relabel.");
+            return;
+        }
+
+        // Determine starting number per element
+        //  - Forced type: always continue after the largest number already in the file (no duplicates),
+        //    e.g. after C10 the next atom becomes C11, after C1A it becomes C2A.
+        //  - Keeping types: when all atoms are relabeled, renumber each type from 1 (C3XR -> C1);
+        //    when only a subset is selected, continue after the largest existing number for that type.
+        const counters = {};
+        rows.forEach(row => {
+            const atom = this.parseRelabelAtomLine(doc.getLine(row), sfacElements);
+            if (!atom) return;
+            const element = forceElement || atom.element;
+            if (!(element in counters)) {
+                if (forceElement || hasSelection) {
+                    counters[element] = this.getMaxNumberForElement(lines, sfacElements, element) + 1;
+                } else {
+                    counters[element] = 1;
+                }
+            }
+        });
+
+        // Ensure the forced element exists in the SFAC list
+        let forcedSfacIndex = -1;
+        if (forceElement) {
+            const existingIndex = sfacElements.findIndex(e => e.toUpperCase() === forceElement);
+            if (existingIndex !== -1) {
+                forcedSfacIndex = existingIndex + 1; // 1-based
+            } else {
+                // Append to SFAC
+                sfacElements.push(forceElement);
+                forcedSfacIndex = sfacElements.length;
+                const sfacLineIndex = lines.findIndex(line => line.trim().startsWith('SFAC'));
+                if (sfacLineIndex !== -1) {
+                    const newSfacLine = `SFAC ${sfacElements.join(' ')}`;
+                    doc.removeInLine(sfacLineIndex, 0, doc.getLine(sfacLineIndex).length);
+                    doc.insertInLine({row: sfacLineIndex, column: 0}, newSfacLine);
+                    lines[sfacLineIndex] = newSfacLine;
+                }
+            }
+        }
+
+        const applied = [];
+        rows.forEach(row => {
+            const line = doc.getLine(row);
+            const atom = this.parseRelabelAtomLine(line, sfacElements);
+            if (!atom) return;
+            const element = forceElement || atom.element;
+            const number = counters[element];
+            const newLabel = element + number + suffix;
+
+            const oldLabel = atom.label;
+            const match = line.match(/\S+/);
+            if (!match) return;
+            let newLine = line.substring(0, match.index) + newLabel + line.substring(match.index + oldLabel.length);
+
+            // Update SFAC index (2nd token) when forcing a type
+            if (forceElement && forcedSfacIndex !== -1) {
+                const escapedLabel = newLabel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                const sfacRegex = new RegExp(`(${escapedLabel}\\s+)(\\d+)`);
+                const sfacMatch = newLine.match(sfacRegex);
+                if (sfacMatch) {
+                    newLine = newLine.replace(sfacMatch[0], sfacMatch[1] + forcedSfacIndex);
+                }
+            }
+
+            doc.removeInLine(row, 0, line.length);
+            doc.insertInLine({row: row, column: 0}, newLine);
+            counters[element] = number + 1;
+            applied.push({ element, number, label: newLabel });
+        });
+
+        // Warn if SHELX's 999-atoms-per-type limit is exceeded
+        const overLimit = applied.filter(a => a.number > 999);
+        if (overLimit.length > 0) {
+            const types = [...new Set(overLimit.map(a => a.element))].join(', ');
+            alert(`Warning: atom numbering for ${types} exceeds SHELX's limit of 999 atoms per type. Continuing anyway.`);
+        }
+
+        this.tryRender('res');
+
+        // Deselect atoms after relabeling
+        this.deselectAll();
+
+        // Close the modal
+        const modalEl = document.getElementById('relabelModal');
+        if (modalEl) {
+            const modal = bootstrap.Modal.getInstance(modalEl);
+            if (modal) modal.hide();
+        }
+    }
+
     setupUIEvents() {
         // Handle Tab Switching
         const tabEls = document.querySelectorAll('button[data-bs-toggle="tab"]');
@@ -2302,6 +2417,22 @@ class WMOLApp {
                     this.enableSplitView();
                 } else {
                     this.disableSplitView();
+                }
+
+                // Track the most recently shown structure file tab so external
+                // programs (SHELXD, SHELXT, SHELXL, ...) run on the file the user
+                // is actually looking at, rather than a stale cached copy.
+                if (targetId.startsWith('tab-file-')) {
+                    for (const key of Object.keys(this.state.fileTabs)) {
+                        const btn = document.getElementById('tab-file-' + this.safeId(key));
+                        if (btn && btn.id === targetId) {
+                            const tab = this.state.fileTabs[key];
+                            if (['ins', 'res', 'cif'].includes(tab.type)) {
+                                this.state.lastStructureTabKey = key;
+                            }
+                            break;
+                        }
+                    }
                 }
 
                 if (targetId === 'tab-split') {
@@ -2637,6 +2768,31 @@ class WMOLApp {
                 if (e.key === 'Enter') {
                     e.preventDefault();
                     doSelect();
+                }
+            });
+        }
+
+        // Relabel Atoms Modal Logic
+        const btnPerformRelabel = document.getElementById('btn-perform-relabel');
+        const elInputRelabel = document.getElementById('relabel-element-input');
+        const sufInputRelabel = document.getElementById('relabel-suffix-input');
+        
+        if (btnPerformRelabel) {
+            const doRelabel = () => {
+                this.performRelabel();
+            };
+
+            btnPerformRelabel.addEventListener('click', doRelabel);
+
+            // Handle Enter key
+            [elInputRelabel, sufInputRelabel].forEach(input => {
+                if (input) {
+                    input.addEventListener('keypress', (e) => {
+                        if (e.key === 'Enter') {
+                            e.preventDefault();
+                            doRelabel();
+                        }
+                    });
                 }
             });
         }
@@ -3617,6 +3773,9 @@ class WMOLApp {
                 this.state.loadedContent = content;
                 this.state.loadedFilename = file.name;
                 this.state.fileId++;
+                // A freshly loaded structure is authoritative; stop preferring a
+                // previously shown file tab for "run program on current file".
+                this.state.lastStructureTabKey = null;
 
                 const ext = file.name.split('.').pop().toLowerCase();
                 this.state.loadedType = (ext === 'ins' || ext === 'res') ? 'res' : ext;
@@ -4753,6 +4912,22 @@ class WMOLApp {
         });
     }
 
+    // Return the structure content (.ins/.res/.cif) the user is currently
+    // working on: the most recently shown structure file tab first (this is
+    // where edits go), otherwise the main RES editor. Returns null if none.
+    getStructureContent() {
+        if (this.state.lastStructureTabKey && this.state.fileTabs[this.state.lastStructureTabKey]) {
+            const tab = this.state.fileTabs[this.state.lastStructureTabKey];
+            const v = tab.editor.getValue();
+            if (v && v.trim()) return v;
+        }
+        if (this.state.editors.res) {
+            const v = this.state.editors.res.getValue();
+            if (v && v.trim()) return v;
+        }
+        return null;
+    }
+
     // Run an external crystallography program (shelxl, shelxt, ...) on the
     // currently loaded files and show the results in the results modal.
     async runExternalProgram(program) {
@@ -4768,18 +4943,44 @@ class WMOLApp {
         const needsRes = inputs.includes('.res') || inputs.includes('.ins') || inputs.includes('.cif');
         if (needsRes) {
             const ext = inputs.includes('.cif') ? '.cif' : inputs.includes('.ins') ? '.ins' : '.res';
-            // Prefer the xrdspace-generated .ins (correct cell + space group,
-            // matching basename) for structure-solution programs.
-            let content = null;
-            if (ext === '.ins' && this.state.xrdspaceIns) {
+            // Run on the structure file the user is currently working on (the
+            // active structure file tab, or the main RES editor). Fall back to
+            // the xrdspace-generated .ins only when no editor content is present.
+            let content = this.getStructureContent();
+            if (!content && this.state.xrdspaceIns) {
                 content = this.state.xrdspaceIns.content;
-            } else if (this.state.editors.res) {
-                content = this.state.editors.res.getValue();
             }
             if (!content) {
                 alert('No structure loaded to run.');
                 return;
             }
+
+            // SHELXD aborts with "AT LEAST ONE OF PATS, GROP, FIND OR PLOP MUST
+            // BE SPECIFIED" unless the .ins contains one of those instructions.
+            // Ask for the number of atoms to search for and insert FIND so the
+            // run does not fail with a cryptic error. (FIND is also accepted by
+            // SHELXT/SHELXS, but they run fine without it via TREF.)
+            if (program.id === 'shelxd') {
+                const hasSearchDirective = /^\s*(FIND|PATS|GROP|PLOP)\b/m.test(content);
+                if (!hasSearchDirective) {
+                    const n = prompt(
+                        'SHELXD needs a FIND instruction (number of atoms to search for).\n' +
+                        'Enter the number of heavy atoms expected in the asymmetric unit:',
+                        '4'
+                    );
+                    if (n === null) return; // cancelled
+                    const findCount = parseInt(n, 10);
+                    if (!Number.isFinite(findCount) || findCount < 1) {
+                        alert('Invalid FIND count - SHELXD was not run.');
+                        return;
+                    }
+                    content = content.replace(/^HKLF.*$/m, `FIND ${findCount}\nHKLF 4`);
+                    if (!/^\s*FIND\s+\d+\b/m.test(content)) {
+                        content = content.replace(/\s*$/, '') + `\nFIND ${findCount}\nEND\n`;
+                    }
+                }
+            }
+
             formData.append(ext.slice(1), new Blob([content], { type: 'text/plain' }), baseName + ext);
         }
         if (inputs.includes('.hkl')) {
@@ -4804,6 +5005,22 @@ class WMOLApp {
         this.showProgressDialog(`Running ${program.label}...`,
             `This may take a while for large structures.`);
 
+        // Absolute safety net: if the request is stuck at the network layer and
+        // the abort signal is not honoured, force the UI back to normal so the
+        // progress spinner can never stay on screen indefinitely.
+        const timeout = this.state.preferences.general.refineTimeout || 180000;
+        let settled = false;
+        const safetyTimer = setTimeout(() => {
+            if (settled) return;
+            console.warn(`${program.label} run timed out - forcibly resetting progress UI.`);
+            controller.abort();
+            this.hideProgressDialog();
+            if (btn) {
+                btn.innerHTML = originalIcon || '<i class="fa-solid fa-flask"></i>';
+                btn.disabled = false;
+            }
+        }, timeout + 5000);
+
         try {
             const response = await fetch(this.getApiUrl(`/run/${program.id}`), {
                 method: 'POST',
@@ -4818,6 +5035,9 @@ class WMOLApp {
                 const txt = await response.text();
                 throw new Error('Server returned an invalid response: ' + txt.slice(0, 200));
             }
+            this.clearAbortSignalTimeout();
+            settled = true;
+            clearTimeout(safetyTimer);
             if (data.error) throw new Error(data.error);
 
             // Load the primary output back into the editor when the program produces it.
@@ -4825,9 +5045,16 @@ class WMOLApp {
             if (primary && data.files) {
                 const key = Object.keys(data.files).find(k => k.toLowerCase().endsWith(primary));
                 if (key && this.state.editors.res) {
-                    this.state.editors.res.setValue(data.files[key], -1);
-                    this.state.loadedContent = data.files[key];
-                    this.renderContent(data.files[key], 'res');
+                    const content = data.files[key] || '';
+                    // Never wipe the editor with an empty output (e.g. SHELXL
+                    // aborting on a bad instruction leaves an empty .res).
+                    if (content.trim().length > 0) {
+                        this.state.editors.res.setValue(content, -1);
+                        this.state.loadedContent = content;
+                        this.renderContent(content, 'res');
+                    } else {
+                        console.warn(`Program produced an empty ${primary} - keeping current editor content.`);
+                    }
                 }
             }
 
@@ -4858,18 +5085,29 @@ class WMOLApp {
                     resultsSummary.innerHTML = program.id === 'shelxl' && data.files
                         ? this.buildRefinementSummary(Object.values(data.files).join('\n'))
                         : '';
+                    // Show a clear failure banner when SHELXL aborted.
+                    if (program.id === 'shelxl' && (data.success === false || data.message)) {
+                        const msg = data.message || 'SHELXL reported an error and did not complete the refinement.';
+                        resultsSummary.innerHTML = `<div class="alert alert-danger py-2 small mb-2">
+                            <i class="fa-solid fa-triangle-exclamation me-1"></i>
+                            <strong>Refinement failed:</strong> ${msg}
+                        </div>` + resultsSummary.innerHTML;
+                    }
                 }
                 new bootstrap.Modal(modalEl).show();
             }
         } catch (e) {
             if (e && e.name === 'AbortError') {
                 console.log(`${program.label} run cancelled by user`);
-                alert(`${program.label} run cancelled.`);
+                alert(`${program.label} run cancelled or timed out.`);
             } else {
                 console.error(`Failed to run ${program.label}:`, e);
                 alert(`Failed to run ${program.label}: ${e.message}`);
             }
         } finally {
+            settled = true;
+            clearTimeout(safetyTimer);
+            this.clearAbortSignalTimeout();
             if (btn) {
                 btn.innerHTML = originalIcon || '<i class="fa-solid fa-flask"></i>';
                 btn.disabled = false;
@@ -4905,6 +5143,14 @@ class WMOLApp {
     applyFormulaToIns(insText, input) {
         const { elements, counts } = this.parseFormula(input || '');
         if (!elements.length) return insText;
+        // SHELXD/SHELXS abort with "** WRONG NUMBER OF PARAMETERS **" if there
+        // are more than 13 SFAC types, so cap the generated list at that.
+        const MAX_SFAC = 13;
+        if (elements.length > MAX_SFAC) {
+            console.warn(`applyFormulaToIns: formula has ${elements.length} elements; SHELXD/SHELXS accept at most ${MAX_SFAC} - truncating SFAC list.`);
+            elements.length = MAX_SFAC;
+            counts.length = MAX_SFAC;
+        }
         const unitCounts = elements.map((c, i) => counts[i] > 0 ? counts[i] : 20);
         const sfacLine = 'SFAC ' + elements.join(' ');
         const unitLine = 'UNIT ' + unitCounts.join(' ');
@@ -4949,6 +5195,9 @@ class WMOLApp {
             }
             const insName = base + '_merged.ins';
             this.state.xrdspaceIns = { filename: insName, content: insText };
+            // The merged .ins becomes the active structure; ignore any previously
+            // shown file tab when picking the file for external programs.
+            this.state.lastStructureTabKey = null;
             if (this.state.editors.res) {
                 this.state.editors.res.setValue(insText, -1);
                 this.state.loadedContent = insText;
@@ -4965,6 +5214,12 @@ class WMOLApp {
 
     // Show the progress dialog for long-running jobs (external programs,
     // refinement). The elapsed-time counter updates every second.
+    //
+    // The dialog is shown and hidden manually rather than through Bootstrap's
+    // modal API: Bootstrap animates the show/hide asynchronously, and a job that
+    // finishes faster than the show animation (e.g. SHELXL aborting immediately
+    // on a bad instruction) left a pending re-show callback that re-opened the
+    // dialog forever. Manual show/hide has no such race.
     showProgressDialog(title, subtitle) {
         const el = document.getElementById('progressModal');
         if (!el) return null;
@@ -4979,30 +5234,97 @@ class WMOLApp {
             const s = Math.floor((Date.now() - this._progressStart) / 1000);
             timeEl.textContent = `Elapsed: ${s} s`;
         }, 1000);
-        const modal = new bootstrap.Modal(el);
-        modal.show();
-        return modal;
+
+        // Drop any stale Bootstrap modal instance so its pending show/hide
+        // callbacks cannot re-show this dialog later.
+        try {
+            const existing = bootstrap.Modal.getInstance(el);
+            if (existing) existing.dispose();
+        } catch (e) { /* ignore */ }
+
+        el.classList.add('show');
+        el.style.display = 'block';
+        el.removeAttribute('aria-hidden');
+        el.setAttribute('aria-modal', 'true');
+        el.setAttribute('role', 'dialog');
+        document.body.classList.add('modal-open');
+        if (!this._progressBackdrop || !document.body.contains(this._progressBackdrop)) {
+            const bd = document.createElement('div');
+            bd.className = 'modal-backdrop fade show';
+            bd.id = 'progress-modal-backdrop';
+            document.body.appendChild(bd);
+            this._progressBackdrop = bd;
+        }
+
+        // Absolute hard deadline: no matter what drives this dialog, force it
+        // closed after the configured timeout so it can never stay stuck.
+        const timeout = this.state.preferences.general.refineTimeout || 180000;
+        if (this._progressDeadline) clearTimeout(this._progressDeadline);
+        this._progressDeadline = setTimeout(() => {
+            this.hideProgressDialog();
+        }, timeout + 5000);
+
+        return null;
     }
 
     hideProgressDialog() {
+        if (this._progressDeadline) {
+            clearTimeout(this._progressDeadline);
+            this._progressDeadline = null;
+        }
         if (this._progressInterval) {
             clearInterval(this._progressInterval);
             this._progressInterval = null;
         }
-        const el = document.getElementById('progressModal');
-        if (el) {
-            const modal = bootstrap.Modal.getInstance(el);
-            if (modal) modal.hide();
-        }
+
+        const gen = this._progressGen = (this._progressGen || 0) + 1;
+        const forceHide = () => {
+            // A newer dialog may have been shown since - do not hide it.
+            if (this._progressGen !== gen) return;
+            const el = document.getElementById('progressModal');
+            if (el) {
+                el.classList.remove('show');
+                el.removeAttribute('aria-hidden');
+                el.style.display = 'none';
+            }
+            if (this._progressBackdrop && document.body.contains(this._progressBackdrop)) {
+                this._progressBackdrop.remove();
+                this._progressBackdrop = null;
+            }
+            // Only release the body scroll lock if no other Bootstrap modal is open.
+            const otherModalOpen = document.querySelector('.modal.show:not(#progressModal)') !== null;
+            if (!otherModalOpen) {
+                document.body.classList.remove('modal-open');
+                document.querySelectorAll('.modal-backdrop').forEach(b => b.remove());
+            }
+        };
+
+        forceHide();
+        // A stale Bootstrap transition callback could re-show the dialog shortly
+        // afterwards; hide again once transitions settle (guarded by generation).
+        setTimeout(forceHide, 400);
+        setTimeout(forceHide, 1200);
     }
 
     // Combined abort signal: user cancel (controller) + server timeout.
+    // Falls back to a manual timeout when AbortSignal.any is unavailable so the
+    // UI can never wait forever for a hung refinement.
     makeAbortSignal(controller) {
-        const timeout = this.state.preferences.general.refineTimeout || 300000;
+        const timeout = this.state.preferences.general.refineTimeout || 180000;
         if (typeof AbortSignal.any === 'function') {
             return AbortSignal.any([AbortSignal.timeout(timeout), controller.signal]);
         }
+        if (this._refineAbortTimeout) clearTimeout(this._refineAbortTimeout);
+        this._refineAbortTimeout = setTimeout(() => controller.abort(), timeout);
         return controller.signal;
+    }
+
+    // Clear the manual abort timeout created by makeAbortSignal().
+    clearAbortSignalTimeout() {
+        if (this._refineAbortTimeout) {
+            clearTimeout(this._refineAbortTimeout);
+            this._refineAbortTimeout = null;
+        }
     }
 
     // Hide xrdspace-only controls (merged-HKL buttons, solution selector) so a
@@ -5292,9 +5614,9 @@ class WMOLApp {
     }
 
     async refineStructure() {
-        if (!this.state.editors.res) return;
+        if (!this.state.editors.res && !this.state.lastStructureTabKey) return;
 
-        const resContent = this.state.editors.res.getValue();
+        const resContent = this.getStructureContent();
         if (!resContent) {
             alert("No structure loaded to refine.");
             return;
@@ -5327,9 +5649,9 @@ class WMOLApp {
     // Weight (GOOF) refinement: prompts for the number of SHELXL cycles (default 3)
     // and runs that many refinement cycles to drive the goodness-of-fit toward 1.
     async refineWeight() {
-        if (!this.state.editors.res) return;
+        if (!this.state.editors.res && !this.state.lastStructureTabKey) return;
 
-        const resContent = this.state.editors.res.getValue();
+        const resContent = this.getStructureContent();
         if (!resContent) {
             alert("No structure loaded to refine.");
             return;
@@ -5382,6 +5704,22 @@ class WMOLApp {
         if (cancelBtn) cancelBtn.onclick = () => controller.abort();
         this.showProgressDialog(title, 'SHELXL least-squares refinement in progress.');
 
+        // Absolute safety net: if the request is stuck at the network layer and
+        // the abort signal is not honoured, force the UI back to normal so the
+        // progress spinner can never stay on screen indefinitely.
+        const timeout = this.state.preferences.general.refineTimeout || 180000;
+        let settled = false;
+        const safetyTimer = setTimeout(() => {
+            if (settled) return;
+            console.warn('Refinement timed out - forcibly resetting progress UI.');
+            controller.abort();
+            this.hideProgressDialog();
+            if (btn) {
+                btn.innerHTML = originalIcon || '<i class="fa-solid fa-flask"></i>';
+                btn.disabled = false;
+            }
+        }, timeout + 5000);
+
         try {
             const response = await fetch(this.state.preferences.general.serverUrl, {
                 method: 'POST',
@@ -5395,6 +5733,9 @@ class WMOLApp {
 
             const data = await response.json();
             console.log("Server Response Data:", data);
+            this.clearAbortSignalTimeout();
+            settled = true;
+            clearTimeout(safetyTimer);
 
             if (data.error) {
                 throw new Error(data.error);
@@ -5435,7 +5776,19 @@ class WMOLApp {
                         this.resetResultsControls();
                         resultsContent.textContent = combinedOutput;
                         if (resultsSummary) {
-                            resultsSummary.innerHTML = this.buildRefinementSummary(data.files.lst || '');
+                            // If SHELXL aborted (no .res produced / explicit failure),
+                            // show a clear error banner instead of a silent "stuck" UI.
+                            const failed = data.success === false
+                                || (data.files.res !== undefined && data.files.res.trim().length === 0);
+                            let summaryHtml = this.buildRefinementSummary(data.files.lst || '');
+                            if (failed) {
+                                const msg = data.message || 'SHELXL reported an error and did not complete the refinement.';
+                                summaryHtml = `<div class="alert alert-danger py-2 small mb-2">
+                                    <i class="fa-solid fa-triangle-exclamation me-1"></i>
+                                    <strong>Refinement failed:</strong> ${msg}
+                                </div>` + summaryHtml;
+                            }
+                            resultsSummary.innerHTML = summaryHtml;
                         }
                         const resultsModal = new bootstrap.Modal(modalEl);
                         resultsModal.show();
@@ -5446,17 +5799,24 @@ class WMOLApp {
                 } else {
                     console.error("Results modal elements not found in DOM");
                 }
+            } else if (data.files && !data.files.lst) {
+                // No LST produced at all - surface the failure clearly.
+                console.error("No SHELXL output produced.", data);
+                alert(data.message || 'SHELXL produced no output. The refinement was aborted.');
             }
 
         } catch (e) {
             if (e && e.name === 'AbortError') {
                 console.log("Refinement cancelled by user");
-                alert("Refinement cancelled.");
+                alert("Refinement cancelled or timed out.");
             } else {
                 console.error("Refinement failed:", e);
                 alert("Refinement failed: " + e.message);
             }
         } finally {
+            settled = true;
+            clearTimeout(safetyTimer);
+            this.clearAbortSignalTimeout();
             if (btn) {
                 btn.innerHTML = originalIcon || '<i class="fa-solid fa-flask"></i>';
                 btn.disabled = false;

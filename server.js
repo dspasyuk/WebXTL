@@ -45,7 +45,11 @@ app.use(express.static(path.join(__dirname, 'dist')));
 // ---------------------------------------------------------------------------
 
 // Hard timeout for any spawned crystallography program.
-const RUN_TIMEOUT_MS = 300000;
+const RUN_TIMEOUT_MS = 180000;
+
+// If a spawned process produces no output at all for this long it is presumed
+// stuck (e.g. SHELXL blocked on an interactive error prompt) and is killed.
+const NO_OUTPUT_KILL_MS = 120000;
 
 // Registry of programs the server can run. `exe` is looked up in PATH; a
 // program is only offered to the client when it is actually available.
@@ -138,27 +142,68 @@ console.log(`Available crystallography programs: ${availablePrograms.length ? av
 // AbortSignal; when aborted (e.g. the client cancelled) the child is killed.
 function runProgram(program, args, cwd, stdin, signal) {
     return new Promise((resolve) => {
-        const child = spawn(program.exe, args, { cwd, stdio: stdin ? ['pipe', 'pipe', 'pipe'] : ['ignore', 'pipe', 'pipe'] });
+        // Always connect stdin so interactive prompts (e.g. SHELXL asking the
+        // user whether to continue after an error) can be answered instead of
+        // the process spinning forever on an EOF. `detached` puts the child in
+        // its own process group so we can kill any descendants it spawns.
+        const child = spawn(program.exe, args, { cwd, stdio: ['pipe', 'pipe', 'pipe'], detached: true });
         let stdout = '';
         let stderr = '';
         let aborted = false;
-        const timer = setTimeout(() => { child.kill('SIGKILL'); }, RUN_TIMEOUT_MS);
-        const onAbort = () => { aborted = true; child.kill('SIGKILL'); };
+        let done = false;
+        let lastOutput = Date.now();
+        let watchdog = null;
+        let stdinFeeder = null;
+
+        // Kill the whole process group so grandchildren cannot keep the stdio
+        // pipes open and prevent the 'close' event (which resolves the promise).
+        const killChild = () => {
+            try { process.kill(-child.pid, 'SIGKILL'); } catch (e) { /* already dead */ }
+            try { child.kill('SIGKILL'); } catch (e) { /* already dead */ }
+        };
+
+        const cleanup = () => {
+            clearTimeout(timer);
+            if (watchdog) clearInterval(watchdog);
+            if (stdinFeeder) clearInterval(stdinFeeder);
+            if (signal) signal.removeEventListener('abort', onAbort);
+        };
+
+        const timer = setTimeout(() => killChild(), RUN_TIMEOUT_MS);
+        const onAbort = () => { aborted = true; killChild(); };
         if (signal) {
             if (signal.aborted) onAbort();
             else signal.addEventListener('abort', onAbort, { once: true });
         }
-        const cleanup = () => {
-            clearTimeout(timer);
-            if (signal) signal.removeEventListener('abort', onAbort);
-        };
-        child.stdout.on('data', (d) => { stdout += d.toString(); });
-        child.stderr.on('data', (d) => { stderr += d.toString(); });
-        child.on('close', (code) => { cleanup(); resolve({ code, aborted, stdout, stderr }); });
-        child.on('error', (err) => { cleanup(); resolve({ code: -1, aborted, stdout, stderr: stderr + '\n' + err.message }); });
+
+        // Watchdog: if the process is still running but has been silent for
+        // NO_OUTPUT_KILL_MS, it is stuck - kill it so the server never hangs.
+        watchdog = setInterval(() => {
+            if (done) return;
+            if (Date.now() - lastOutput > NO_OUTPUT_KILL_MS) {
+                console.warn(`[${program.exe}] no output for ${NO_OUTPUT_KILL_MS}ms - killing`);
+                killChild();
+            }
+        }, 2000);
+
+        child.stdout.on('data', (d) => { stdout += d.toString(); lastOutput = Date.now(); });
+        child.stderr.on('data', (d) => { stderr += d.toString(); lastOutput = Date.now(); });
+        child.on('close', (code) => { done = true; cleanup(); resolve({ code, aborted, stdout, stderr }); });
+        child.on('error', (err) => { done = true; cleanup(); resolve({ code: -1, aborted, stdout, stderr: stderr + '\n' + err.message }); });
+
         if (stdin) {
             child.stdin.write(stdin);
             child.stdin.end();
+        } else {
+            // No scripted stdin: keep the pipe open and answer any interactive
+            // prompt with <Enter> once the process goes silent. Without a writer
+            // the pipe reads as EOF and some programs loop on that condition.
+            stdinFeeder = setInterval(() => {
+                if (done || child.stdin.destroyed) return;
+                if (Date.now() - lastOutput > 1500) {
+                    try { child.stdin.write('\n'); } catch (e) { /* stdin closed */ }
+                }
+            }, 1000);
         }
     });
 }
@@ -190,6 +235,34 @@ function updateWghtInstruction(filePath, a, b) {
     }
     if (done) fs.writeFileSync(filePath, lines.join('\n'), 'utf8');
     return done;
+}
+
+// Detect a fatal SHELXL error in its combined stdout/.lst output. Returns a
+// short human-readable message, or null when none of the known fatal markers
+// are present. Warnings (e.g. "Cell contents from UNIT instruction ... do not
+// agree") are deliberately NOT matched because SHELXL continues refining.
+function detectShelxlError(stdout, lstText) {
+    const text = (stdout || '') + '\n' + (lstText || '');
+    const markers = [
+        /BAD ATOM OR UNKNOWN INSTRUCTION/i,
+        /UNKNOWN INSTRUCTION/i,
+        /TOO MANY ATOMS/i,
+        /TOO MANY PARAMETERS/i,
+        /MATRIX SINGULAR/i,
+        /SINGULAR MATRIX/i,
+        /NO REFLECTIONS/i,
+        /TOO FEW REFLECTIONS/i,
+        /INSUFFICIENT MEMORY/i,
+        /OUT OF MEMORY/i,
+        /CANNOT FIND\s+SFAC/i,
+        /INVALID\s+SFAC/i,
+        /CELL.*DO NOT AGREE/i,
+    ];
+    for (const re of markers) {
+        const m = text.match(re);
+        if (m) return m[0].trim();
+    }
+    return null;
 }
 
 /**
@@ -324,6 +397,19 @@ app.post('/refine', upload.fields([{ name: 'ins', maxCount: 1 }, { name: 'hkl', 
             result.files.lst = fs.readFileSync(lstPath, 'utf8');
         }
 
+        // SHELXL reports success with exit code 0 even when it aborts on a bad
+        // instruction (e.g. "** BAD ATOM OR UNKNOWN INSTRUCTION **"), leaving an
+        // empty .res. Treat a run with no usable .res as a failure and surface
+        // the SHELXL error message so the UI does not look like it is stuck.
+        const resContent = result.files.res || '';
+        if (lastCode !== 0 || resContent.trim().length === 0) {
+            result.success = false;
+            result.message = detectShelxlError(combinedStdout, result.files.lst || '')
+                || (resContent.trim().length === 0
+                    ? 'SHELXL did not produce a .res file (the refinement was aborted).'
+                    : 'SHELXL exited with a non-zero status.');
+        }
+
         // NO CLEANUP - Keep files for persistence
 
         res.json(result);
@@ -431,6 +517,21 @@ app.post('/run/:program', upload.any(), async (req, res) => {
         }
 
         console.log(`[${jobId}] ${program.label} finished with code ${r.code}`);
+        if (programId === 'shelxl') {
+            const lstText = result.files[`${basename}.lst`]
+                || result.files[`${basename}_a.lst`]
+                || result.files.lst || '';
+            const resText = result.files[`${basename}.res`]
+                || result.files[`${basename}_a.res`]
+                || result.files.res || '';
+            if (r.code !== 0 || resText.trim().length === 0) {
+                result.success = false;
+                result.message = detectShelxlError(r.stdout, lstText)
+                    || (resText.trim().length === 0
+                        ? 'SHELXL did not produce a .res file (the refinement was aborted).'
+                        : `SHELXL exited with a non-zero status (${r.code}).`);
+            }
+        }
         res.json(result);
     } catch (error) {
         console.error(`[${jobId}] ${programId} error:`, error);

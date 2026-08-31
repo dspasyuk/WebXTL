@@ -6,10 +6,22 @@
 //   3. reflection parity -> lattice centering (Bravais lattice)
 //   4. systematic absences -> rank the candidate space groups
 
-import { canonicalRep, isInvariant, phase, parseOperation, directToReciprocal, opsToReciprocalMatrices } from './op-math.js';
+import { canonicalRep, isInvariant, phase, parseOperation, directToReciprocal, opsToReciprocalMatrices, det3 } from './op-math.js';
 import { LAUE_BY_SYSTEM, LAUE_CRYSTAL_SYSTEM } from './laue.js';
 
 // --- crystal system from unit cell ---
+
+// Unit-cell volume (A^3).
+export function cellVolume(cell) {
+    const rad = (x) => x * Math.PI / 180;
+    const { a, b, c, alpha, beta, gamma } = cell;
+    const ca = Math.cos(rad(alpha)), cb = Math.cos(rad(beta)), cg = Math.cos(rad(gamma));
+    return a * b * c * Math.sqrt(Math.max(0, 1 - ca * ca - cb * cb - cg * cg + 2 * ca * cb * cg));
+}
+
+// Cells larger than this (about 40 x 40 x 40 A) are treated as macromolecular:
+// the space-group candidates are restricted to the chiral (Sohncke) groups.
+export const MACROMOLECULE_CELL_VOLUME = 64000;
 
 export function crystalSystemFromCell(cell, tolLen = 0.005, tolAng = 1.0) {
     const { a, b, c, alpha, beta, gamma } = cell;
@@ -423,6 +435,18 @@ export function estimateCentricity(reflections) {
     };
 }
 
+// A space group is chiral (Sohncke) when it contains no operation with a
+// negative determinant — no inversion, mirrors, glides or roto-inversions.
+// Macromolecular crystals are almost always in one of the 65 Sohncke groups.
+export function isSohncke(sg) {
+    for (const op of sg.s) {
+        const parsed = parseOperation(op);
+        if (!parsed) continue;
+        if (Math.abs(det3(parsed.R) + 1) < 1e-9) return false;
+    }
+    return true;
+}
+
 // Does a space group contain the inversion operator? Any op with R = -I
 // (regardless of its translation — the inversion may sit at a non-origin point).
 export function isCentrosymmetric(sg) {
@@ -471,6 +495,17 @@ export function analyzeSpaceGroup(sgData, reflections, cell, options = {}) {
     if (!candidates.length) {
         // Relax: just crystal system + centering.
         candidates = enumerateCandidates(sgData, laueGroups, crystalSystem, centering);
+    }
+
+    // Chiral (Sohncke) restriction: macromolecular crystals (large unit cells)
+    // are almost always in one of the 65 Sohncke space groups. Restrict the
+    // candidates to chiral groups, but keep the full list as a fallback in
+    // case no Sohncke group is consistent with the systematic absences.
+    const chiral = options.chiral === true ||
+        (options.chiral !== false && cellVolume(cell) > MACROMOLECULE_CELL_VOLUME);
+    if (chiral) {
+        const chiralOnly = candidates.filter(c => isSohncke(c));
+        if (chiralOnly.length) candidates = chiralOnly;
     }
 
     // Score candidates by systematic absences. Prefer fewest violations, then
@@ -531,6 +566,7 @@ export function analyzeSpaceGroup(sgData, reflections, cell, options = {}) {
         centering,
         centricity,
         centeringResults,
+        chiral,
         candidates: candidatesOut,
         best: best ? { id: best.id, hm: best.hm, hs: best.hs } : null,
     };

@@ -773,6 +773,98 @@ class WMOLApp {
         setTimeout(() => URL.revokeObjectURL(url), 1000);
     }
 
+    // Unload everything from the UI: clear editors, file tabs, the 3D scene,
+    // HKL/FCF/map state and the persisted session. Nothing on the server is
+    // touched.
+    clearAllData() {
+        if (!confirm("Clear all loaded data from the UI?\n\nFiles on the server are not deleted.")) return;
+
+        // Clear the structure/CIF/LST editors.
+        ['res', 'cif', 'lst'].forEach(type => {
+            const ed = this.state.editors[type];
+            if (ed) ed.setValue('', -1);
+        });
+
+        // Close and destroy every file tab.
+        const tabKeys = Object.keys(this.state.fileTabs);
+        for (const key of tabKeys) {
+            const tab = this.state.fileTabs[key];
+            const safeKey = this.safeId(key);
+            const btn = document.getElementById('tab-file-' + safeKey);
+            const pane = document.getElementById('pane-file-' + safeKey);
+            if (btn) btn.closest('li')?.remove();
+            if (pane) pane.remove();
+            if (tab && tab.editor) tab.editor.destroy();
+        }
+        this.state.fileTabs = {};
+
+        // Clear the 3D scene (molecule + any density map mesh).
+        if (this.state.moleculeRenderer) {
+            this.state.moleculeRenderer.clear();
+            this.state.moleculeRenderer.clearHighlights();
+            this.state.moleculeRenderer.expandedAtoms = [];
+            this.state.moleculeRenderer.boundingRadius = undefined;
+            this.state.moleculeRenderer.atomMeshes = {};
+            this.state.moleculeRenderer.materials = {};
+            this.state.moleculeRenderer.labelCache = {};
+        }
+        if (this.state.densityRenderer && this.state.densityRenderer.mesh) {
+            if (this.state.densityRenderer.parent) {
+                this.state.densityRenderer.parent.remove(this.state.densityRenderer.mesh);
+            }
+            if (this.state.densityRenderer.mesh.geometry) {
+                this.state.densityRenderer.mesh.geometry.dispose();
+            }
+            this.state.densityRenderer.mesh = null;
+        }
+        if (this.state.moleculeRenderer && this.state.moleculeRenderer.group) {
+            while (this.state.moleculeRenderer.group.children.length > 0) {
+                this.state.moleculeRenderer.group.remove(this.state.moleculeRenderer.group.children[0]);
+            }
+        }
+        this.resetView();
+        this.deselectAll();
+
+        // Reset loaded-data state.
+        this.state.loadedContent = null;
+        this.state.loadedFilename = null;
+        this.state.loadedType = 'res';
+        this.state.currentProject = null;
+        this.state.hklContent = null;
+        this.state.hklName = null;
+        this.state.fcfRawContent = null;
+        this.state.cachedMapData = null;
+        this.state.currentMapData = null;
+        this.state.currentMapBounds = null;
+        this.state.currentMapCenter = null;
+        this.state.currentMapRadius = null;
+        this.state.xrdspaceIns = null;
+        this.state.lastStructureTabKey = null;
+        this.state.selectionOrder = [];
+        this.state.parsedData = null;
+        this.state.rsr = { active: false, from: null, to: null };
+        this.state.fragment = { active: false, selectedId: null, placedAtoms: null };
+
+        // Reset the HKL status badge and status bar.
+        const statusHkl = document.getElementById('status-hkl');
+        if (statusHkl) {
+            statusHkl.classList.remove('bg-success');
+            statusHkl.classList.add('bg-secondary');
+            statusHkl.title = "HKL File Status";
+        }
+        const statusBar = document.getElementById('status-bar-content');
+        if (statusBar) statusBar.textContent = 'Ready';
+
+        // Forget the persisted session so a refresh does not restore anything.
+        try {
+            ['webxtl_res_content', 'webxtl_loaded_type', 'webxtl_loaded_filename',
+             'webxtl_current_project', 'webxtl_file_tabs', 'webxtl_hkl_content',
+             'webxtl_hkl_name', 'webxtl_fcf_content'].forEach(k => localStorage.removeItem(k));
+        } catch (e) { /* ignore */ }
+
+        console.log("Cleared all data from the UI.");
+    }
+
     async openProjectManager() {
          const modalEl = document.getElementById('projectManagerModal');
          const modal = new bootstrap.Modal(modalEl);
@@ -2599,6 +2691,14 @@ class WMOLApp {
             menuSaveServer.addEventListener('click', (e) => {
                 e.preventDefault();
                 this.saveCurrentProjectToServer();
+            });
+        }
+
+        const menuClearData = document.getElementById('menu-clear-data');
+        if (menuClearData) {
+            menuClearData.addEventListener('click', (e) => {
+                e.preventDefault();
+                this.clearAllData();
             });
         }
 

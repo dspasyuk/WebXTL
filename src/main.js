@@ -838,6 +838,7 @@ class WMOLApp {
         this.state.currentMapBounds = null;
         this.state.currentMapCenter = null;
         this.state.currentMapRadius = null;
+        this.state.mapFocusFrac = null;
         this.state.xrdspaceIns = null;
         this.state.lastStructureTabKey = null;
         this.state.selectionOrder = [];
@@ -3146,6 +3147,7 @@ class WMOLApp {
             
             this.state.parsedData = data; // Store for calculations (e.g. bond length)
             this.state.cachedMapData = null; // Invalidate map cache as atoms changed
+            this.state.mapFocusFrac = null; // Structure changed: reset recentered map focus
             
             if (data && this.state.moleculeRenderer) {
                 const renderSettings = {
@@ -3468,6 +3470,20 @@ class WMOLApp {
                         this.state.camera.position.add(delta);
                         this.state.controls.target.copy(newTarget);
                         this.state.controls.update();
+
+                        let atomData = null;
+                        if (target.object.isInstancedMesh && target.object.userData.atomMap) {
+                            atomData = target.object.userData.atomMap[target.instanceId];
+                        }
+                        if (!atomData) {
+                            const atomHit = intersects.find(i => i.object.isInstancedMesh && i.object.userData.atomMap);
+                            if (atomHit) {
+                                atomData = atomHit.object.userData.atomMap[atomHit.instanceId];
+                            }
+                        }
+                        if (atomData) {
+                            this.recenterMapToAtom(atomData);
+                        }
                     }
                 }
             } else if (this.state.rsr.active && this.state.fragment.active && this.state.fragment.selectedId && !this.state.preview.active) {
@@ -3939,6 +3955,7 @@ class WMOLApp {
 
     renderMap(content) {
         this.state.fcfRawContent = content;
+        this.state.mapFocusFrac = null;
         this.saveStateToLocalStorage();
         try {
             const fcfData = this.state.parsers.fcf.parse(content);
@@ -4194,19 +4211,28 @@ class WMOLApp {
                  
                  const cartToFracMatrix = new THREE.Matrix4().copy(fracToCartMatrix).invert();
                  
-                 let minCart = new THREE.Vector3(Infinity, Infinity, Infinity);
-                 let maxCart = new THREE.Vector3(-Infinity, -Infinity, -Infinity);
-                 
-                 const vec = new THREE.Vector3();
-                 
-                 atoms.forEach(atom => {
-                     vec.set(atom.x, atom.y, atom.z);
-                     vec.applyMatrix4(fracToCartMatrix);
-                     minCart.min(vec);
-                     maxCart.max(vec);
-                 });
-                 
-                 const centerCart = new THREE.Vector3().addVectors(minCart, maxCart).multiplyScalar(0.5);
+                 let centerCart;
+                 if (this.state.mapFocusFrac) {
+                     centerCart = new THREE.Vector3(
+                         this.state.mapFocusFrac.x,
+                         this.state.mapFocusFrac.y,
+                         this.state.mapFocusFrac.z
+                     ).applyMatrix4(fracToCartMatrix);
+                 } else {
+                     let minCart = new THREE.Vector3(Infinity, Infinity, Infinity);
+                     let maxCart = new THREE.Vector3(-Infinity, -Infinity, -Infinity);
+                     
+                     const vec = new THREE.Vector3();
+                     
+                     atoms.forEach(atom => {
+                         vec.set(atom.x, atom.y, atom.z);
+                         vec.applyMatrix4(fracToCartMatrix);
+                         minCart.min(vec);
+                         maxCart.max(vec);
+                     });
+                     
+                     centerCart = new THREE.Vector3().addVectors(minCart, maxCart).multiplyScalar(0.5);
+                 }
                  
                  const r = radius;
                  // Define box corners in Cartesian
@@ -4277,6 +4303,67 @@ class WMOLApp {
     }
 
     // ========== FRAGMENT PLACEMENT ==========
+
+    recenterMapToAtom(atomData) {
+        if (!this.state.currentMapData || !this.state.densityRenderer) return;
+        if (!this.state.cachedMapData) return;
+
+        const mapCell = this.state.currentMapData.cell;
+        const radius = parseFloat(document.getElementById('map-radius').value) || this.state.currentMapRadius || 4.0;
+        const level = parseFloat(document.getElementById('map-level').value) || 1.0;
+        const color = new THREE.Color(this.state.preferences.map.color);
+
+        const fracToCartM = this.getFracToCartMatrix(mapCell);
+        const cartToFracM = this.getCartToFracMatrix(mapCell);
+
+        // Atom's Cartesian position in the map-cell frame
+        const cx = fracToCartM.m11 * atomData.x + fracToCartM.m12 * atomData.y + fracToCartM.m13 * atomData.z;
+        const cy = fracToCartM.m22 * atomData.y + fracToCartM.m23 * atomData.z;
+        const cz = fracToCartM.m33 * atomData.z;
+
+        // Cube corners in Cartesian around the atom, converted to fractional bounds
+        const deltas = [
+            [-1,-1,-1],[1,-1,-1],[-1,1,-1],[1,1,-1],
+            [-1,-1,1],[1,-1,1],[-1,1,1],[1,1,1]
+        ];
+        let minFrac = { x: Infinity, y: Infinity, z: Infinity };
+        let maxFrac = { x: -Infinity, y: -Infinity, z: -Infinity };
+        deltas.forEach(d => {
+            const x = cx + d[0] * radius;
+            const y = cy + d[1] * radius;
+            const z = cz + d[2] * radius;
+            const fx = cartToFracM.i11 * x + cartToFracM.i12 * y + cartToFracM.i13 * z;
+            const fy = cartToFracM.i21 * x + cartToFracM.i22 * y + cartToFracM.i23 * z;
+            const fz = cartToFracM.i31 * x + cartToFracM.i32 * y + cartToFracM.i33 * z;
+            if (fx < minFrac.x) minFrac.x = fx;
+            if (fy < minFrac.y) minFrac.y = fy;
+            if (fz < minFrac.z) minFrac.z = fz;
+            if (fx > maxFrac.x) maxFrac.x = fx;
+            if (fy > maxFrac.y) maxFrac.y = fy;
+            if (fz > maxFrac.z) maxFrac.z = fz;
+        });
+
+        const centerFrac = {
+            x: cartToFracM.i11 * cx + cartToFracM.i12 * cy + cartToFracM.i13 * cz,
+            y: cartToFracM.i21 * cx + cartToFracM.i22 * cy + cartToFracM.i23 * cz,
+            z: cartToFracM.i31 * cx + cartToFracM.i32 * cy + cartToFracM.i33 * cz
+        };
+
+        const bounds = { min: minFrac, max: maxFrac };
+
+        this.state.currentMapBounds = bounds;
+        this.state.currentMapCenter = centerFrac;
+        this.state.currentMapRadius = radius;
+        this.state.mapFocusFrac = centerFrac;
+
+        const btn = document.getElementById('tool-map-toggle');
+        const wasVisible = !btn || btn.classList.contains('active');
+
+        this.state.densityRenderer.render(this.state.cachedMapData, mapCell, level, color, bounds, centerFrac, radius);
+        if (!wasVisible && this.state.densityRenderer.mesh) {
+            this.state.densityRenderer.mesh.visible = false;
+        }
+    }
 
     getFracToCartMatrix(cell) {
         const { a, b, c, alpha, beta, gamma } = cell;

@@ -1727,6 +1727,33 @@ class WMOLApp {
         return res.text();
     }
 
+    // POST a .res/.ins model to transform its asymmetric unit into the target
+    // space group (expands/removes symmetry-related molecules on the server).
+    async apiTransformModelToSg(modelText, spaceGroup) {
+        const formData = new FormData();
+        formData.append('res', new Blob([modelText], { type: 'text/plain' }), 'structure.res');
+        formData.append('spaceGroup', String(spaceGroup));
+        const res = await fetch(this.getApiUrl('/xrdspace/transform-model'), { method: 'POST', body: formData });
+        if (!res.ok) {
+            let detail = '';
+            try { const e = await res.json(); detail = e.error || e.details || ''; } catch (err) { /* ignore */ }
+            throw new Error(detail || `Transform failed (HTTP ${res.status})`);
+        }
+        return res.json();
+    }
+
+    // Apply the transform result to the editor: replace the structure with the
+    // new .res text (transformed, re-labeled atoms) and report the change.
+    applyTransformModelToSg(result) {
+        if (!result || !result.res) return;
+        this.loadStructureIntoEditor(result.res, this.state.loadedFilename || 'structure.res');
+        const lines = [result.report || ''];
+        if (result.removed > 0) lines.push(`Removed ${result.removed} symmetry-redundant atom(s).`);
+        if (result.added > 0) lines.push(`Added ${result.added} symmetry-related atom(s).`);
+        lines.push('The model has been re-set to the target space group and loaded into the editor.');
+        alert(lines.join('\n\n'));
+    }
+
     // --- Publish Methods ---
 
     async apiListTemplates() {
@@ -4340,6 +4367,10 @@ class WMOLApp {
                 if (input === null || input.trim() === '') return;
                 this.runSpaceGroupAnalysis(input.trim());
             });
+        }
+        const menuSgTransform = document.getElementById('menu-sg-transform');
+        if (menuSgTransform) {
+            menuSgTransform.addEventListener('click', () => this.transformModelToSgPrompt());
         }
 
         // Solve Structure & Validate / Validate (CheckCIF-style)
@@ -7368,9 +7399,11 @@ class WMOLApp {
     resetResultsControls() {
         const b1 = document.getElementById('btn-load-merged-hkl');
         const b2 = document.getElementById('btn-download-merged-hkl');
+        const b3 = document.getElementById('btn-transform-to-sg');
         const sel = document.getElementById('solution-selector');
         if (b1) b1.classList.add('d-none');
         if (b2) b2.classList.add('d-none');
+        if (b3) b3.classList.add('d-none');
         if (sel) sel.classList.add('d-none');
     }
 
@@ -7444,9 +7477,23 @@ class WMOLApp {
         const hasMerged = !!(result.merge && result.merge.shelxHkl);
         const btnDownload = document.getElementById('btn-download-merged-hkl');
         const btnLoad = document.getElementById('btn-load-merged-hkl');
+        const btnTransform = document.getElementById('btn-transform-to-sg');
         // xrdspace results have no solution selector.
         const selWrap = document.getElementById('solution-selector');
         if (selWrap) selWrap.classList.add('d-none');
+
+        // "Transform model to space group": relevant when a space group is known
+        // (forced, or the auto-determined best) AND a model is loaded in editor.
+        const sgName = (result.forced && result.forced.hm) || (result.best && result.best.hm) || null;
+        const canTransform = !!(sgName && this.getStructureContent());
+        if (btnTransform) {
+            btnTransform.classList.toggle('d-none', !canTransform);
+            if (canTransform) {
+                btnTransform.title = `Rewrite the loaded model into space group ${sgName}. Raises symmetry (removes redundant molecules) or lowers it (adds symmetry partners).`;
+                btnTransform.onclick = () => this.transformModelToSg(result);
+            }
+        }
+
         if (!hasMerged) {
             if (btnDownload) btnDownload.classList.add('d-none');
             if (btnLoad) btnLoad.classList.add('d-none');
@@ -7479,6 +7526,55 @@ class WMOLApp {
                     summary.appendChild(note);
                 }
             };
+        }
+    }
+
+    // Menu entry: ask which space group to transform the loaded model into.
+    async transformModelToSgPrompt() {
+        const structure = this.getStructureContent();
+        if (!structure) {
+            alert('No structure loaded in the editor to transform. Load a .res/.ins model first.');
+            return;
+        }
+        const input = prompt(
+            'Transform the loaded model into which space group?\n' +
+            'Enter a space group number or Hermann-Mauguin symbol\n(e.g. 14, or "P 21/c", "P-1", "C 2/c"):');
+        if (input === null || input.trim() === '') return;
+        await this.transformModelToSg({ best: { hm: input.trim() } }, input.trim());
+    }
+
+    // Rewrite the loaded model into a space group (from an xrdspace result, or
+    // the space group typed by the user). The server expands/removes
+    // symmetry-related molecules; the result replaces the structure in editor.
+    async transformModelToSg(result, explicitSg = null) {
+        const structure = this.getStructureContent();
+        if (!structure) {
+            alert('No structure loaded in the editor to transform.');
+            return;
+        }
+        const sg = explicitSg
+            || (result && ((result.forced && result.forced.hm) || (result.best && result.best.hm)))
+            || null;
+        if (!sg) {
+            alert('No space group available to transform into.');
+            return;
+        }
+        const label = (result && result.forced && result.forced.id)
+            ? `${sg} (No. ${result.forced.id})` : String(sg);
+        if (!confirm(`Transform the loaded model into space group ${label}?\n\n` +
+            'Higher-symmetry target: redundant (symmetry-related) molecules are removed.\n' +
+            'Lower-symmetry target: symmetry partners are added.\n\n' +
+            'Best results when the current model is a proper asymmetric unit under its declared LATT/SYMM. ' +
+            'The transformed model will replace the current editor content.')) {
+            return;
+        }
+        const status = document.getElementById('status-bar-content');
+        if (status) status.textContent = `Transforming model to ${sg}...`;
+        try {
+            const out = await this.apiTransformModelToSg(structure, sg);
+            this.applyTransformModelToSg(out);
+        } catch (e) {
+            alert(`Transform failed: ${e.message}`);
         }
     }
 
@@ -7532,6 +7628,7 @@ class WMOLApp {
             const resultsContent = document.getElementById('results-content');
             const resultsSummary = document.getElementById('results-summary');
             if (resultsContent && modalEl) {
+                this.resetResultsControls();
                 resultsSummary.innerHTML = this.buildSpaceGroupSummary(result);
                 resultsContent.textContent = this.buildSpaceGroupReport(result);
                 this.wireMergedHklButtons(result);

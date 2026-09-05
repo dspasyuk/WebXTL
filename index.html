@@ -147,6 +147,7 @@
                                 <li><a class="dropdown-item" href="#" id="menu-refine-weight">Weight (GOOF) Refinement...</a></li>
                                 <li><a class="dropdown-item" href="#" id="menu-xrdspace">Space Group (xrdspace)...</a></li>
                                 <li><a class="dropdown-item" href="#" id="menu-xrdspace-force">Force Space Group (xrdspace)...</a></li>
+                                <li><a class="dropdown-item" href="#" id="menu-sg-transform">Transform Model to Space Group...</a></li>
                                 <li><a class="dropdown-item" href="#" id="menu-rsr">Real Space Refinement</a></li>
                                 <li>
                                     <hr class="dropdown-divider">
@@ -693,6 +694,8 @@
                         style="font-family: monospace; white-space: pre-wrap;"></pre>
                 </div>
                 <div class="modal-footer">
+                    <button type="button" class="btn btn-warning d-none" id="btn-transform-to-sg"
+                        title="Rewrite the loaded model into the (forced) space group: removes redundant molecules when raising symmetry, adds partners when lowering it">Transform Model to Space Group</button>
                     <button type="button" class="btn btn-primary d-none" id="btn-load-merged-hkl">Load Merged HKL for SHELXT</button>
                     <button type="button" class="btn btn-success d-none" id="btn-download-merged-hkl">Download Merged HKL (SHELX)</button>
                     <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>

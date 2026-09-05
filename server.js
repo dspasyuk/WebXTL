@@ -8,6 +8,7 @@ import { spawn } from 'child_process';
 import { fileURLToPath } from 'url';
 import { buildPublishCif, buildPublishCifFromTemplates, buildReportDocx, parseDevFile, parseCif } from './publish.js';
 import { analyzeHkl } from './src/js/xrdspace/index.js';
+import { transformModelToSpaceGroup } from './src/js/xrdspace/sg-model.js';
 import { validateStructure, renderReport, parseStructure, detectDisorder, detectTwinning } from './src/js/validate/structureValidation.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -1042,6 +1043,51 @@ app.get('/solve-info', (req, res) => {
 });
 
 // --- xrdspace: space-group determination (XPREP alternative) ---
+
+/**
+ * POST /xrdspace/transform-model
+ * Upload a SHELX .res/.ins model (multipart field 'res') and request a target
+ * space group (field 'spaceGroup' - number or HM symbol, e.g. 14 or "P 21/c").
+ * The model's asymmetric unit is expanded under its current symmetry (LATT +
+ * SYMM from the file) to the full cell content, then reduced to an asymmetric
+ * unit under the *target* space group. Moving to a higher-symmetry group
+ * removes redundant (symmetry-related) molecules; moving to a lower-symmetry
+ * group adds the symmetry partners. Returns the transformed .res text and a
+ * report of added/removed atoms.
+ */
+app.post('/xrdspace/transform-model', upload.fields([{ name: 'res', maxCount: 1 }]), (req, res) => {
+    try {
+        if (!req.files || !req.files['res']) {
+            return res.status(400).json({ error: 'A .res/.ins model file is required.' });
+        }
+        const sgField = (req.body && req.body.spaceGroup);
+        const spaceGroup = Array.isArray(sgField) ? sgField[0] : sgField;
+        if (spaceGroup === undefined || spaceGroup === null || spaceGroup === '') {
+            return res.status(400).json({ error: 'A target space group is required.' });
+        }
+        const modelText = fs.readFileSync(req.files['res'][0].path, 'utf8');
+        fs.rmSync(req.files['res'][0].path, { force: true });
+        const result = transformModelToSpaceGroup(modelText, String(spaceGroup).trim());
+        if (!result.ok) {
+            return res.status(400).json({ error: result.error });
+        }
+        res.json({
+            ok: true,
+            hm: result.hm,
+            sgId: result.sgId,
+            nOldAsu: result.nOldAsu,
+            nFull: result.nFull,
+            nNewAsu: result.nNewAsu,
+            removed: result.removed,
+            added: result.added,
+            report: result.report,
+            res: result.res,
+        });
+    } catch (error) {
+        console.error('xrdspace transform-model error:', error);
+        res.status(500).json({ error: 'Failed to transform model', details: error.message });
+    }
+});
 
 /**
  * POST /xrdspace/analyze

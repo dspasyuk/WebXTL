@@ -8,6 +8,7 @@ import { spawn } from 'child_process';
 import { fileURLToPath } from 'url';
 import { buildPublishCif, buildPublishCifFromTemplates, buildReportDocx, parseDevFile, parseCif } from './publish.js';
 import { analyzeHkl } from './src/js/xrdspace/index.js';
+import { validateStructure, renderReport, parseStructure, detectDisorder, detectTwinning } from './src/js/validate/structureValidation.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -111,6 +112,14 @@ const PROGRAMS = {
         exe: 'shelxc',
         inputs: ['.hkl'],
         outputs: ['.hkl', '.lst'],
+        stdin: null,
+    },
+    platon: {
+        label: 'PLATON',
+        description: 'Structure validation, geometry and graphics (PLATON)',
+        exe: 'platon',
+        inputs: ['.res'],
+        outputs: ['.ckf', '.lst', '.fab', '.fcf', '.cif', '.txt'],
         stdin: null,
     },
 };
@@ -486,7 +495,90 @@ app.post('/run/:program', upload.any(), async (req, res) => {
         }
 
         console.log(`[${jobId}] Running ${program.label} on '${basename}'...`);
-        const r = await runProgram(program, [basename], projectDir, program.stdin, controller.signal);
+
+        // PLATON is interactive/X11 software; the generic runner would hang on
+        // the GUI. Use the best-effort check runner instead (short timeout,
+        // collects any report files PLATON writes, reports missing runtime).
+        let r;
+        if (programId === 'platon') {
+            const action = (() => {
+                let v = req.body && req.body.action;
+                if (Array.isArray(v)) v = v[0];
+                return PLATON_ACTIONS[v] ? v : 'checkcif';
+            })();
+            // SQUEEZE / TWINROTMAT need the companion reflection files named
+            // exactly <basename>.fcf (PLATON derives them from the model name).
+            // If the client did not upload them, reuse any already stored in
+            // this project directory so PLATON can actually run.
+            if (PLATON_ACTIONS[action].needsFcf) {
+                if (!fs.existsSync(path.join(projectDir, `${basename}.fcf`))) {
+                    const existing = fs.readdirSync(projectDir).find(f => f.toLowerCase().endsWith('.fcf'));
+                    if (existing) fs.copyFileSync(path.join(projectDir, existing), path.join(projectDir, `${basename}.fcf`));
+                }
+            }
+            const p = await runPlatonCheck(projectDir, basename, uploadedNames, controller.signal, { action });
+            r = {
+                code: p.ok ? 0 : (p.code == null ? 1 : p.code),
+                stdout: p.stdout || '',
+                stderr: (p.stderr || '') + (p.reason ? `\n${p.reason}` : '')
+            };
+            if (p.files) {
+                for (const [name, content] of Object.entries(p.files)) {
+                    if (!r.filesText) r.filesText = {};
+                    r.filesText[name] = content;
+                }
+            }
+            if (!r.stdout && !Object.keys(r.filesText || {}).length) {
+                r.stderr = (r.stderr || '') + `\n[${PLATON_ACTIONS[action].label}] PLATON produced no output for this model/action.`;
+            }
+
+            // --- SQUEEZE integration for SHELXL ---
+            // PLATON writes <basename>_sq.{fab,ins,res}. SHELXL consumes the
+            // solvent contribution only when (a) an "ABIN" instruction is
+            // present in the .ins/.res AND (b) the .fab file sits next to the
+            // refinement input named exactly <basename>.fab. Promote those so
+            // the next SHELXL run (from the editor or this server) picks up
+            // the SQUEEZE-corrected reflections.
+            if (action === 'squeeze') {
+                const sqFab = path.join(projectDir, `${basename}_sq.fab`);
+                const sqIns = path.join(projectDir, `${basename}_sq.ins`);
+                const sqRes = path.join(projectDir, `${basename}_sq.res`);
+                const fabDest = path.join(projectDir, `${basename}.fab`);
+                if (fs.existsSync(sqFab)) {
+                    fs.copyFileSync(sqFab, fabDest);
+                }
+                // Build an updated .ins/.res that carries the ABIN instruction.
+                let updated = null;
+                if (fs.existsSync(sqIns)) updated = fs.readFileSync(sqIns, 'utf8');
+                else if (fs.existsSync(sqRes)) updated = fs.readFileSync(sqRes, 'utf8');
+                else updated = fs.existsSync(path.join(projectDir, `${basename}.res`))
+                    ? fs.readFileSync(path.join(projectDir, `${basename}.res`), 'utf8') : null;
+
+                if (updated) {
+                    if (!/^\s*ABIN\b/m.test(updated)) {
+                        updated = updated.replace(/^(\s*WGHT\b)/m, 'ABIN\n$1');
+                        if (!/^\s*ABIN\b/m.test(updated)) updated += '\nABIN\n';
+                    }
+                    fs.writeFileSync(path.join(projectDir, `${basename}.ins`), updated, 'utf8');
+                    fs.writeFileSync(path.join(projectDir, `${basename}.res`), updated, 'utf8');
+                    r.filesText = r.filesText || {};
+                    // Expose the SQUEEZE-ready model back to the client.
+                    r.filesText[`${basename}.ins`] = updated;
+                    r.filesText[`${basename}.res`] = updated;
+                    r.filesText[`${basename}.fab`] = fs.existsSync(fabDest)
+                        ? fs.readFileSync(fabDest, 'utf8').slice(0, 4096) : '(fab written to project)';
+                    const fabOK = fs.existsSync(fabDest) && fs.statSync(fabDest).size > 0;
+                    r.fabReady = fabOK;
+                    r.squeezeApplied = true;
+                    r.stdout = (r.stdout || '') +
+                        `\n\n[SQUEEZE] Applied for SHELXL: ABIN added to ${basename}.ins/.res and solvent mask installed as ${basename}.fab (${fabOK ? 'ready for SHELXL' : 'fab missing'}). Next refinement will subtract the disordered-solvent contribution.`;
+                } else {
+                    r.stdout = (r.stdout || '') + '\n\n[SQUEEZE] Note: PLATON did not write a usable SQUEEZE model file.';
+                }
+            }
+        } else {
+            r = await runProgram(program, [basename], projectDir, program.stdin, controller.signal);
+        }
 
         const result = {
             success: r.code === 0,
@@ -496,6 +588,14 @@ app.post('/run/:program', upload.any(), async (req, res) => {
             stderr: r.stderr,
             files: {},
         };
+
+        if (r.filesText) {
+            Object.assign(result.files, r.filesText);
+        }
+        if (programId === 'platon') {
+            result.squeezeApplied = r.squeezeApplied === true;
+            result.fabReady = r.fabReady === true;
+        }
 
         // Collect the output files defined for this program. Programs may write
         // suffixed files (e.g. SHELXT's name_a.res), so scan the whole project
@@ -537,6 +637,408 @@ app.post('/run/:program', upload.any(), async (req, res) => {
         console.error(`[${jobId}] ${programId} error:`, error);
         res.status(500).json({ error: 'Internal server error', details: error.message });
     }
+});
+
+// --- xrdspace: space-group determination (XPREP alternative) ---
+
+// ===========================================================================
+// Structure solution & validation pipeline ("Solve structure fully")
+// ===========================================================================
+
+const SOLUTION_PREFERENCE = ['shelxt', 'shelxs'];
+const PLATON_TIMEOUT_MS = 60000;
+
+function readUploadText(uploaded) {
+    try { return fs.readFileSync(uploaded.path, 'utf8'); } catch (e) { return ''; }
+}
+
+// True when a SHELX file already contains an atom model (not only instructions).
+function textHasModel(text) {
+    const parsed = parseStructure(text || '');
+    return parsed.atoms.length > 0;
+}
+
+// Which structure-solution programs are installed on the server.
+function availableSolutions() {
+    return SOLUTION_PREFERENCE.filter(p => availablePrograms.includes(p));
+}
+
+// After a solution run, pick the best .res model produced (SHELXT can write
+// several candidate models: name_a.res, name_b.res, ...). Prefer the model with
+// atoms and the lowest R1 quoted in its TITL/header.
+function pickBestModel(projectDir, basename, uploadedNames) {
+    let files;
+    try { files = fs.readdirSync(projectDir); } catch (e) { return null; }
+    const resFiles = files.filter(f =>
+        /\.res$/i.test(f) && !uploadedNames.includes(f) && !f.startsWith('.'));
+    if (!resFiles.length) return null;
+
+    const score = (text) => {
+        const parsed = parseStructure(text);
+        if (!parsed.atoms.length) return Infinity;
+        const r1 = text.match(/R1\s*=\s*([\d.]+)/i);
+        return r1 ? parseFloat(r1[1]) : 1; // model present, mediocre default
+    };
+    let best = null;
+    for (const f of resFiles) {
+        let text;
+        try { text = fs.readFileSync(path.join(projectDir, f), 'utf8'); } catch (e) { continue; }
+        const s = score(text);
+        if (s === Infinity) continue;
+        if (!best || s < best.score) best = { file: f, text, score: s };
+    }
+    return best;
+}
+
+// Run SHELXL on the model currently stored as basename.ins/.hkl, then, when a
+// .res was produced, promote it to .ins so the next refinement starts from the
+// refined model. Returns {code, stdout, stderr, res, lst, success, message}.
+async function refineModel(projectDir, basename, weightCycles) {
+    const resPath = path.join(projectDir, `${basename}.res`);
+    const insPath = path.join(projectDir, `${basename}.ins`);
+    const lstPath = path.join(projectDir, `${basename}.lst`);
+
+    // SHELXL reads basename.ins; if only a .res was stored, copy it over.
+    if (!fs.existsSync(insPath) && fs.existsSync(resPath)) {
+        fs.copyFileSync(resPath, insPath);
+    }
+
+    let lastRec = null;
+    const cycles = Math.max(1, Math.min(50, weightCycles || 1));
+    let r = null;
+    let stdout = '', stderr = '';
+    for (let c = 1; c <= cycles; c++) {
+        r = await runShelxl(projectDir, basename);
+        stdout += (c > 1 ? '\n' : '') + `===== SHELXL cycle ${c} =====\n` + r.stdout;
+        stderr += r.stderr;
+        if (fs.existsSync(lstPath)) {
+            const rec = parseRecommendedWght(fs.readFileSync(lstPath, 'utf8'));
+            if (rec) {
+                lastRec = rec;
+                if (c < cycles) updateWghtInstruction(insPath, rec.a, rec.b);
+            }
+        }
+    }
+    // Promote refined .res to the .ins for the next step and patch the WGHT line.
+    if (fs.existsSync(resPath)) {
+        const resText = fs.readFileSync(resPath, 'utf8');
+        if (resText.trim().length) {
+            fs.writeFileSync(insPath, resText, 'utf8');
+            if (lastRec) updateWghtInstruction(insPath, lastRec.a, lastRec.b);
+        }
+    }
+
+    const resText = fs.existsSync(resPath) ? fs.readFileSync(resPath, 'utf8') : '';
+    const lstText = fs.existsSync(lstPath) ? fs.readFileSync(lstPath, 'utf8') : '';
+    const code = r ? r.code : -1;
+    let success = code === 0 && resText.trim().length > 0;
+    let message = null;
+    if (!success) {
+        message = detectShelxlError(stdout, lstText)
+            || (resText.trim().length === 0
+                ? 'SHELXL did not produce a .res file.'
+                : `SHELXL exited with a non-zero status (${code}).`);
+    }
+    return { code, stdout, stderr, res: resText, lst: lstText, success, message };
+}
+
+// PLATON actions selectable from the Programs submenu. Each maps to the text
+// instruction(s) that PLATON executes after loading the model. TwinRotMat has
+// no standalone text command (it is an interactive GUI mouse action); the
+// underlying search it runs is LEPAGE, which lists the candidate twin 2-fold
+// axes and the transformation matrix, so that action runs LEPAGE instead.
+const PLATON_ACTIONS = {
+    checkcif: { label: 'CheckCIF', script: '', needsFcf: false, needsHkl: false },
+    addsymm: { label: 'ADDSYM', script: 'CALC ADDSYM', needsFcf: false, needsHkl: false },
+    squeeze: { label: 'SQUEEZE', script: 'CALC SQUEEZE', needsFcf: true, needsHkl: false },
+    twinrotmat: { label: 'TwinRotMat', script: 'LEPAGE', needsFcf: false, needsHkl: false },
+};
+
+// Attempt a PLATON run on the model with an optional instruction script.
+// PLATON is interactive / display-oriented software; this is best-effort: we
+// spawn it with the .res, feed the action script on stdin, wait briefly and
+// return stdout/stderr and any newly written files. When PLATON cannot launch
+// (missing runtime libs / no display) the result reports that clearly.
+function runPlatonCheck(projectDir, basename, uploadedNames, signal, opts = {}) {
+    return new Promise((resolve) => {
+        if (!isExecutableAvailable('platon')) {
+            return resolve({ ok: false, reason: 'platon executable not found on PATH' });
+        }
+        const resPath = path.join(projectDir, `${basename}.res`);
+        if (!fs.existsSync(resPath)) {
+            return resolve({ ok: false, reason: 'No .res model available for PLATON' });
+        }
+        const action = opts.action && PLATON_ACTIONS[opts.action] ? opts.action : 'checkcif';
+        const def = PLATON_ACTIONS[action];
+        const before = new Set(fs.readdirSync(projectDir));
+        let child;
+        try {
+            child = spawn('platon', [resPath], {
+                cwd: projectDir, stdio: ['pipe', 'pipe', 'pipe'], detached: true
+            });
+        } catch (e) {
+            return resolve({ ok: false, reason: `Could not launch platon: ${e.message}` });
+        }
+        let stdout = '', stderr = '';
+        let done = false;
+        const timer = setTimeout(() => {
+            done = true;
+            try { process.kill(-child.pid, 'SIGKILL'); } catch (e) { /* */ }
+            try { child.kill('SIGKILL'); } catch (e) { /* */ }
+            resolve({ ok: false, reason: 'PLATON did not finish within the timeout (interactive GUI / no display?)', stdout, stderr });
+        }, PLATON_TIMEOUT_MS);
+        const onAbort = () => {
+            done = true; clearTimeout(timer);
+            try { process.kill(-child.pid, 'SIGKILL'); } catch (e) { /* */ }
+            try { child.kill('SIGKILL'); } catch (e) { /* */ }
+        };
+        if (signal) {
+            if (signal.aborted) onAbort();
+            else signal.addEventListener('abort', onAbort, { once: true });
+        }
+        child.stdout.on('data', d => { stdout += d.toString(); });
+        child.stderr.on('data', d => { stderr += d.toString(); });
+
+        // Feed the action instructions, then let stdin hit EOF (normal end).
+        try {
+            child.stdin.write((def.script ? def.script + '\n' : '') + 'EXIT\n');
+            child.stdin.end();
+        } catch (e) { /* stdin closed */ }
+
+        child.on('error', (err) => {
+            if (done) return; done = true; clearTimeout(timer);
+            resolve({ ok: false, reason: `PLATON launch error: ${err.message}`, stdout, stderr });
+        });
+        child.on('close', (code) => {
+            if (done) return; done = true; clearTimeout(timer);
+            if (signal) signal.removeEventListener('abort', onAbort);
+            // Collect files written during the run.
+            let after = {};
+            try {
+                for (const f of fs.readdirSync(projectDir)) {
+                    if (f === 'backup' || f.startsWith('.') || before.has(f)) continue;
+                    const full = path.join(projectDir, f);
+                    if (fs.statSync(full).isFile() && fs.statSync(full).size < 2 * 1024 * 1024) {
+                        try { after[f] = fs.readFileSync(full, 'utf8'); } catch (e) { /* */ }
+                    }
+                }
+            } catch (e) { /* */ }
+            const anyText = Object.values(after).join('\n') || stdout;
+            resolve({ ok: code === 0 || anyText.trim().length > 0, code, stdout, stderr, files: after, action });
+        });
+    });
+}
+
+// Run one full "solve -> refine -> validate" round for a project. Returns the
+// log of steps and final report. `reqFiles` are the uploaded ins/hkl entries.
+async function runSolvePipeline(projectDir, basename, insText, hklUploaded, opts, signal) {
+    const log = [];
+    const step = (key, label) => {
+        const entry = { key, label, status: 'running' };
+        log.push(entry);
+        return entry;
+    };
+    const fail = (entry, msg) => { entry.status = 'failed'; entry.message = msg; };
+    const ok = (entry, msg) => { entry.status = 'ok'; if (msg) entry.message = msg; };
+
+    // --- Store inputs -----------------------------------------------
+    fs.writeFileSync(path.join(projectDir, `${basename}.ins`), insText, 'utf8');
+    const hklPath = path.join(projectDir, `${basename}.hkl`);
+    fs.renameSync(hklUploaded.path, hklPath);
+    const uploadedNames = [`${basename}.ins`, `${basename}.hkl`];
+
+    let modelText = insText;
+    let solutionProgram = null;
+
+    // --- 1. Solve if the model is missing --------------------------
+    if (!textHasModel(insText)) {
+        const desired = opts.program && opts.program !== 'auto' ? [opts.program] : availableSolutions();
+        if (!desired.length) {
+            throw new Error('No structure-solution program (SHELXT/SHELXS) available on the server.');
+        }
+        const run = step('solve', `${desired[0].toUpperCase()} structure solution`);
+        solutionProgram = desired[0];
+        const prog = PROGRAMS[solutionProgram];
+        const r = await runProgram(prog, [basename], projectDir, null, signal);
+        const best = pickBestModel(projectDir, basename, uploadedNames);
+        if (best) {
+            modelText = best.text;
+            fs.writeFileSync(path.join(projectDir, `${basename}.res`), modelText, 'utf8');
+            fs.writeFileSync(path.join(projectDir, `${basename}.ins`), modelText, 'utf8');
+            ok(run, `Best model ${best.file} (R1 ${best.score}) from ${solutionProgram.toUpperCase()}`);
+        } else {
+            fail(run, detectShelxlError(r.stdout, '') || `${solutionProgram.toUpperCase()} produced no model .res file`);
+            // keep whatever refinement may still do with the template
+        }
+    } else {
+        const entry = step('model', 'Model present in .ins/.res');
+        ok(entry, `${parseStructure(insText).atoms.length} atoms found`);
+    }
+
+    // --- 2. Refine (SHELXL) ----------------------------------------
+    const cycles = Math.max(1, Math.min(20, opts.cycles || 1));
+    let refineResult = null;
+    if (opts.refine !== false && modelText && textHasModel(modelText)) {
+        const entry = step('refine', `SHELXL refinement${cycles > 1 ? ` (${cycles} WGHT cycles)` : ''}`);
+        refineResult = await refineModel(projectDir, basename, cycles);
+        if (refineResult.success) {
+            ok(entry, refineResult.lst ? refinementSummaryLine(refineResult.lst) : undefined);
+            modelText = refineResult.res;
+        } else {
+            fail(entry, refineResult.message);
+        }
+    } else {
+        step('refine', 'SHELXL refinement skipped').status = 'skipped';
+    }
+
+    // --- 3. Disorder + twinning detection + CheckCIF-style report ---
+    const lstText = refineResult ? refineResult.lst : '';
+    let jsReport = null;
+    const entry = step('validate', 'Structure validation (disorder, twinning, CheckCIF-style)');
+    try {
+        jsReport = validateStructure(modelText, lstText, {});
+        ok(entry, `verdict=${jsReport.verdict}  A:${jsReport.count.A} B:${jsReport.count.B} C:${jsReport.count.C} G:${jsReport.count.G}`);
+    } catch (e) {
+        fail(entry, `Validation failed: ${e.message}`);
+    }
+
+    // --- 4. PLATON (best-effort, optional) -------------------------
+    let platon = null;
+    if (opts.platon && textHasModel(modelText)) {
+        const p = step('platon', 'PLATON check (best effort)');
+        platon = await runPlatonCheck(projectDir, basename, uploadedNames, signal);
+        if (platon.ok) ok(p, platon.code != null ? `exit ${platon.code}` : 'report written');
+        else {
+            p.status = 'skipped';
+            p.message = platon.reason || 'PLATON not usable';
+        }
+    }
+
+    // Final .res/.lst contents
+    let finalRes = modelText;
+    let finalLst = lstText;
+    if (!refineResult || !refineResult.success) {
+        try {
+            const rp = path.join(projectDir, `${basename}.res`);
+            const lp = path.join(projectDir, `${basename}.lst`);
+            if (fs.existsSync(rp)) finalRes = fs.readFileSync(rp, 'utf8');
+            if (fs.existsSync(lp)) finalLst = fs.readFileSync(lp, 'utf8');
+        } catch (e) { /* */ }
+    }
+
+    return { log, modelText, solutionProgram, refineResult, jsReport, platon, finalRes, finalLst };
+}
+
+function refinementSummaryLine(lst) {
+    const r1 = lst.match(/R1\s*=\s*([\d.]+)\s+for\s+\d+\s+Fo\s*>\s*\d+sig\(Fo\)/);
+    const wr = lst.match(/wR2\s*=\s*([\d.]+),\s*GooF\s*=\s*S\s*=\s*([\d.]+)/);
+    const parts = [];
+    if (r1) parts.push(`R1=${r1[1]}`);
+    if (wr) parts.push(`wR2=${wr[1]} GooF=${wr[2]}`);
+    return parts.join('  ') || 'refinement complete';
+}
+
+function stepsText(log) {
+    return log.map(s => `[${s.status.toUpperCase()}] ${s.label}${s.message ? ' — ' + s.message : ''}`).join('\n');
+}
+
+/**
+ * POST /solve-structure
+ * multipart: 'ins' (.ins/.res model or template), 'hkl' (.hkl reflections).
+ * fields: program (shelxt|shelxs|auto), cycles (SHELXL weight cycles), refine
+ * (0/1), platon (0/1). Runs structure solution (if no atoms yet) -> SHELXL
+ * refinement -> validation/disorder/twinning report (+ PLATON best effort).
+ * Files are persisted to projects/<basename>.
+ */
+app.post('/solve-structure', upload.fields([
+    { name: 'ins', maxCount: 1 }, { name: 'hkl', maxCount: 1 }
+]), async (req, res) => {
+    const jobId = uuidv4();
+    const field = (n, d) => { let v = (req.body && req.body[n]) || d; if (Array.isArray(v)) v = v[0]; return v; };
+    const controller = new AbortController();
+    res.on('close', () => { if (!res.writableEnded) controller.abort(); });
+    try {
+        if (!req.files || !req.files['ins'] || !req.files['hkl']) {
+            return res.status(400).json({ error: 'Both an .ins/.res and an .hkl file are required.' });
+        }
+        const insFile = req.files['ins'][0];
+        const hklFile = req.files['hkl'][0];
+        const insText = readUploadText(insFile);
+        fs.rmSync(insFile.path, { force: true });
+
+        const basename = path.parse(insFile.originalname).name.replace(/[^a-zA-Z0-9_-]/g, '_');
+        const projectDir = path.join(PROJECTS_DIR, basename);
+        fs.mkdirSync(projectDir, { recursive: true });
+        fs.mkdirSync(path.join(projectDir, 'backup'), { recursive: true });
+
+        const opts = {
+            program: field('program', 'auto'),
+            cycles: parseInt(field('cycles', '1'), 10) || 1,
+            refine: field('refine', '1') !== '0',
+            platon: field('platon', '0') === '1'
+        };
+
+        const result = await runSolvePipeline(projectDir, basename, insText, hklFile, opts, controller.signal);
+        const reportText = result.jsReport ? renderReport(result.jsReport) : 'Validation could not be produced.';
+        const response = {
+            success: result.jsReport ? result.jsReport.count.A === 0 : false,
+            jobId, project: basename, steps: result.log,
+            platon: result.platon || null,
+            report: result.jsReport || null,
+            reportText,
+            logText: stepsText(result.log),
+            files: {
+                res: result.finalRes,
+                lst: result.finalLst
+            }
+        };
+        if (!response.success && result.jsReport) {
+            response.message = `Validation finished with ${result.jsReport.count.A} alert(s) of level A.`;
+        }
+        console.log(`[${jobId}] solve-structure for '${basename}' done`);
+        res.json(response);
+    } catch (error) {
+        console.error(`[${jobId}] solve-structure error:`, error);
+        res.status(500).json({ error: 'Structure pipeline failed', details: error.message });
+    }
+});
+
+/**
+ * POST /validate-structure
+ * multipart: 'res' (.res/.ins model), optional 'lst' (.lst log), optional
+ * field 'platon' (0/1). Runs the built-in validation report (disorder,
+ * twinning, CheckCIF-style) on the given model without modifying the project.
+ */
+app.post('/validate-structure', upload.fields([
+    { name: 'res', maxCount: 1 }, { name: 'lst', maxCount: 1 }
+]), (req, res) => {
+    const jobId = uuidv4();
+    try {
+        if (!req.files || !req.files['res']) {
+            return res.status(400).json({ error: 'A .res/.ins model file is required.' });
+        }
+        const resText = readUploadText(req.files['res'][0]);
+        fs.rmSync(req.files['res'][0].path, { force: true });
+        let lstText = '';
+        if (req.files['lst'] && req.files['lst'][0]) {
+            lstText = readUploadText(req.files['lst'][0]);
+            fs.rmSync(req.files['lst'][0].path, { force: true });
+        }
+        const report = validateStructure(resText, lstText, {});
+        res.json({ success: report.count.A === 0, jobId, report, reportText: renderReport(report) });
+    } catch (error) {
+        console.error(`[${jobId}] validate-structure error:`, error);
+        res.status(500).json({ error: 'Validation failed', details: error.message });
+    }
+});
+
+// GET /solve-info — capability report for the solve/validate UI.
+app.get('/solve-info', (req, res) => {
+    res.json({
+        solutions: availableSolutions(),
+        refineAvailable: availablePrograms.includes('shelxl'),
+        platonAvailable: isExecutableAvailable('platon')
+    });
 });
 
 // --- xrdspace: space-group determination (XPREP alternative) ---

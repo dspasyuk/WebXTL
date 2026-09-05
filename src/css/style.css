@@ -17,6 +17,13 @@ body {
     overflow: hidden;
 }
 
+/* The status bar is position: fixed; bottom: 0 (30px tall). Give the app a
+   matching bottom offset so the editor area never extends underneath it,
+   otherwise the last lines of text are hidden behind the bar. */
+#app {
+    padding-bottom: 30px;
+}
+
 /* Navbar Customization */
 .navbar {
     font-size: 0.9rem;
@@ -40,6 +47,27 @@ body {
 
 .dropdown-divider {
     border-top-color: var(--border-color);
+}
+
+/* Nested submenu for PLATON actions in the Programs dropdown. */
+.dropdown-submenu {
+    position: relative;
+}
+
+.dropdown-submenu > .dropdown-menu {
+    top: 0;
+    left: 100%;
+    margin-top: -6px;
+    margin-left: 0;
+    display: none;
+    min-width: 220px;
+    border-radius: 4px;
+    box-shadow: 0 0.5rem 1rem rgba(0, 0, 0, 0.15);
+}
+
+.dropdown-submenu:hover > .dropdown-menu,
+.dropdown-submenu:focus-within > .dropdown-menu {
+    display: block;
 }
 
 /* Toolbar Customization */
@@ -121,7 +149,9 @@ body {
 }
 
 #res-editor,
-#cif-editor {
+#cif-editor,
+#editor-cif,
+#editor-lst {
     flex: 1;
     overflow: hidden;
     display: flex;
@@ -186,6 +216,7 @@ body {
 
 /* Ensure editors fill height in split mode */
 .split-layout #res-editor,
-.split-layout #cif-editor {
+.split-layout #editor-cif,
+.split-layout #editor-lst {
     height: 100% !important;
 }

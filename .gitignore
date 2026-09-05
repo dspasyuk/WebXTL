@@ -9,3 +9,9 @@ HKLs
 .DS_Store
 *.log
 session-*
+
+# Third-party source with academic-only redistribution license (PLATON, (C) A.L. Spek)
+platon.f
+platon.*
+check.def
+*.ckf

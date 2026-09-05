@@ -55,20 +55,20 @@
                                     <hr class="dropdown-divider">
                                 </li>
                                 <li><a class="dropdown-item" href="#" id="menu-duplicate">Duplicate Text <span
-                                            class="text-muted small float-end">Ctrl-D</span></a></li>
+                                            class="text-muted small float-end">Ctrl-Alt-D</span></a></li>
                                 <li><a class="dropdown-item" href="#" id="menu-add-trailer">Add Trailer... <span
                                             class="text-muted small float-end">Alt-T</span></a></li>
                                 <li><a class="dropdown-item" href="#" id="menu-relabel">Relabel Atoms <span
-                                            class="text-muted small float-end">Ctrl-L</span></a></li>
+                                            class="text-muted small float-end">Ctrl-Shift-L</span></a></li>
                                 <li><a class="dropdown-item" href="#" id="menu-cluster">Cluster Molecules & Relabel <span
                                             class="text-muted small float-end">Alt-M</span></a></li>
                                 <li>
                                     <hr class="dropdown-divider">
                                 </li>
                                 <li><a class="dropdown-item" href="#" id="menu-kill-q">Kill Q Peaks <span
-                                            class="text-muted small float-end">Ctrl-K</span></a></li>
+                                            class="text-muted small float-end">Ctrl-Alt-K</span></a></li>
                                 <li><a class="dropdown-item" href="#" id="menu-kill-h">Kill H Atoms <span
-                                            class="text-muted small float-end">Ctrl-Shift-K</span></a></li>
+                                            class="text-muted small float-end">Ctrl-Alt-H</span></a></li>
                                 <li><a class="dropdown-item" href="#" id="menu-kill-htab">Kill HTAB</a></li>
                                 <li><a class="dropdown-item" href="#" id="menu-kill-mol">Kill MOLE</a></li>
                                 <li><a class="dropdown-item" href="#" id="menu-kill-resi">Kill RESI</a></li>
@@ -117,8 +117,9 @@
                                     <hr class="dropdown-divider">
                                 </li>
                                 <li><a class="dropdown-item" href="#" id="menu-isotropic">Isotropic <span
-                                            class="text-muted small float-end">Ctrl-I</span></a></li>
+                                            class="text-muted small float-end">Ctrl-Alt-I</span></a></li>
                                 <li><a class="dropdown-item" href="#" id="menu-change-uiso">Change U(iso)</a></li>
+                                <li><a class="dropdown-item" href="#" id="menu-change-occ">Change Occupancy (sof)</a></li>
                                 <li>
                                     <hr class="dropdown-divider">
                                 </li>
@@ -130,11 +131,11 @@
                                 <li><a class="dropdown-item" href="#" id="menu-hfix">HFIX <span
                                             class="text-muted small float-end">Alt-H</span></a></li>
                                 <li><a class="dropdown-item" href="#" id="menu-autohfix">Auto HFIX (Carbons) <span
-                                            class="text-muted small float-end">Ctrl-H</span></a></li>
+                                            class="text-muted small float-end">Ctrl-Shift-H</span></a></li>
                                 <li><a class="dropdown-item" href="#" id="menu-sort">Sort Atoms <span
                                             class="text-muted small float-end">Alt-S</span></a></li>
                                 <li><a class="dropdown-item" href="#" id="menu-duplicates">Find Duplicate Labels <span
-                                            class="text-muted small float-end">Alt-D</span></a></li>
+                                            class="text-muted small float-end">Ctrl-Alt-L</span></a></li>
                                 <li><a class="dropdown-item" href="#" id="menu-q-to-c">Assign Q as Carbons</a></li>
                             </ul>
                         </li>
@@ -147,6 +148,11 @@
                                 <li><a class="dropdown-item" href="#" id="menu-xrdspace">Space Group (xrdspace)...</a></li>
                                 <li><a class="dropdown-item" href="#" id="menu-xrdspace-force">Force Space Group (xrdspace)...</a></li>
                                 <li><a class="dropdown-item" href="#" id="menu-rsr">Real Space Refinement</a></li>
+                                <li>
+                                    <hr class="dropdown-divider">
+                                </li>
+                                <li><a class="dropdown-item" href="#" id="menu-solve">Solve Structure &amp; Validate...</a></li>
+                                <li><a class="dropdown-item" href="#" id="menu-validate">Validate (CheckCIF-style)...</a></li>
                             </ul>
                         </li>
                         <li class="nav-item dropdown">
@@ -162,6 +168,17 @@
                             <ul class="dropdown-menu">
                                 <li><a class="dropdown-item" href="#" id="menu-publish-cif">Create Publish CIF...</a></li>
                                 <li><a class="dropdown-item" href="#" id="menu-report-docx">Crystallographic Report (DOCX)...</a></li>
+                            </ul>
+                        </li>
+                        <li class="nav-item dropdown">
+                            <a class="nav-link dropdown-toggle" href="#" id="aiDropdown" role="button"
+                                data-bs-toggle="dropdown">AI</a>
+                            <ul class="dropdown-menu" style="min-width: 250px;">
+                                <li><a class="dropdown-item" href="#" id="menu-ai-analyze">Analyze Structure...</a></li>
+                                <li>
+                                    <hr class="dropdown-divider">
+                                </li>
+                                <li><a class="dropdown-item" href="#" id="menu-ai-settings">AI Settings...</a></li>
                             </ul>
                         </li>
                         <li class="nav-item dropdown">
@@ -207,7 +224,7 @@
             <button class="btn btn-sm btn-outline-secondary square-btn fw-bold" id="tool-kill-h" title="Kill H Atoms"
                 style="color: #0dcaf0;">H</button>
             <div class="vr mx-1 bg-secondary"></div>
-            <button class="btn btn-sm btn-outline-secondary square-btn" id="tool-relabel" title="Relabel Atoms (Ctrl-L)"><i
+            <button class="btn btn-sm btn-outline-secondary square-btn" id="tool-relabel" title="Relabel Atoms (Ctrl-Shift-L)"><i
                     class="fa-solid fa-pen-to-square"></i></button>
             <button class="btn btn-sm btn-outline-secondary square-btn" id="tool-cluster" title="Cluster Molecules & Relabel (Alt-M)"><i
                     class="fa-solid fa-cubes"></i></button>
@@ -317,10 +334,10 @@
                     <div id="res-editor" class="h-100 w-100"></div>
                 </div>
                 <!-- CIF Editor Pane -->
-                <div class="tab-pane fade h-100" id="content-cif" role="tabpanel">
+                <div class="tab-pane fade h-100 w-100" id="content-cif" role="tabpanel">
                     <div id="editor-cif" class="w-100 h-100"></div>
                 </div>
-                <div class="tab-pane fade h-100" id="content-lst" role="tabpanel">
+                <div class="tab-pane fade h-100 w-100" id="content-lst" role="tabpanel">
                     <div id="editor-lst" class="w-100 h-100"></div>
                 </div>
             </div>
@@ -992,6 +1009,266 @@
                     <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
                     <button type="button" class="btn btn-outline-primary" id="btn-cluster-analyze">Analyze</button>
                     <button type="button" class="btn btn-primary" id="btn-cluster-apply" disabled>Apply Relabel</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- AI Settings Modal -->
+    <div class="modal fade" id="aiSettingsModal" tabindex="-1" aria-hidden="true">
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title">AI Settings</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                    <div class="row g-3">
+                        <div class="col-md-6">
+                            <label for="ai-provider" class="form-label">Provider</label>
+                            <select class="form-select" id="ai-provider"></select>
+                            <div class="form-text" id="ai-provider-hint"></div>
+                        </div>
+                        <div class="col-md-6">
+                            <label for="ai-model" class="form-label">Model</label>
+                            <input type="text" class="form-control" id="ai-model" placeholder="e.g. gpt-4o-mini">
+                            <div class="form-text">Model id as the provider expects it.</div>
+                        </div>
+                        <div class="col-md-8">
+                            <label for="ai-base-url" class="form-label">Base URL</label>
+                            <input type="text" class="form-control" id="ai-base-url"
+                                placeholder="https://api.openai.com/v1">
+                            <div class="form-text">An OpenAI-compatible <code>/chat/completions</code> endpoint base.</div>
+                        </div>
+                        <div class="col-md-4">
+                            <label for="ai-apikey" class="form-label">API key</label>
+                            <input type="password" class="form-control" id="ai-apikey"
+                                placeholder="sk-... (optional for local)">
+                            <div class="form-text">Stored only in this browser (localStorage).</div>
+                        </div>
+                        <div class="col-md-4">
+                            <label for="ai-temperature" class="form-label">Temperature</label>
+                            <input type="number" class="form-control" id="ai-temperature" value="0.3" step="0.1"
+                                min="0" max="2">
+                        </div>
+                        <div class="col-md-4">
+                            <label for="ai-max-tokens" class="form-label">Max tokens</label>
+                            <input type="number" class="form-control" id="ai-max-tokens" value="128000" step="1024"
+                                min="1024" max="200000">
+                            <div class="form-text">Output token budget (models support up to ~128K).</div>
+                        </div>
+                        <div class="col-md-4 d-flex align-items-end">
+                            <div class="form-check">
+                                <input class="form-check-input" type="checkbox" id="ai-include-lst" checked>
+                                <label class="form-check-label" for="ai-include-lst">Include refinement .lst</label>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="row g-3 mt-1 d-none" id="ai-deepseek-options">
+                        <div class="col-md-3">
+                            <div class="form-check mt-2">
+                                <input class="form-check-input" type="checkbox" id="ai-ds-thinking" checked>
+                                <label class="form-check-label" for="ai-ds-thinking">Thinking mode</label>
+                            </div>
+                        </div>
+                        <div class="col-md-3">
+                            <label for="ai-ds-effort" class="form-label">Effort</label>
+                            <select class="form-select" id="ai-ds-effort">
+                                <option value="low">low</option>
+                                <option value="high">high</option>
+                                <option value="max">max</option>
+                            </select>
+                        </div>
+                        <div class="col-md-6 d-flex align-items-end">
+                            <span class="text-muted small">DeepSeek V4 thinks before answering (streams
+                                <code>reasoning_content</code>). Disable for a direct answer.</span>
+                        </div>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                    <button type="button" class="btn btn-primary" id="btn-save-ai-settings">Save</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- AI Analysis Modal -->
+    <div class="modal fade" id="aiAnalysisModal" tabindex="-1" aria-hidden="true">
+        <div class="modal-dialog modal-xl">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title"><i class="fa-solid fa-robot me-2"></i>AI Structure Analysis</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                    <div class="alert alert-light border small py-2 d-flex justify-content-between flex-wrap" id="ai-context-summary">
+                        <span class="text-muted">Loading context...</span>
+                    </div>
+                    <div class="row g-2 mb-2">
+                        <div class="col-md-4">
+                            <label for="ai-prompt-type" class="form-label">Analysis type</label>
+                            <select class="form-select" id="ai-prompt-type"></select>
+                        </div>
+                        <div class="col-md-8">
+                            <label for="ai-question" class="form-label">Your instructions (optional)</label>
+                            <input type="text" class="form-control" id="ai-question"
+                                placeholder="Extra context or a specific question...">
+                        </div>
+                    </div>
+                    <div class="d-flex justify-content-end mb-2">
+                        <span class="text-muted small me-auto align-self-center" id="ai-stream-status"></span>
+                        <button type="button" class="btn btn-sm btn-outline-primary me-1" id="btn-ai-go">Analyze</button>
+                        <button type="button" class="btn btn-sm btn-outline-secondary me-1 d-none"
+                            id="btn-ai-stop">Stop</button>
+                        <button type="button" class="btn btn-sm btn-outline-secondary" id="btn-ai-copy"
+                            title="Copy result">Copy</button>
+                    </div>
+                    <div class="small text-muted mb-1 d-flex gap-3" id="ai-progress-row">
+                        <span id="ai-reasoning-count" class="d-none"><i class="fa-solid fa-spinner fa-spin"></i>
+                            thinking…</span>
+                    </div>
+                    <div class="bg-dark rounded p-2" style="height: 340px; overflow-y: auto;">
+                        <pre id="ai-output"
+                            class="text-light mb-0 p-2" style="white-space: pre-wrap; word-break: break-word; font-size: 0.82rem; min-height: 100%;">Analysis output will appear here.</pre>
+                    </div>
+                    <div class="border-top pt-2 mt-2">
+                        <a class="small text-muted" data-bs-toggle="collapse" href="#ai-reasoning-panel" role="button"
+                            aria-expanded="false">Show reasoning / chain-of-thought</a>
+                        <div class="collapse" id="ai-reasoning-panel">
+                            <pre id="ai-reasoning"
+                                class="border rounded bg-light p-2 mt-2 mb-0 text-muted" style="white-space: pre-wrap; word-break: break-word; font-size: 0.75rem; max-height: 180px; overflow-y: auto;">(none)</pre>
+                        </div>
+                    </div>
+                    <div class="border-top pt-2 mt-2 d-flex align-items-center gap-2 flex-wrap">
+                        <span class="text-muted small me-1">AI session log:</span>
+                        <select class="form-select form-select-sm" id="ai-log-sessions" style="width: 320px;">
+                            <option value="">(select a past session to view)</option>
+                        </select>
+                        <button type="button" class="btn btn-sm btn-outline-secondary" id="btn-ai-load-log"
+                            title="Load the selected session log into the output/log panes">Load</button>
+                        <button type="button" class="btn btn-sm btn-outline-secondary" id="btn-ai-clear-log">Clear</button>
+                        <span class="flex-grow-1"></span>
+                        <button type="button" class="btn btn-sm btn-outline-success" id="btn-ai-save-log"
+                            title="Download this session's full log (prompt, tool calls, results, errors) as a text file">
+                            <i class="fa-solid fa-floppy-disk me-1"></i>Save log (.txt)</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Solve & Validate Modal -->
+    <div class="modal fade" id="solveModal" tabindex="-1" aria-hidden="true">
+        <div class="modal-dialog modal-xl">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="solve-modal-title"><i class="fa-solid fa-wand-magic-sparkles me-2"></i>Solve Structure &amp; Validate</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                    <div class="row g-2 align-items-end mb-2">
+                        <div class="col-md-3">
+                            <label for="solve-context" class="form-label small">Structure file</label>
+                            <div class="form-control form-control-sm text-truncate" id="solve-context">(none loaded)</div>
+                        </div>
+                        <div class="col-md-2">
+                            <label for="solve-program" class="form-label small">Solution program</label>
+                            <select class="form-select form-select-sm" id="solve-program">
+                                <option value="auto">auto (SHELXT→SHELXS)</option>
+                                <option value="shelxt">SHELXT</option>
+                                <option value="shelxs">SHELXS</option>
+                            </select>
+                        </div>
+                        <div class="col-md-2">
+                            <label for="solve-cycles" class="form-label small">WGHT cycles</label>
+                            <input type="number" class="form-control form-control-sm" id="solve-cycles" value="3" min="1" max="20">
+                        </div>
+                        <div class="col-md-2">
+                            <label class="form-label small d-block">&nbsp;</label>
+                            <div class="form-check form-switch">
+                                <input class="form-check-input" type="checkbox" id="solve-do-refine" checked>
+                                <label class="form-check-label small" for="solve-do-refine">Refine</label>
+                            </div>
+                        </div>
+                        <div class="col-md-2">
+                            <label class="form-label small d-block">&nbsp;</label>
+                            <div class="form-check form-switch">
+                                <input class="form-check-input" type="checkbox" id="solve-do-platon">
+                                <label class="form-check-label small" for="solve-do-platon">PLATON</label>
+                            </div>
+                        </div>
+                        <div class="col-md-1 text-end">
+                            <button class="btn btn-sm btn-primary" id="btn-solve-run">Run</button>
+                        </div>
+                    </div>
+                    <div class="small text-muted mb-2">Automated pipeline: SHELXT/SHELXS solution (if no model) →
+                        SHELXL refinement → disorder/twinning detection + CheckCIF-style validation. Files are saved to
+                        <code>projects/&lt;name&gt;</code> on the server.</div>
+                    <ul class="nav nav-tabs small" id="solveTabs" role="tablist">
+                        <li class="nav-item" role="presentation">
+                            <button class="nav-link active" id="solve-log-tab" data-bs-toggle="tab" data-bs-target="#solve-log"
+                                type="button" role="tab">Log</button>
+                        </li>
+                        <li class="nav-item" role="presentation">
+                            <button class="nav-link" id="solve-report-tab" data-bs-toggle="tab" data-bs-target="#solve-report"
+                                type="button" role="tab">Validation report</button>
+                        </li>
+                        <li class="nav-item" role="presentation">
+                            <button class="nav-link" id="solve-platon-tab" data-bs-toggle="tab" data-bs-target="#solve-platon"
+                                type="button" role="tab">PLATON</button>
+                        </li>
+                        <li class="nav-item" role="presentation">
+                            <button class="nav-link" id="solve-res-tab" data-bs-toggle="tab" data-bs-target="#solve-res"
+                                type="button" role="tab">Refined .res</button>
+                        </li>
+                    </ul>
+                    <div class="tab-content border border-top-0 rounded-bottom" style="height: 420px;">
+                        <div class="tab-pane fade show active h-100 p-2" id="solve-log" role="tabpanel" style="overflow:auto;">
+                            <pre id="solve-log-text" class="mb-0 small" style="white-space: pre-wrap;">Click Run to start the pipeline.</pre>
+                        </div>
+                        <div class="tab-pane fade h-100 p-2" id="solve-report" role="tabpanel" style="overflow:auto;">
+                            <pre id="solve-report-text" class="mb-0 small" style="white-space: pre-wrap;">(no report yet)</pre>
+                        </div>
+                        <div class="tab-pane fade h-100 p-2" id="solve-platon" role="tabpanel" style="overflow:auto;">
+                            <pre id="solve-platon-text" class="mb-0 small" style="white-space: pre-wrap;">(PLATON not run)</pre>
+                        </div>
+                        <div class="tab-pane fade h-100 p-2" id="solve-res" role="tabpanel" style="overflow:auto;">
+                            <pre id="solve-res-text" class="mb-0 small" style="white-space: pre-wrap;">(no .res yet)</pre>
+                        </div>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <span class="text-muted small me-auto" id="solve-status"></span>
+                    <button type="button" class="btn btn-outline-secondary" id="btn-solve-copy-report">Copy report</button>
+                    <button type="button" class="btn btn-outline-primary" id="btn-solve-load-res">Load .res in editor</button>
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Change Occupancy Modal -->
+    <div class="modal fade" id="occupancyModal" tabindex="-1" aria-hidden="true">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title">Change Occupancy (sof)</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                    <div class="mb-3">
+                        <label for="occ-value-input" class="form-label">New occupancy value</label>
+                        <input type="number" class="form-control" id="occ-value-input" value="1.0" step="any" min="0"
+                            autofocus>
+                        <div class="form-text">Sets the SOF field (5th numeric column) of atom lines. Values above 10
+                            (e.g. 11.0) refine the occupancy via the corresponding FVAR free variable.</div>
+                    </div>
+                    <div class="form-text text-muted" id="occ-scope-hint"></div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                    <button type="button" class="btn btn-primary" id="btn-perform-occupancy">Change</button>
                 </div>
             </div>
         </div>

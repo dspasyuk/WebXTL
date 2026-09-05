@@ -40,6 +40,13 @@ WebXTL is a powerful, modern web application designed for crystallographers. It 
 ### 🛠️ Crystallographic Tools
 WebXTL includes a suite of specialized tools for structure refinement:
 
+**Automated Solve & Validation (Calculate menu)**
+-   **Solve Structure & Validate…**: one-click pipeline — if the `.ins`/`.res` has no atom model yet it runs **SHELXT** (falling back to **SHELXS**) for structure solution, then **SHELXL** refinement (optionally with WGHT optimisation cycles), then a **structure validation report**.
+-   **Validate (CheckCIF-style)…**: runs the same report on the current model + refinement log without modifying files.
+-   The report combines built-in **disorder detectors** (PART blocks, free-variable occupancies, large/elongated displacement parameters, short non-bonded contacts), **twinning detectors** (TWIN/BASF, Flack ≈ 0.5 inversion-twin flag), and **CheckCIF-style alerts** (levels A/B/C/G: R1, wR2, GooF, residual peaks/holes, cell-content consistency, duplicates, Q-peaks, missing H, ADP sanity).
+-   **PLATON check** (optional): when a `platon` executable is runnable on the server it is invoked best-effort and its output is shown; when it cannot run the built-in report still works.
+-   **PLATON in the Programs menu**: registered like the SHELX suite (`programs → PLATON`). Because PLATON is interactive software, the entry expands into a submenu of single-purpose actions — **CheckCIF**, **ADDSYM**, **SQUEEZE**, **TwinRotMat** (twin-rotation search) — each feeding PLATON the matching instruction on stdin, copying any needed `.fcf` into the project, and returning stdout plus written report files in the results dialog.-   The refined `.res` can be loaded straight back into the editor. Results are persisted under `projects/<name>`. (`POST /solve-structure`, `POST /validate-structure`, `GET /solve-info`).
+
 **Atom Management**
 -   **Kill Q Peaks**: Instantly remove Q-peaks (Ctrl-K).
 -   **Kill H Atoms**: Remove Hydrogen atoms (Ctrl-Shift-K).
@@ -50,10 +57,29 @@ WebXTL includes a suite of specialized tools for structure refinement:
 **Structure Options**
 -   **HFIX / Auto HFIX**: Add Hydrogen fixation instructions manually or automatically for Carbons (Ctrl-H).
 -   **Isotropic / U(iso)**: Convert atoms to isotropic or change U(iso) values (Ctrl-I).
+-   **Change Occupancy (sof)**: Set the site-occupancy factor of atom lines — applied only to the atoms currently selected in the editor (Options → Change Occupancy).
 -   **Formula**: Calculate and correct molecular formula based on atom counts.
 -   **Omit Error**: Remove atoms with ESD error flags.
 -   **Calculate DISP**: Compute dispersion corrections.
 -   **Assign Q as C**: Quickly convert Q-peaks to Carbon atoms.
+
+### 🤖 AI Data Analysis
+-   **In-app AI assistant** (menu **AI → Analyze Structure**): analyze the loaded structure plus the last refinement `.lst` with an LLM. Multiple analysis presets (review, disorder, refinement results, data quality, free-form) ship with crystallographic **system prompts**.
+-   **Agentic "Full structure solution"**: the *Full structure solution* preset runs in **agent mode** — the model is given real tools and actually *performs* the work instead of only advising: it inspects the workspace, runs the space-group analysis (xrdspace), runs SHELXT/SHELXS/SHELXL on the server, applies corrected `.ins`/`.res` into the editor, and finishes with the CheckCIF-style validation. Tool execution requires an OpenAI-compatible provider (DeepSeek/OpenAI/Qwen/OpenRouter); Anthropic falls back to advice.
+-   **Bring your own model**: point WebXTL at OpenAI, OpenRouter, a local **Ollama**/LM Studio instance, or any OpenAI-compatible endpoint. Requests are made **directly from the browser** to the provider you configure (AI → AI Settings); the API key is kept in your browser's `localStorage`.
+-   Streaming responses, stop/copy, a live context summary (cell, composition, atom count, `.lst` size) and a tool/step log shown while the agent works.
+-   **AI session logs**: every analysis run is captured into a session log (prompt, provider/model, every model message, every tool call with full arguments & results, errors, final answer and the last refinement statistics). The AI dialog has a **"Save log (.txt)"** button to download the log, plus a session dropdown to **load/clear past sessions** (persisted in browser `localStorage`) so you can review exactly what the model did and fix issues afterwards.
+
+### 🔌 MCP Server (AI tool access)
+The repo ships a **Model Context Protocol** server (`mcp/mcp-server.js`) so an external AI assistant (Claude Code, opencode, Cursor, ...) can read, edit and refine structures through WebXTL:
+
+```bash
+# WebXTL backend must be running on http://localhost:3000 (npm run server / dev)
+node mcp/mcp-server.js
+# or: npm run mcp        (override backend with: WEBXTL_URL=http://host:3000 npm run mcp)
+```
+
+Register it in your MCP client as a *stdio* server with the command above. Exposed tools include: list/read/save projects & files, get a parsed structure summary, edit occupancy / U(iso) / make isotropic / kill Q / kill H / relabel / find duplicates, list available programs, run SHELXL refinement and any external SHELX program, and summarize `.lst` results.
 
 ### ⚙️ Refinement Integration
 -   **Refine Structure**: Trigger refinement processes directly from the toolbar (requires backend configuration).
@@ -124,6 +150,9 @@ WebXTL is powered by a robust Node.js/Express backend that handles heavy lifting
 -   `/programs`: List the external crystallography programs available on the server.
 -   `/run/:program`: Run an external program (e.g. `shelxl`, `shelxt`, `shelxd`) on uploaded files.
 -   `/xrdspace/analyze`: Built-in xrdspace space-group determination on an uploaded HKL file (XDS_ASCII or SHELX format).
+-   `/solve-structure`: Full pipeline — structure solution (SHELXT/SHELXS) if no model, SHELXL refinement and a disorder/twinning + CheckCIF-style validation report (optional PLATON).
+-   `/validate-structure`: Validation report (disorder/twinning/CheckCIF-style) for an uploaded `.res` model + optional `.lst`.
+-   `/solve-info`: Reports which solution programs / PLATON are available on the server.
 -   `/refine`: Upload `.ins` and `.hkl` files to trigger a `shelxl` refinement job. Supports a `mode: 'weight'` option that optimizes the WGHT instruction over several cycles.
 
 ## Installation & Development
@@ -166,6 +195,7 @@ WebXTL is powered by a robust Node.js/Express backend that handles heavy lifting
 -   **Code Editing**: Ace Editor
 -   **Layout**: Split-Grid (CSS Grid compatible)
 -   **Backend**: Node.js / Express
+-   **AI & MCP**: OpenAI-compatible providers (browser) and `@modelcontextprotocol/sdk` (stdio server)
 -   **Document Generation**: `docx` (report generation)
 
 ## License

@@ -23,6 +23,8 @@ import { DensityRenderer } from './js/viewer/DensityRenderer.js';
 import { RealSpaceRefiner } from './js/compute/RealSpaceRefiner.js';
 import { MoleculeCluster } from './js/compute/MoleculeCluster.js';
 import { FRAGMENTS } from './js/compute/FragmentLibrary.js';
+import { AI_PROVIDERS, DEFAULT_AI_SETTINGS, aiSettingsFromProvider, aiChat, aiChatAgent } from './js/ai/client.js';
+import { AI_PROMPTS } from './js/ai/prompts.js';
 import './js/ace/mode-cif.js';
 import './js/ace/mode-shelx.js';
 
@@ -145,7 +147,12 @@ class WMOLApp {
                 }
             },
             selectionOrder: [], // Track order of selected rows
-            lastStructureTabKey: null // Most recently shown structure file tab (.ins/.res/.cif)
+            lastStructureTabKey: null, // Most recently shown structure file tab (.ins/.res/.cif)
+            aiSettings: { ...DEFAULT_AI_SETTINGS },
+            aiRunning: false,
+            aiAbortController: null,
+            aiLog: null,            // { id, startedAt, meta, lines: [] } current session log
+            aiLogs: []              // persisted past session logs
         };
 
         // Bind methods
@@ -186,6 +193,1161 @@ class WMOLApp {
             localStorage.setItem('webxtl_preferences', JSON.stringify(this.state.preferences));
         } catch (e) {
             console.warn('Failed to save preferences:', e.message);
+        }
+    }
+
+    loadAISettings() {
+        try {
+            const raw = localStorage.getItem('webxtl_ai_settings');
+            if (raw) this.state.aiSettings = { ...DEFAULT_AI_SETTINGS, ...JSON.parse(raw) };
+        } catch (e) {
+            console.warn('Failed to load AI settings:', e.message);
+        }
+    }
+
+    saveAISettings(settings) {
+        this.state.aiSettings = { ...DEFAULT_AI_SETTINGS, ...(settings || this.state.aiSettings) };
+        try {
+            localStorage.setItem('webxtl_ai_settings', JSON.stringify(this.state.aiSettings));
+        } catch (e) {
+            console.warn('Failed to save AI settings:', e.message);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // AI Data Analysis
+    // -----------------------------------------------------------------------
+
+    setupAI() {
+        // Menu wiring
+        const menuAnalyze = document.getElementById('menu-ai-analyze');
+        if (menuAnalyze) {
+            menuAnalyze.addEventListener('click', (e) => {
+                e.preventDefault();
+                this.openAIAnalysis();
+            });
+        }
+        const menuSettings = document.getElementById('menu-ai-settings');
+        if (menuSettings) {
+            menuSettings.addEventListener('click', (e) => {
+                e.preventDefault();
+                this.openAISettings();
+            });
+        }
+
+        // Populate provider + prompt-type selects once.
+        const providerSel = document.getElementById('ai-provider');
+        if (providerSel) {
+            providerSel.innerHTML = Object.entries(AI_PROVIDERS)
+                .map(([id, p]) => `<option value="${id}">${p.label}</option>`).join('');
+            providerSel.addEventListener('change', () => {
+                const s = aiSettingsFromProvider(providerSel.value);
+                const baseEl = document.getElementById('ai-base-url');
+                const modelEl = document.getElementById('ai-model');
+                const hint = document.getElementById('ai-provider-hint');
+                if (baseEl) baseEl.value = s.baseUrl;
+                if (modelEl) modelEl.value = s.model;
+                if (hint) {
+                    hint.textContent = AI_PROVIDERS[providerSel.value]
+                        ? AI_PROVIDERS[providerSel.value].hint : '';
+                }
+            });
+        }
+        const promptSel = document.getElementById('ai-prompt-type');
+        if (promptSel) {
+            promptSel.innerHTML = Object.entries(AI_PROMPTS)
+                .map(([id, p]) => `<option value="${id}">${p.label}</option>`).join('');
+            promptSel.addEventListener('change', () => {
+                const q = document.getElementById('ai-question');
+                if (q) q.value = (AI_PROMPTS[promptSel.value] || AI_PROMPTS.freeform).user;
+            });
+        }
+
+        // Settings modal save
+        const btnSaveSettings = document.getElementById('btn-save-ai-settings');
+        if (btnSaveSettings) {
+            btnSaveSettings.addEventListener('click', () => {
+                const provider = (document.getElementById('ai-provider') || {}).value || 'custom';
+                const provDef = AI_PROVIDERS[provider];
+                const settings = {
+                    provider: provider,
+                    kind: provDef ? (provDef.kind || 'openai') : 'openai',
+                    baseUrl: (document.getElementById('ai-base-url') || {}).value || '',
+                    model: (document.getElementById('ai-model') || {}).value || '',
+                    apiKey: (document.getElementById('ai-apikey') || {}).value || '',
+                    temperature: parseFloat((document.getElementById('ai-temperature') || {}).value) || 0.3,
+                    maxTokens: parseInt((document.getElementById('ai-max-tokens') || {}).value, 10) || 128000,
+                    includeLst: !!document.getElementById('ai-include-lst')?.checked,
+                    deepseekThinking: !!document.getElementById('ai-ds-thinking')?.checked,
+                    deepseekEffort: (document.getElementById('ai-ds-effort') || {}).value || 'low'
+                };
+                this.saveAISettings(settings);
+                const modalEl = document.getElementById('aiSettingsModal');
+                const modal = bootstrap.Modal.getInstance(modalEl);
+                if (modal) modal.hide();
+            });
+        }
+
+        // Show/hide the DeepSeek-only options whenever the provider changes.
+        const providerSel2 = document.getElementById('ai-provider');
+        const updateDeepseekOptions = () => {
+            const wrap = document.getElementById('ai-deepseek-options');
+            if (wrap) wrap.classList.toggle('d-none', providerSel2 ? providerSel2.value !== 'deepseek' : true);
+        };
+        if (providerSel2) providerSel2.addEventListener('change', updateDeepseekOptions);
+        this._updateDeepseekOptions = updateDeepseekOptions;
+
+        // Analysis actions
+        const btnGo = document.getElementById('btn-ai-go');
+        if (btnGo) btnGo.addEventListener('click', () => this.runAIAnalysis());
+        const btnStop = document.getElementById('btn-ai-stop');
+        if (btnStop) btnStop.addEventListener('click', () => this.stopAIAnalysis());
+        const btnCopy = document.getElementById('btn-ai-copy');
+        if (btnCopy) btnCopy.addEventListener('click', () => {
+            const out = document.getElementById('ai-output');
+            if (out && out.textContent && navigator.clipboard) {
+                navigator.clipboard.writeText(out.textContent);
+            }
+        });
+
+        // Session log buttons
+        const btnSaveLog = document.getElementById('btn-ai-save-log');
+        if (btnSaveLog) btnSaveLog.addEventListener('click', () => this.saveCurrentAILog());
+        const btnLoadLog = document.getElementById('btn-ai-load-log');
+        if (btnLoadLog) btnLoadLog.addEventListener('click', () => this.loadSelectedAILog());
+        const btnClearLog = document.getElementById('btn-ai-clear-log');
+        if (btnClearLog) btnClearLog.addEventListener('click', () => this.clearSelectedAILog());
+
+        // Load persisted settings + past logs
+        this.loadAISettings();
+        this.loadAILogs();
+    }
+
+    openAISettings() {
+        const modalEl = document.getElementById('aiSettingsModal');
+        if (!modalEl) return;
+        const s = this.state.aiSettings || DEFAULT_AI_SETTINGS;
+        const setVal = (id, v) => { const el = document.getElementById(id); if (el) el.value = v; };
+        setVal('ai-provider', s.provider);
+        setVal('ai-base-url', s.baseUrl);
+        setVal('ai-model', s.model);
+        setVal('ai-apikey', s.apiKey || '');
+        setVal('ai-temperature', s.temperature);
+        setVal('ai-max-tokens', s.maxTokens);
+        setVal('ai-ds-effort', s.deepseekEffort || 'low');
+        const lst = document.getElementById('ai-include-lst');
+        if (lst) lst.checked = !!s.includeLst;
+        const dsThinking = document.getElementById('ai-ds-thinking');
+        if (dsThinking) dsThinking.checked = s.deepseekThinking !== false;
+        const hint = document.getElementById('ai-provider-hint');
+        if (hint) hint.textContent = AI_PROVIDERS[s.provider] ? AI_PROVIDERS[s.provider].hint : '';
+        if (typeof this._updateDeepseekOptions === 'function') this._updateDeepseekOptions();
+        const modal = new bootstrap.Modal(modalEl);
+        modal.show();
+    }
+
+    // Build the text/metadata context sent to the model.
+    buildAIContext() {
+        const info = { filename: null, type: null, structure: '', lstSnippet: '', atoms: 0, elements: {} };
+
+        const activeTab = this.state.lastStructureTabKey && this.state.fileTabs[this.state.lastStructureTabKey];
+        let structure = this.getStructureContent();
+        if (!structure) structure = this.state.loadedContent || '';
+        if (!structure && this.state.editors.res) structure = this.state.editors.res.getValue();
+        info.structure = structure;
+
+        if (activeTab) {
+            info.filename = activeTab.filename;
+            info.type = activeTab.type;
+        } else if (this.state.loadedFilename) {
+            info.filename = this.state.loadedFilename;
+            info.type = this.state.loadedType;
+        }
+
+        // Parsed atom / element summary
+        let parsed = this.state.parsedData;
+        if ((!parsed || !parsed.atoms) && structure && structure.trim()) {
+            try {
+                const type = (info.type === 'cif' || info.type === 'pdb') ? info.type : 'res';
+                parsed = this.state.parsers[type === 'pdb' ? 'pdb' : (type === 'cif' ? 'cif' : 'shelx')].parse(structure);
+            } catch (e) { /* ignore parse errors here */ }
+        }
+        if (parsed && parsed.atoms && parsed.atoms.length) {
+            info.atoms = parsed.atoms.length;
+            const counts = {};
+            parsed.atoms.forEach(a => { const k = (a.element || '?').toUpperCase(); counts[k] = (counts[k] || 0) + 1; });
+            info.elements = counts;
+        }
+
+        // Refinement .lst content (last SHELXL run) if requested and present.
+        const useLst = this.state.aiSettings ? this.state.aiSettings.includeLst !== false : true;
+        if (useLst && this.state.editors.lst) {
+            const lst = this.state.editors.lst.getValue() || '';
+            if (lst && lst.trim()) {
+                // Keep the most informative tail of the log (~last 30 KB) plus a header line.
+                const tail = lst.length > 30000 ? lst.slice(-30000) : lst;
+                info.lstSnippet = tail;
+            }
+        }
+
+        // HKL header (first ~30 lines) so "structure solution" analysis can see
+        // the raw data / cell before a model exists.
+        info.hklSnippet = '';
+        if (this.state.hklContent) {
+            const hklLines = this.state.hklContent.split(/\r?\n/);
+            info.hklName = this.state.hklName || 'data.hkl';
+            info.hklSnippet = hklLines.slice(0, 30).join('\n');
+            if (hklLines.length > 30) info.hklSnippet += `\n... (${hklLines.length} HKL lines total)`;
+        }
+
+        // Space-group analysis .ins generated by xrdspace (template for SHELXT).
+        info.xrdspaceIns = '';
+        if (this.state.xrdspaceIns && this.state.xrdspaceIns.content) {
+            info.xrdspaceIns = this.state.xrdspaceIns.content;
+        }
+
+        // Cell from the current parsed data (or generated .ins) as text.
+        info.cellSummary = '';
+        if (parsed && parsed.cell) {
+            const c = parsed.cell;
+            info.cellSummary = `a=${c.a} b=${c.b} c=${c.c} Å, α=${c.alpha} β=${c.beta} γ=${c.gamma}°`;
+        } else {
+            const m = (info.xrdspaceIns || info.structure || '').match(/CELL\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)/i);
+            if (m) {
+                info.cellSummary = `a=${m[2]} b=${m[3]} c=${m[4]} Å, α=${m[5]} β=${m[6]} γ=${m[7]}° (λ=${m[1]})`;
+            }
+        }
+        return info;
+    }
+
+    openAIAnalysis() {
+        const modalEl = document.getElementById('aiAnalysisModal');
+        if (!modalEl) return;
+        const promptSel = document.getElementById('ai-prompt-type');
+        if (promptSel && promptSel.options.length) promptSel.value = 'review';
+        const q = document.getElementById('ai-question');
+        if (q) q.value = AI_PROMPTS.review.user;
+        const out = document.getElementById('ai-output');
+        if (out) out.textContent = 'Analysis output will appear here.';
+        this.updateAIContextSummary();
+
+        const modal = new bootstrap.Modal(modalEl);
+        modal.show();
+    }
+
+    // -----------------------------------------------------------------------
+    // AI session logging (save / reload past sessions to debug runs)
+    // -----------------------------------------------------------------------
+
+    loadAILogs() {
+        try {
+            const raw = localStorage.getItem('webxtl_ai_logs');
+            if (raw) this.state.aiLogs = JSON.parse(raw);
+        } catch (e) {
+            this.state.aiLogs = [];
+        }
+        if (!Array.isArray(this.state.aiLogs)) this.state.aiLogs = [];
+        this.refreshAILogList();
+    }
+
+    persistAILogs() {
+        try {
+            localStorage.setItem('webxtl_ai_logs', JSON.stringify(this.state.aiLogs.slice(-40)));
+        } catch (e) { /* storage full - ignore */ }
+    }
+
+    // Start a fresh log for a new analysis run.
+    beginAILog(meta = {}) {
+        this.state.aiLog = {
+            id: Date.now(),
+            startedAt: new Date().toISOString(),
+            meta: { ...meta },
+            lines: []
+        };
+    }
+
+    aiLogLine(type, text) {
+        if (!this.state.aiLog) return;
+        const t = new Date().toISOString();
+        this.state.aiLog.lines.push({ t, type, text });
+    }
+
+    endAILog(status) {
+        if (!this.state.aiLog) return;
+        this.state.aiLog.endedAt = new Date().toISOString();
+        this.state.aiLog.status = status || 'ended';
+        this.state.aiLog.meta = this.state.aiLog.meta || {};
+        this.state.aiLog.meta.editorModel = this.state.loadedFilename || null;
+        this.state.aiLog.meta.lastRun = this.state.aiLastRun ? { ...this.state.aiLastRun } : null;
+        this.state.aiLog.meta.lstStats = this.lstStats();
+        // Keep the top-level answer text too so reloading restores the view.
+        const out = document.getElementById('ai-output');
+        if (out) this.state.aiLog.output = out.textContent;
+        const reasoning = document.getElementById('ai-reasoning');
+        if (reasoning) this.state.aiLog.reasoning = reasoning.textContent;
+
+        this.state.aiLogs.push(this.state.aiLog);
+        this.state.aiLog = null;
+        this.persistAILogs();
+        this.refreshAILogList();
+    }
+
+    refreshAILogList() {
+        const sel = document.getElementById('ai-log-sessions');
+        if (!sel) return;
+        const logs = this.state.aiLogs || [];
+        const current = sel.value;
+        sel.innerHTML = '<option value="">(select a past session to view)</option>';
+        // Newest first
+        const ordered = [...logs].reverse();
+        for (const log of ordered) {
+            const label = (log.meta && (log.meta.promptId || log.meta.label))
+                || 'analysis';
+            const when = log.startedAt ? new Date(log.startedAt).toLocaleString() : '';
+            const err = log.status === 'error' ? ' [ERROR]' : '';
+            const opt = document.createElement('option');
+            opt.value = String(log.id);
+            opt.textContent = `${when} — ${label} — ${(log.lines || []).length} events${err}`;
+            sel.appendChild(opt);
+        }
+        if (current && [...logs].some(l => String(l.id) === current)) sel.value = current;
+    }
+
+    // Human-readable dump of a log object.
+    renderAILog(log) {
+        const L = [];
+        const m = log.meta || {};
+        L.push('=== WebXTL AI SESSION LOG ===');
+        L.push(`Started : ${log.startedAt || ''}`);
+        if (log.endedAt) L.push(`Ended   : ${log.endedAt}`);
+        if (log.status) L.push(`Status  : ${log.status}`);
+        if (m.promptId) L.push(`Prompt  : ${m.promptId}`);
+        if (m.question) L.push(`Question: ${m.question}`);
+        if (m.settings) {
+            L.push(`Provider: ${m.settings.provider || '?'}  model: ${m.settings.model || '?'}  base: ${m.settings.baseUrl || '?'}`);
+        }
+        L.push('');
+        for (const ln of log.lines || []) {
+            L.push(`[${ln.t || ''}] ${ln.type.toUpperCase()}:`);
+            L.push(ln.text);
+            L.push('');
+        }
+        if (log.output != null) {
+            L.push('--- FINAL OUTPUT ---');
+            L.push(log.output);
+            L.push('');
+        }
+        if (m.lastRun) {
+            L.push('--- LAST SERVER RUN ---');
+            L.push(JSON.stringify(m.lastRun, null, 2));
+            L.push('');
+        }
+        if (m.lstStats) {
+            L.push(`--- REFINEMENT STATS --- ${m.lstStats}`);
+        }
+        return L.join('\n');
+    }
+
+    saveCurrentAILog() {
+        // Save the currently visible session (either live `state.aiLog` or the
+        // last persisted one / last completed run).
+        let log = this.state.aiLog;
+        if (!log && this.state.aiLogs.length) log = this.state.aiLogs[this.state.aiLogs.length - 1];
+        if (!log) {
+            alert('Nothing to save yet — run an analysis first.');
+            return;
+        }
+        const text = this.renderAILog(log);
+        const stamp = (log.startedAt || Date.now()).toString().replace(/[:.]/g, '-');
+        const name = (log.meta && (log.meta.promptId || 'ai')) || 'ai';
+        this.downloadText(text, `ai-log_${name}_${stamp}.txt`);
+    }
+
+    loadSelectedAILog() {
+        const sel = document.getElementById('ai-log-sessions');
+        const logs = this.state.aiLogs || [];
+        const log = logs.find(l => String(l.id) === sel.value);
+        if (!log) return;
+        const out = document.getElementById('ai-output');
+        const reasoning = document.getElementById('ai-reasoning');
+        if (out) out.textContent = log.output != null ? log.output : '(no output captured)';
+        if (reasoning) {
+            reasoning.textContent = (log.reasoning && log.reasoning.trim())
+                ? log.reasoning : this.renderAILog(log);
+            reasoning.scrollTop = reasoning.scrollHeight;
+        }
+        const status = document.getElementById('ai-stream-status');
+        if (status) status.textContent = `Loaded session ${new Date(log.startedAt).toLocaleString()} — status: ${log.status || 'ended'}`;
+        const count = document.getElementById('ai-reasoning-count');
+        if (count) count.classList.remove('d-none');
+    }
+
+    clearSelectedAILog() {
+        const sel = document.getElementById('ai-log-sessions');
+        if (!sel.value) return;
+        const id = sel.value;
+        this.state.aiLogs = (this.state.aiLogs || []).filter(l => String(l.id) !== id);
+        this.persistAILogs();
+        this.refreshAILogList();
+        const status = document.getElementById('ai-stream-status');
+        if (status) status.textContent = 'Session log cleared.';
+    }
+
+    updateAIContextSummary() {
+        const el = document.getElementById('ai-context-summary');
+        if (!el) return;
+        const info = this.buildAIContext();
+        const parts = [];
+        if (info.filename) parts.push(`<b>${info.filename}</b>`);
+        if (info.type) parts.push(`<code>${info.type}</code>`);
+        if (info.atoms) parts.push(`${info.atoms} atoms`);
+        if (Object.keys(info.elements).length) {
+            const comp = Object.entries(info.elements)
+                .map(([el, n]) => `${el}${n}`).join(' ');
+            parts.push(`<span title="${comp}">composition ${comp}</span>`);
+        }
+        if (info.cellSummary) parts.push(`<span title="${info.cellSummary}">cell ${info.cellSummary.length > 40 ? info.cellSummary.slice(0, 40) + '…' : info.cellSummary}</span>`);
+        if (info.structure) parts.push(`${(info.structure.length / 1024).toFixed(1)} KB structure`);
+        if (info.hklSnippet) parts.push(`${info.hklName || 'HKL'}`);
+        if (info.xrdspaceIns) parts.push('xrdspace .ins');
+        if (info.lstSnippet) parts.push(`${(info.lstSnippet.length / 1024).toFixed(1)} KB .lst`);
+        el.innerHTML = parts.length
+            ? `<span class="text-muted">Context:</span> ` + parts.join(' &nbsp;·&nbsp; ')
+            : 'No structure loaded. Load a .res/.ins/.cif first.';
+        el.setAttribute('title', '');
+    }
+
+    setAIButtons(running) {
+        const go = document.getElementById('btn-ai-go');
+        const stop = document.getElementById('btn-ai-stop');
+        if (go) go.disabled = running;
+        if (stop) stop.classList.toggle('d-none', !running);
+        this.state.aiRunning = running;
+    }
+
+    resetAIStreamUI() {
+        const out = document.getElementById('ai-output');
+        if (out) out.textContent = '';
+        const reasoning = document.getElementById('ai-reasoning');
+        if (reasoning) reasoning.textContent = '';
+        const count = document.getElementById('ai-reasoning-count');
+        if (count) count.classList.add('d-none');
+        const status = document.getElementById('ai-stream-status');
+        if (status) status.textContent = '';
+    }
+
+    updateAIStreamUI(deltaCount, reasoningCount) {
+        const status = document.getElementById('ai-stream-status');
+        if (!status) return;
+        const kb = ((deltaCount + reasoningCount) / 1024).toFixed(0);
+        status.textContent = deltaCount
+            ? `streaming… ${kb} KB`
+            : (reasoningCount ? 'thinking…' : '');
+        const count = document.getElementById('ai-reasoning-count');
+        if (count) count.classList.toggle('d-none', reasoningCount === 0);
+    }
+
+    async runAIAnalysis() {
+        if (this.state.aiRunning) return;
+
+        const settings = this.state.aiSettings || DEFAULT_AI_SETTINGS;
+        const promptSel = document.getElementById('ai-prompt-type');
+        const promptId = promptSel ? promptSel.value : 'freeform';
+        const promptDef = AI_PROMPTS[promptId] || AI_PROMPTS.freeform;
+
+        if (!settings.baseUrl || !settings.model) {
+            alert('AI is not configured yet. Open AI > AI Settings and pick a provider/model.');
+            return;
+        }
+
+        const info = this.buildAIContext();
+        const out = document.getElementById('ai-output');
+        if (!out) return;
+        const isSolveType = promptId === 'solve';
+        if (!info.structure && !info.lstSnippet && !(isSolveType && info.hklSnippet)) {
+            out.textContent = isSolveType
+                ? 'Full structure solution needs data to work from. Load an .hkl file (optionally run Calculate > Space Group) and/or a .res/.ins template.'
+                : 'No structure or refinement data to analyze. Load a .res/.ins/.cif file (and optionally refine it) first.';
+            return;
+        }
+        this.resetAIStreamUI();
+
+        // Begin session log (user-visible via the session-log row in the modal).
+        this.beginAILog({
+            promptId,
+            label: promptDef.label,
+            question: (document.getElementById('ai-question') || {}).value || '',
+            settings: { provider: settings.provider, model: settings.model, baseUrl: settings.baseUrl },
+            filename: info.filename || null
+        });
+
+        // Assemble user message with the actual data.
+        const userParts = [];
+        userParts.push(`Analysis requested: ${promptDef.label}`);
+        if (info.filename) userParts.push(`Structure file: ${info.filename}`);
+        if (info.cellSummary) userParts.push(`Cell: ${info.cellSummary}`);
+        if (info.structure) {
+            userParts.push(`\n===== SHELX STRUCTURE (${(info.structure.length / 1024).toFixed(1)} KB) =====\n${info.structure}`);
+        }
+        if (info.hklSnippet) {
+            userParts.push(`\n===== HKL DATA (${info.hklName}, header) =====\n${info.hklSnippet}`);
+        }
+        if (info.xrdspaceIns) {
+            userParts.push(`\n===== XRDSPACE-GENERATED .ins (template for SHELXT) =====\n${info.xrdspaceIns}`);
+        }
+        if (info.lstSnippet) {
+            userParts.push(`\n===== LAST SHELXL REFINEMENT LOG (.lst tail) =====\n${info.lstSnippet}`);
+        }
+        const question = document.getElementById('ai-question');
+        if (question && question.value && question.value.trim()) {
+            userParts.push(`\n===== USER INSTRUCTIONS =====\n${question.value.trim()}`);
+        }
+
+        const reasoningEl = document.getElementById('ai-reasoning');
+        const reasoningCountEl = document.getElementById('ai-reasoning-count');
+        const MAX_REASONING = 200000;
+        let reasoningCount = 0;
+        const toolLog = [];   // structured history of tool calls for the final report
+
+        const controller = new AbortController();
+        this.state.aiAbortController = controller;
+        this.setAIButtons(true);
+
+        const onStep = (ev) => {
+            if (ev.type === 'assistant' && ev.content) {
+                out.textContent += ev.content;
+                out.scrollTop = out.scrollHeight;
+                this.updateAIStreamUI(out.textContent.length, reasoningCount);
+                this.aiLogLine('assistant', ev.content);
+            } else if (ev.type === 'tool') {
+                // Show each executed tool compactly in the reasoning panel so the
+                // user can see the agent is actually acting.
+                reasoningCount += 1;
+                const summary = this.aiToolSummary(ev.result);
+                toolLog.push({ name: ev.name, summary });
+                if (reasoningEl) {
+                    if (reasoningEl.textContent === '(none)') reasoningEl.textContent = '';
+                    reasoningEl.textContent += `\n\n>>> TOOL: ${ev.name}\n${String(ev.result || '').slice(0, 500)}${String(ev.result || '').length > 500 ? '\n…' : ''}`;
+                    reasoningEl.scrollTop = reasoningEl.scrollHeight;
+                }
+                if (reasoningCountEl) reasoningCountEl.classList.remove('d-none');
+                this.updateAIStreamUI(out.textContent.length, reasoningCount);
+                // Full result recorded in the log (not truncated) for debugging.
+                this.aiLogLine('tool', `>>> TOOL: ${ev.name}\nArgs: ${JSON.stringify(ev.args || null)}\nResult:\n${String(ev.result || '')}`);
+            } else if (ev.type === 'error') {
+                this.aiLogLine('error', ev.error || String(ev));
+            }
+        };
+
+        const systemMsg = promptDef.system;
+        const userMsg = userParts.join('\n\n');
+        this.aiLogLine('system', `[SYSTEM PROMPT (${promptDef.label})]\n${systemMsg}`);
+        this.aiLogLine('user', `[USER REQUEST]\n${userMsg}`);
+
+        try {
+            if (isSolveType && settings.kind !== 'anthropic') {
+                // Agentic mode: the model can call tools to actually run the
+                // solution/refinement/validation rather than only advise.
+                const finalText = await this.runAIAgent(settings, systemMsg, userMsg, onStep);
+                if (finalText && !out.textContent.endsWith(finalText)) {
+                    out.textContent += finalText;
+                    out.scrollTop = out.scrollHeight;
+                    this.aiLogLine('assistant', finalText);
+                }
+                out.textContent += this.buildAgentSessionReport(toolLog);
+                out.scrollTop = out.scrollHeight;
+            } else if (isSolveType && settings.kind === 'anthropic') {
+                out.textContent = 'Anthropic does not support tool-calling in this build. Use DeepSeek/OpenAI/Qwen/OpenRouter for "Full structure solution", or ask a free-form question.';
+                // Still answer with advice so the user is not stuck.
+                out.textContent += '\n\n' + await aiChat(settings, [
+                    { role: 'system', content: systemMsg },
+                    { role: 'user', content: userMsg }
+                ], { signal: controller.signal });
+            } else {
+                await aiChat(settings, [
+                    { role: 'system', content: systemMsg },
+                    { role: 'user', content: userMsg }
+                ], {
+                    onDelta: (t) => {
+                        out.textContent += t;
+                        out.scrollTop = out.scrollHeight;
+                        this.updateAIStreamUI(out.textContent.length, reasoningCount);
+                        this.aiLogLine('assistant', t);
+                    },
+                    onReasoning: (t) => {
+                        reasoningCount += t.length;
+                        if (reasoningEl) {
+                            if (reasoningEl.textContent === '(none)') reasoningEl.textContent = '';
+                            if (reasoningCount <= MAX_REASONING) reasoningEl.textContent += t;
+                            reasoningEl.scrollTop = reasoningEl.scrollHeight;
+                        }
+                        if (reasoningCountEl) {
+                            reasoningCountEl.classList.remove('d-none');
+                        }
+                        this.updateAIStreamUI(out.textContent.length, reasoningCount);
+                        this.aiLogLine('reasoning', t);
+                    },
+                    signal: controller.signal
+                });
+            }
+        } catch (e) {
+            if (e && e.name === 'AbortError') {
+                out.textContent += '\n\n[stopped]';
+                this.aiLogLine('error', '[stopped by user]');
+            } else {
+                out.textContent = `Error: ${e.message}`;
+                this.aiLogLine('error', e.stack || e.message);
+            }
+        } finally {
+            this.state.aiAbortController = null;
+            this.setAIButtons(false);
+            const status = document.getElementById('ai-stream-status');
+            if (status) {
+                status.textContent = out.textContent && out.textContent.startsWith('Error')
+                    ? ''
+                    : (reasoningCount ? `done (${(out.textContent.length / 1024).toFixed(1)} KB answer, ${(reasoningCount / 1024).toFixed(1)} KB tool logs)` : 'done');
+            }
+            this.endAILog(out.textContent && out.textContent.startsWith('Error') ? 'error' : 'ended');
+        }
+    }
+
+    stopAIAnalysis() {
+        if (this.state.aiAbortController) this.state.aiAbortController.abort();
+    }
+
+    // -----------------------------------------------------------------------
+    // AI agent tools (function calling) — let the model actually act.
+    // -----------------------------------------------------------------------
+
+    get AITools() {
+        return [
+            {
+                name: 'webxtl_get_workspace',
+                description: 'Return the current WebXTL workspace state: the loaded SHELX structure text (.ins/.res), its filename, whether HKL data is loaded (plus its header), any xrdspace-generated .ins template, and the last SHELXL .lst statistics. Use this first to see what you are working with.',
+                parameters: { type: 'object', properties: {}, additionalProperties: false }
+            },
+            {
+                name: 'webxtl_apply_structure',
+                description: 'Write a SHELX .ins/.res text into the structure editor (replaces current model). Use it to set a corrected or generated structure before running programs. Provide the FULL file content.',
+                parameters: {
+                    type: 'object',
+                    properties: {
+                        content: { type: 'string', description: 'Complete SHELX .ins/.res text (TITL ... END).' }
+                    },
+                    required: ['content'],
+                    additionalProperties: false
+                }
+            },
+            {
+                name: 'webxtl_run_program',
+                description: 'Run a crystallography program on the server using the current structure (editor content) and loaded HKL: SHELXT/SHELXS/SHELXD (structure solution) or SHELXL (refinement). Returns stdout plus the produced .res/.lst/.fcf files (refined model etc).',
+                parameters: {
+                    type: 'object',
+                    properties: {
+                        program: { type: 'string', enum: ['shelxt', 'shelxs', 'shelxd', 'shelxl'], description: 'Program to run.' },
+                        structure: { type: 'string', description: 'Optional .ins/.res text to use instead of the current editor content.' }
+                    },
+                    required: ['program'],
+                    additionalProperties: false
+                }
+            },
+            {
+                name: 'webxtl_refine_structure',
+                description: 'Run SHELXL refinement with WGHT optimisation to convergence on the current structure (in the editor) + loaded HKL. Returns the refined .res (loaded back into the editor) plus the final R1/wR2/GooF from the .lst. Use this to actually finish a refinement (not just advise), and call it again / validate afterwards.',
+                parameters: {
+                    type: 'object',
+                    properties: {
+                        cycles: { type: 'number', description: 'Number of SHELXL cycles (default 3; larger = more complete WGHT optimisation).' }
+                    },
+                    additionalProperties: false
+                }
+            },
+            {
+                name: 'webxtl_solve_structure',
+                description: 'Run the full automated pipeline: structure solution (SHELXT, or SHELXS if no model), SHELXL refinement and a disorder/twinning + CheckCIF-style validation report. Inputs are the current editor structure (or empty template) + the loaded HKL. Returns the validation report, the refinement log and the final refined .res/.lst.',
+                parameters: {
+                    type: 'object',
+                    properties: {
+                        program: { type: 'string', enum: ['auto', 'shelxt', 'shelxs'], description: 'Solution program (default auto = SHELXT then SHELXS).' },
+                        cycles: { type: 'number', description: 'SHELXL WGHT optimisation cycles (default 3).' }
+                    },
+                    additionalProperties: false
+                }
+            },
+            {
+                name: 'webxtl_space_group',
+                description: 'Run xrdspace space-group determination on the loaded HKL data. Returns the crystal system, Laue class, candidate space groups with scores, and a SHELX .ins template for the chosen group. Use before writing the solution .ins if the space group is unknown.',
+                parameters: {
+                    type: 'object',
+                    properties: {
+                        force: { type: 'string', description: 'Optional space group to force (number or Hermann-Mauguin, e.g. "14" or "P 21/c").' }
+                    },
+                    additionalProperties: false
+                }
+            },
+            {
+                name: 'webxtl_validate',
+                description: 'Run a CheckCIF-style validation (disorder, twinning, R-factors, geometry) on the current structure (and last .lst if available). Returns the alert report.',
+                parameters: { type: 'object', properties: {}, additionalProperties: false }
+            }
+        ];
+    }
+
+    // Executor called by the AI agent loop for each tool request.
+    async aiRunTool(name, args) {
+        if (name === 'webxtl_get_workspace') return this.aiToolWorkspace();
+        if (name === 'webxtl_apply_structure') return this.aiToolApplyStructure(args);
+        if (name === 'webxtl_run_program') return this.aiToolRunProgram(args);
+        if (name === 'webxtl_refine_structure') return this.aiToolRefine(args);
+        if (name === 'webxtl_solve_structure') return this.aiToolSolve(args);
+        if (name === 'webxtl_space_group') return this.aiToolSpaceGroup(args);
+        if (name === 'webxtl_validate') return this.aiToolValidate();
+        return { error: `Unknown tool ${name}` };
+    }
+
+    truncateForAI(text, max = 80000) {
+        if (!text) return '';
+        return text.length > max ? text.slice(0, max) + `\n... [truncated ${text.length} chars]` : text;
+    }
+
+    // Compact one-line summary of a tool result (JSON or text) for the report.
+    aiToolSummary(result) {
+        if (result == null) return '';
+        if (typeof result === 'string') return this.truncateForAI(result, 400);
+        let s;
+        try { s = JSON.stringify(result); } catch (e) { s = String(result); }
+        return this.truncateForAI(s, 400);
+    }
+
+    // Appended after the agent loop stops (model answer, step limit, or error)
+    // so the user always knows where refinement stopped and that the current
+    // model is loaded in the editor.
+    buildAgentSessionReport(toolLog) {
+        const L = ['\n\n------ AI SOLUTION SESSION END ------'];
+        const last = this.state.aiLastRun || null;
+        const stats = this.lstStats();
+        L.push('Tools executed in this session:');
+        if (toolLog && toolLog.length) {
+            L.push(...toolLog.map(t => `  • ${t.name}  →  ${t.summary}`));
+        } else {
+            L.push('  (none)');
+        }
+
+        const editorModel = this.getStructureContent();
+        const atoms = (this.state.parsedData && this.state.parsedData.atoms) ? this.state.parsedData.atoms.length : null;
+
+        if (last) {
+            L.push('');
+            L.push(`Last server job: ${last.program} — ${last.ok ? 'OK' : 'FAILED'}${last.message ? ' (' + last.message + ')' : ''}`);
+            if (last.promotedModel) L.push(`Model file promoted to editor: ${last.promotedModel}`);
+            if (last.lstStats) L.push(`Refinement stopped at: ${last.lstStats}`);
+        }
+        if (stats) {
+            L.push('');
+            L.push(`Current model in editor reports: ${stats}`);
+        }
+        if (editorModel) {
+            L.push('');
+            L.push(`A structure is loaded in the editor (${atoms != null ? atoms + ' atoms' : 'see RES tab'}). ` +
+                'Open the RES/3D view to inspect the solution. ' +
+                'You can continue by asking the AI again (e.g. "refine further / fix disorder / add hydrogens"), ' +
+                'or run Programs > SHELXL / Calculate > Refine manually.');
+            L.push(`Editor content length: ${editorModel.length} chars.`);
+        } else {
+            L.push('');
+            L.push('No model reached the editor. Check the tool log above — the agent may have stopped before a successful run.');
+        }
+        if (!stats && !editorModel && last && last.ok) {
+            L.push('Note: the job succeeded but no refinement statistics were parsed from the .lst.');
+        }
+        return L.join('\n');
+    }
+
+    // Choose which .res file produced by a run to promote into the editor.
+    // For solutions (SHELXT etc) several candidates (name_a.res ...) can exist;
+    // pick the one with the lowest R1 quoted in its header.
+    pickResFile(files, base, preferBase = false) {
+        const keys = Object.keys(files || {}).filter(f => /\.res$/i.test(f));
+        if (!keys.length) return null;
+        if (preferBase) {
+            const exact = keys.find(f => f.toLowerCase() === `${base}.res`);
+            if (exact) return exact;
+        }
+        const r1Of = (text) => {
+            const m = (text || '').match(/R1\s*[= ]\s*([\d.]+)/i);
+            return m ? parseFloat(m[1]) : 99;
+        };
+        keys.sort((a, b) => r1Of(files[a]) - r1Of(files[b]));
+        return keys[0];
+    }
+
+    // Load a structure .res/.ins into the RES editor (kept in sync for the
+    // next program run and visible to the user in the 3D/RES view).
+    loadStructureIntoEditor(content, filename) {
+        const editor = this.state.editors.res;
+        if (!editor || !content || !content.trim()) return false;
+        editor.setValue(content, -1);
+        this.state.loadedContent = content;
+        this.state.loadedType = 'res';
+        this.state.loadedFilename = filename || this.state.loadedFilename || 'structure.res';
+        this.state.lastStructureTabKey = null;
+        this.renderContent(content, 'res');
+        return true;
+    }
+
+    async aiToolWorkspace() {
+        const structure = this.getStructureContent();
+        const filename = this.state.loadedFilename
+            || (this.state.lastStructureTabKey && this.state.fileTabs[this.state.lastStructureTabKey]?.filename) || null;
+        const info = {
+            filename,
+            hasStructure: !!structure,
+            structurePreview: this.truncateForAI(structure, 20000),
+            hasHkl: !!this.state.hklContent,
+            hklName: this.state.hklName || null,
+            hklHeader: this.state.hklContent ? this.truncateForAI(this.state.hklContent.split(/\r?\n/).slice(0, 25).join('\n'), 3000) : '',
+            xrdspaceIns: this.state.xrdspaceIns ? this.truncateForAI(this.state.xrdspaceIns.content, 30000) : null,
+            lastLstStats: this.lstStats()
+        };
+        // Keep the last agent-run state visible to the model.
+        if (this.state.aiLastRun) Object.assign(info, { lastRun: this.state.aiLastRun });
+        return info;
+    }
+
+    lstStats() {
+        const lst = this.state.editors.lst ? this.state.editors.lst.getValue() : '';
+        if (!lst) return null;
+        const r1 = lst.match(/R1\s*=\s*([\d.]+)\s+for\s+\d+\s+Fo\s*>\s*\d+sig\(Fo\)/);
+        const wr = lst.match(/wR2\s*=\s*([\d.]+),\s*GooF\s*=\s*S\s*=\s*([\d.]+)/);
+        const flack = lst.match(/Flack\s*x\s*=\s*([\d.\-()]+)/);
+        const out = {};
+        if (r1) out.r1 = r1[1];
+        if (wr) { out.wr2 = wr[1]; out.goof = wr[2]; }
+        if (flack) out.flack = flack[1];
+        return Object.keys(out).length ? out : null;
+    }
+
+    async aiToolApplyStructure(args) {
+        const content = (args && args.content) || '';
+        if (!content.trim()) return { error: 'apply_structure requires non-empty content.' };
+        const editor = this.state.editors.res;
+        if (!editor) return { error: 'No structure editor available.' };
+        editor.setValue(content, -1);
+        this.state.loadedContent = content;
+        this.state.loadedType = 'res';
+        this.state.loadedFilename = this.state.loadedFilename || 'structure.res';
+        this.renderContent(content, 'res');
+        return {
+            ok: true,
+            message: 'Structure written to the editor.',
+            atoms: (this.state.parsedData && this.state.parsedData.atoms) ? this.state.parsedData.atoms.length : '?'
+        };
+    }
+
+    async aiToolRunProgram(args) {
+        const programId = args && args.program;
+        if (!['shelxt', 'shelxs', 'shelxd', 'shelxl'].includes(programId)) {
+            return { error: `program must be shelxt|shelxs|shelxd|shelxl (got ${programId})` };
+        }
+        // structure to run: explicit arg or current editor content
+        let structure = (args && args.structure) || this.getStructureContent();
+        if (!structure) return { error: 'No structure text available. Load a .ins/.res or call webxtl_apply_structure first.' };
+        if (!this.state.hklContent) {
+            return { error: 'No HKL file loaded. Load the .hkl file (File > Load HKL) before running a program.' };
+        }
+
+        const base = (this.state.hklName ? this.state.hklName.replace(/\.hkl$/i, '') : 'structure').replace(/[^a-zA-Z0-9_-]/g, '_');
+        const form = new FormData();
+        const needsHkl = ['shelxt', 'shelxs', 'shelxd', 'shelxl'].includes(programId);
+        form.append('ins', new Blob([structure], { type: 'text/plain' }), base + '.ins');
+        if (needsHkl) form.append('hkl', new Blob([this.state.hklContent], { type: 'text/plain' }), base + '.hkl');
+
+        const controller = new AbortController();
+        this.state.aiAbortController = controller;
+        let data;
+        try {
+            const res = await fetch(this.getApiUrl(`/run/${programId}`), {
+                method: 'POST', body: form,
+                signal: this.makeAbortSignal(controller)
+            });
+            if (!res.ok) throw new Error(`Server error: ${res.statusText}`);
+            data = await res.json();
+        } catch (e) {
+            return { error: `Failed to run ${programId}: ${e.message}` };
+        } finally {
+            this.state.aiAbortController = null;
+        }
+
+        const out = { program: programId, success: data.success, message: data.message || null };
+        if (data.stdout) out.stdout = this.truncateForAI(data.stdout, 12000);
+        if (data.stderr) out.stderr = this.truncateForAI(data.stderr, 4000);
+
+        const files = data.files || {};
+        const resKeys = Object.keys(files).filter(f => /\.res$/i.test(f));
+        const lstKeys = Object.keys(files).filter(f => /\.lst$/i.test(f));
+
+        // Always promote the best produced model into the editor so the user can
+        // inspect it (3D + RES tab) and so the next run/refine uses it.
+        let promoted = null;
+        if (data.success && resKeys.length) {
+            const best = this.pickResFile(files, base, programId === 'shelxl' || programId === 'shelxs');
+            if (best && this.loadStructureIntoEditor(files[best], best)) {
+                promoted = best;
+            }
+        }
+
+        // Summary of each .res candidate for the model (kept short - full model
+        // is in the editor, not echoed into the conversation).
+        if (resKeys.length) {
+            out.models = resKeys.map(k => {
+                const head = files[k].split(/\r?\n/).slice(0, 8).join(' | ');
+                const r1 = files[k].match(/R1\s*[= ]\s*([\d.]+)/i);
+                return { file: k, header: head.slice(0, 300), r1: r1 ? r1[1] : null };
+            });
+            out.promotedModel = promoted;
+            out.editorUpdated = promoted ? `${promoted} loaded into the editor - use it as the current model` : null;
+        }
+        if (lstKeys.length) {
+            const k = lstKeys[0];
+            out.lstStats = this.summarizeLstPlain(files[k]);
+            out.lstTail = this.truncateForAI(files[k], 8000);
+            // Keep the .lst in the LST editor too so the user can inspect where
+            // refinement stopped (R1/wR2/GooF, shifts, peak/hole).
+            const lstEditor = this.state.editors.lst;
+            if (lstEditor) lstEditor.setValue(files[k], -1);
+        }
+
+        // Record where we are for the final report / "where did it stop".
+        this.state.aiLastRun = {
+            program: programId,
+            ok: !!data.success,
+            message: data.message || null,
+            promotedModel: promoted,
+            lstStats: out.lstStats || null,
+            timestamp: new Date().toISOString()
+        };
+        return out;
+    }
+
+    summarizeLstPlain(lst) {
+        const r1 = lst.match(/R1\s*=\s*([\d.]+)\s+for\s+\d+\s+Fo\s*>\s*\d+sig\(Fo\)/);
+        const wr = lst.match(/wR2\s*=\s*([\d.]+),\s*GooF\s*=\s*S\s*=\s*([\d.]+)/);
+        const flack = lst.match(/Flack\s*x\s*=\s*([\d.\-()]+)/);
+        const peak = lst.match(/Highest\s+peak\s*([\d.\-]+)/);
+        const hole = lst.match(/Deepest\s+hole\s*([\d.\-]+)/);
+        const parts = [];
+        if (r1) parts.push(`R1=${r1[1]}`);
+        if (wr) parts.push(`wR2=${wr[1]} GooF=${wr[2]}`);
+        if (flack) parts.push(`Flack=${flack[1]}`);
+        if (peak) parts.push(`peak=${peak[1]}`);
+        if (hole) parts.push(`hole=${hole[1]}`);
+        return parts.length ? parts.join('  ') : 'no recognizable statistics';
+    }
+
+    // Refine the current structure on the server (SHELXL weight optimisation).
+    async aiToolRefine(args) {
+        const structure = this.getStructureContent();
+        if (!structure) return { error: 'No structure loaded to refine. Solve first or load a .res/.ins.' };
+        if (!this.state.hklContent) return { error: 'No HKL file loaded.' };
+
+        const cycles = Math.max(1, Math.min(20, parseInt((args && args.cycles) || 3, 10) || 3));
+        const base = (this.state.hklName ? this.state.hklName.replace(/\.hkl$/i, '') : 'structure').replace(/[^a-zA-Z0-9_-]/g, '_');
+        const form = new FormData();
+        form.append('ins', new Blob([structure], { type: 'text/plain' }), base + '.ins');
+        form.append('hkl', new Blob([this.state.hklContent], { type: 'text/plain' }), base + '.hkl');
+        form.append('cycles', String(cycles));
+        form.append('mode', 'weight'); // apply recommended WGHT each cycle
+
+        const controller = new AbortController();
+        this.state.aiAbortController = controller;
+        let data;
+        try {
+            const res = await fetch(this.getApiUrl('/refine'), {
+                method: 'POST', body: form,
+                signal: typeof AbortSignal.any === 'function'
+                    ? AbortSignal.any([AbortSignal.timeout(600000), controller.signal]) : controller.signal
+            });
+            if (!res.ok) {
+                const e = await res.json().catch(() => ({}));
+                throw new Error(e.error || e.details || `HTTP ${res.status}`);
+            }
+            data = await res.json();
+        } catch (e) {
+            return { error: `Refinement failed: ${e.message}` };
+        } finally {
+            this.state.aiAbortController = null;
+        }
+
+        const out = { program: 'shelxl', mode: 'weight', cycles, success: !!data.success, message: data.message || null };
+        if (data.stdout) out.stdout = this.truncateForAI(data.stdout, 8000);
+        if (data.stderr) out.stderr = this.truncateForAI(data.stderr, 4000);
+
+        const files = data.files || {};
+        const resKeys = Object.keys(files).filter(f => /\.res$/i.test(f));
+        const lstKeys = Object.keys(files).filter(f => /\.lst$/i.test(f));
+
+        let promoted = null;
+        if (data.success && resKeys.length) {
+            const best = this.pickResFile(files, base, true) || resKeys[0];
+            if (best && this.loadStructureIntoEditor(files[best], best)) promoted = best;
+        }
+        out.promotedModel = promoted;
+        out.editorUpdated = promoted ? `${promoted} loaded into the editor (refined model)` : null;
+
+        if (lstKeys.length) {
+            const k = lstKeys[0];
+            out.lstStats = this.summarizeLstPlain(files[k]);
+            out.lstTail = this.truncateForAI(files[k], 10000);
+            const lstEditor = this.state.editors.lst;
+            if (lstEditor) lstEditor.setValue(files[k], -1);
+        }
+
+        this.state.aiLastRun = {
+            program: 'shelxl (WGHT)',
+            ok: !!data.success,
+            message: data.message || null,
+            promotedModel: promoted,
+            lstStats: out.lstStats || null,
+            timestamp: new Date().toISOString()
+        };
+        return out;
+    }
+
+    async aiToolSolve(args) {
+        const insText = this.getStructureContent();
+        if (!insText) return { error: 'No structure template in the editor.' };
+        if (!this.state.hklContent) return { error: 'No HKL file loaded.' };
+
+        const base = (this.state.hklName ? this.state.hklName.replace(/\.hkl$/i, '') : 'structure').replace(/[^a-zA-Z0-9_-]/g, '_');
+        const form = new FormData();
+        form.append('ins', new Blob([insText], { type: 'text/plain' }), base + '.ins');
+        form.append('hkl', new Blob([this.state.hklContent], { type: 'text/plain' }), base + '.hkl');
+        form.append('program', (args && args.program) || 'auto');
+        form.append('cycles', String((args && args.cycles) || 3));
+        form.append('refine', '1');
+        form.append('platon', '0');
+
+        const controller = new AbortController();
+        this.state.aiAbortController = controller;
+        let data;
+        try {
+            const res = await fetch(this.getApiUrl('/solve-structure'), {
+                method: 'POST', body: form,
+                signal: typeof AbortSignal.any === 'function'
+                    ? AbortSignal.any([AbortSignal.timeout(600000), controller.signal]) : controller.signal
+            });
+            if (!res.ok) {
+                const e = await res.json().catch(() => ({}));
+                throw new Error(e.error || e.details || `HTTP ${res.status}`);
+            }
+            data = await res.json();
+        } catch (e) {
+            return { error: `Solve pipeline failed: ${e.message}` };
+        } finally {
+            this.state.aiAbortController = null;
+        }
+
+        const out = {
+            success: data.success,
+            steps: (data.steps || []).map(s => `[${s.status}] ${s.label}${s.message ? ' — ' + s.message : ''}`),
+            reportText: data.reportText || '',
+            message: data.message || null
+        };
+        if (data.files && data.files.res) {
+            // Promote the final refined model into the editor.
+            const resText = data.files.res;
+            this.loadStructureIntoEditor(resText, (data.project || 'structure') + '.res');
+            out.finalResPreview = this.truncateForAI(resText, 6000);
+        }
+        if (data.files && data.files.lst) {
+            out.lstStats = this.summarizeLstPlain(data.files.lst);
+            out.finalLstTail = this.truncateForAI(data.files.lst, 12000);
+            const lstEditor = this.state.editors.lst;
+            if (lstEditor) lstEditor.setValue(data.files.lst, -1);
+        }
+        this.state.aiLastRun = {
+            program: 'solve-structure',
+            ok: !!data.success,
+            message: data.message || null,
+            promotedModel: data.project ? data.project + '.res' : 'structure.res',
+            lstStats: out.lstStats || null,
+            reportVerdict: data.report ? data.report.verdict : null,
+            timestamp: new Date().toISOString()
+        };
+        return out;
+    }
+
+    async aiToolSpaceGroup(args) {
+        if (!this.state.hklContent) return { error: 'No HKL file loaded.' };
+        const force = (args && args.force && String(args.force).trim()) || null;
+        let result;
+        try {
+            result = await this.apiXrdspaceAnalyze(this.state.hklContent, null, force);
+        } catch (e) {
+            return { error: `xrdspace failed: ${e.message}` };
+        }
+        const out = {
+            ok: result.ok,
+            spaceGroup: result.spaceGroup || result.best || null,
+            laue: result.laue || null,
+            crystalSystem: result.system || result.crystalSystem || null,
+            summary: this.truncateForAI(typeof result.summary === 'string' ? result.summary : JSON.stringify(result).slice(0, 4000), 6000)
+        };
+        // If xrdspace returned an .ins template, remember it so SHELXT can use it.
+        if (result.ins && result.ins.content) {
+            this.state.xrdspaceIns = { filename: result.ins.filename || 'xrdspace.ins', content: result.ins.content };
+        } else if (result.shelxIns) {
+            this.state.xrdspaceIns = { filename: 'xrdspace.ins', content: result.shelxIns };
+        } else if (result.merge && result.merge.shelxIns) {
+            this.state.xrdspaceIns = { filename: 'xrdspace_merged.ins', content: result.merge.shelxIns };
+        }
+        if (this.state.xrdspaceIns) {
+            out.generatedIns = this.truncateForAI(this.state.xrdspaceIns.content, 30000);
+            out.note = 'You may call webxtl_apply_structure with generatedIns (after fixing SFAC/UNIT for the real composition), then webxtl_run_program shelxt to solve.';
+        }
+        return out;
+    }
+
+    async aiToolValidate() {
+        const structure = this.getStructureContent();
+        if (!structure) return { error: 'No structure loaded to validate.' };
+        const lst = this.state.editors.lst ? this.state.editors.lst.getValue() : '';
+        const base = (this.state.loadedFilename || 'structure').replace(/\.[^.]+$/, '');
+        const form = new FormData();
+        form.append('res', new Blob([structure], { type: 'text/plain' }), base + '.res');
+        if (lst && lst.trim()) form.append('lst', new Blob([lst], { type: 'text/plain' }), base + '.lst');
+        try {
+            const res = await fetch(this.getApiUrl('/validate-structure'), { method: 'POST', body: form });
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            const data = await res.json();
+            return { success: data.success, report: data.reportText || '' };
+        } catch (e) {
+            return { error: `Validation failed: ${e.message}` };
+        }
+    }
+
+    // Run an agentic analysis where the model may call tools to actually solve
+    // the structure. Returns the final assistant text.
+    async runAIAgent(settings, system, userContent, onStep) {
+        const controller = new AbortController();
+        this.state.aiAbortController = controller;
+        try {
+            return await aiChatAgent(settings,
+                [
+                    { role: 'system', content: system },
+                    { role: 'user', content: userContent }
+                ],
+                this.AITools,
+                (name, args) => this.aiRunTool(name, args),
+                {
+                    maxSteps: 20,
+                    signal: controller.signal,
+                    onStep
+                });
+        } catch (e) {
+            if (e && e.name === 'AbortError') throw e;
+            // Anthropic providers do not support this tool loop yet.
+            throw new Error(`Agent unavailable: ${e.message}`);
         }
     }
 
@@ -290,6 +1452,7 @@ class WMOLApp {
         this.setupUIEvents();
         this.setupFragmentControls();
         this.setupPreferences();
+        this.setupAI();
         this.restoreStateFromLocalStorage();
     }
 
@@ -861,8 +2024,15 @@ class WMOLApp {
         try {
             ['webxtl_res_content', 'webxtl_loaded_type', 'webxtl_loaded_filename',
              'webxtl_current_project', 'webxtl_file_tabs', 'webxtl_hkl_content',
-             'webxtl_hkl_name', 'webxtl_fcf_content'].forEach(k => localStorage.removeItem(k));
+             'webxtl_hkl_name', 'webxtl_fcf_content', 'webxtl_ai_logs'].forEach(k => localStorage.removeItem(k));
         } catch (e) { /* ignore */ }
+
+        // Stop any running AI analysis / solve pipeline.
+        this.stopAIAnalysis();
+        if (this.solveAbort) { try { this.solveAbort.abort(); } catch (e) { /* */ } this.solveAbort = null; }
+        this.state.aiLogs = [];
+        this.state.aiLog = null;
+        this.refreshAILogList && this.refreshAILogList();
 
         console.log("Cleared all data from the UI.");
     }
@@ -1341,10 +2511,10 @@ class WMOLApp {
         // --- Standard Edit Commands ---
         // Note: Cut/Copy/Paste are often restricted by browser, but we can try execCommand
         
-        // Duplicate Line/Selection (Ctrl-D)
+        // Duplicate Line/Selection (Ctrl-Alt-D)
         editor.commands.addCommand({
             name: 'duplicate',
-            bindKey: {win: 'Ctrl-D', mac: 'Command-D'},
+            bindKey: {win: 'Ctrl-Alt-D', mac: 'Command-Alt-D'},
             exec: (editor) => {
                 editor.copyLinesDown();
             }
@@ -1399,10 +2569,10 @@ class WMOLApp {
             }
         });
 
-        // Relabel Atoms (Ctrl-L)
+        // Relabel Atoms (Ctrl-Shift-L)
         editor.commands.addCommand({
             name: 'relabelAtoms',
-            bindKey: {win: 'Ctrl-L', mac: 'Command-L'},
+            bindKey: {win: 'Ctrl-Shift-L', mac: 'Command-Shift-L'},
             exec: (editor) => {
                 this.openRelabelDialog(editor);
             }
@@ -1419,7 +2589,7 @@ class WMOLApp {
 
         editor.commands.addCommand({
             name: 'autoHfix',
-            bindKey: {win: 'Ctrl-H', mac: 'Command-H'},
+            bindKey: {win: 'Ctrl-Shift-H', mac: 'Command-Shift-H'},
             exec: (editor) => {
                 if (!this.state.parsedData || !this.state.parsedData.atoms || !this.state.parsedData.cell) {
                     alert("No structure data available. Please load a valid file.");
@@ -1606,17 +2776,17 @@ class WMOLApp {
             this.tryRender('res');
         };
 
-        // Kill Q (Ctrl-K)
+        // Kill Q (Ctrl-Alt-K)
         editor.commands.addCommand({
             name: 'killQ',
-            bindKey: {win: 'Ctrl-K', mac: 'Command-K'},
+            bindKey: {win: 'Ctrl-Alt-K', mac: 'Command-Alt-K'},
             exec: (editor) => killPattern(/^Q\d+/i, "Q Peaks", false) // No confirm for Q? Python didn't seem to ask.
         });
 
-        // Kill H (Ctrl-Shift-K)
+        // Kill H (Ctrl-Alt-H)
         editor.commands.addCommand({
             name: 'killH',
-            bindKey: {win: 'Ctrl-Shift-K', mac: 'Command-Shift-K'},
+            bindKey: {win: 'Ctrl-Alt-H', mac: 'Command-Alt-H'},
             exec: (editor) => {
                 // Special handling for H: also remove AFIX if doing all
                 const range = editor.getSelectionRange();
@@ -1661,10 +2831,10 @@ class WMOLApp {
 
         // --- Options Menu Commands ---
 
-        // Isotropic (Ctrl-I)
+        // Isotropic (Ctrl-Alt-I)
         editor.commands.addCommand({
             name: 'makeIsotropic',
-            bindKey: {win: 'Ctrl-I', mac: 'Command-I'},
+            bindKey: {win: 'Ctrl-Alt-I', mac: 'Command-Alt-I'},
             exec: (editor) => {
                 // Remove Uij parameters (keep x, y, z, sof, Uiso)
                 // Standard Shelx atom: Label type x y z sof Uiso [U11 U22 U33 U23 U13 U12]
@@ -1958,10 +3128,10 @@ class WMOLApp {
             }
         });
 
-        // Find Duplicates (Alt-D)
+        // Find Duplicate Labels (Ctrl-Alt-L)
         editor.commands.addCommand({
             name: 'findDuplicates',
-            bindKey: {win: 'Alt-D', mac: 'Alt-D'},
+            bindKey: {win: 'Ctrl-Alt-L', mac: 'Command-Alt-L'},
             exec: (editor) => {
                 const doc = editor.getSession().getDocument();
                 const lines = doc.getAllLines();
@@ -2114,6 +3284,14 @@ class WMOLApp {
                         }
                     }
                 }
+            }
+        });
+
+        // Change Occupancy (sof) for selected atoms
+        editor.commands.addCommand({
+            name: 'changeOccupancy',
+            exec: (editor) => {
+                this.openChangeOccupancyDialog(editor);
             }
         });
 
@@ -2504,6 +3682,133 @@ class WMOLApp {
         }
     }
 
+    // SHELX instruction keywords that are not atoms (used to guard occupancy edits).
+    getShelxKeywords() {
+        return ['TITL', 'CELL', 'ZERR', 'LATT', 'SYMM', 'SFAC', 'UNIT', 'HFIX', 'BOND', 'CONF', 'MPLA', 'HTAB', 'EQIV', 'CONN', 'PART', 'AFIX', 'RESI', 'MOLE', 'PLAN', 'SIZE', 'TEMP', 'WGHT', 'FVAR', 'HKLF', 'END', 'REM', 'Q', 'OMIT', 'DISP', 'ISOR', 'RIGI', 'SIMU', 'DELU', 'DANG', 'BUMP', 'TWIN', 'BASF', 'MERG', 'SPEC', 'HOPE', 'SWAT', 'SADI', 'SAME', 'NCSY', 'L.S.', 'CGLS', 'BLOC', 'DAMP', 'STIR', 'ACTA', 'LIST', 'SHEL', 'ANIS', 'MOVE', 'RTAB', 'EXYZ', 'EADP', 'RIGU', 'RESC', 'GRID', 'CALC'];
+    }
+
+    // True when an editor line looks like a SHELX atom line (label, x y z present).
+    isShelxAtomLine(line) {
+        if (!line || !line.trim()) return false;
+        const parts = line.trim().split(/\s+/);
+        if (parts.length < 5) return false;
+        const label = parts[0].toUpperCase();
+        if (this.getShelxKeywords().includes(label)) return false;
+        return (/^[A-Z]/i.test(parts[0])
+            && !isNaN(parseFloat(parts[2]))
+            && !isNaN(parseFloat(parts[3]))
+            && !isNaN(parseFloat(parts[4])));
+    }
+
+    openChangeOccupancyDialog(editor) {
+        const modalEl = document.getElementById('occupancyModal');
+        if (!modalEl) return;
+        const input = document.getElementById('occ-value-input');
+        if (input) input.value = '1.0';
+
+        const hint = document.getElementById('occ-scope-hint');
+        if (hint) {
+            const selRows = this.getOccupancyTargetRows(editor);
+            if (selRows.onlySelection) {
+                hint.textContent = `${selRows.rows.length} selected atom line(s) will have their occupancy changed.`;
+            } else {
+                hint.textContent = 'No atoms selected - all atom lines in the document will have their occupancy changed. Select atom lines in the editor to limit the change to those atoms only.';
+            }
+        }
+
+        const modal = new bootstrap.Modal(modalEl);
+        modal.show();
+        modalEl.addEventListener('shown.bs.modal', () => {
+            if (input) input.focus();
+        }, { once: true });
+    }
+
+    // Work out which rows the occupancy change should touch.
+    getOccupancyTargetRows(editor) {
+        const doc = editor.getSession().getDocument();
+        const lines = doc.getAllLines();
+        const ranges = editor.selection.getAllRanges();
+        const hasSelection = ranges.length > 0 && !(ranges.length === 1 && ranges[0].isEmpty());
+
+        if (hasSelection) {
+            const rows = new Set();
+            ranges.forEach(r => {
+                for (let i = r.start.row; i <= r.end.row; i++) rows.add(i);
+            });
+            return { onlySelection: true, rows: Array.from(rows).filter(i => this.isShelxAtomLine(lines[i])) };
+        }
+
+        // No selection: touch every atom line, but never a "PART -n" disorder
+        // line or anything outside the atom block? Simpler: whole document atoms.
+        const rows = [];
+        lines.forEach((line, i) => {
+            if (this.isShelxAtomLine(line)) rows.push(i);
+        });
+        return { onlySelection: false, rows };
+    }
+
+    performChangeOccupancy() {
+        const editor = this.state.editors.res;
+        if (!editor) return;
+
+        const input = document.getElementById('occ-value-input');
+        const rawVal = input ? input.value : '';
+        const newVal = parseFloat(rawVal);
+        if (rawVal === '' || isNaN(newVal) || newVal < 0) {
+            alert('Please enter a valid non-negative occupancy value.');
+            return;
+        }
+
+        const { rows } = this.getOccupancyTargetRows(editor);
+        if (!rows.length) {
+            alert('No atom lines found in the current selection/document.');
+            return;
+        }
+
+        const doc = editor.getSession().getDocument();
+        let changed = 0;
+        const skipFvar = [];
+
+        rows.forEach(i => {
+            const line = doc.getLine(i);
+            const parts = line.trim().split(/\s+/);
+            // Atom line: Label type x y z sof Uiso ...
+            // sof is token index 5.
+            if (parts.length < 6) {
+                // No sof column present (rare). Insert the value before any U column.
+                parts.push(''); // ensure we have index 6 free below via splice
+            }
+            const fvarCode = Math.abs(parseFloat(parts[5]));
+            // Keep SHELX FVAR reference intact unless the user truly intends it:
+            // a "10*k+n" sof (>=10) means the occupancy is refined via FVAR k,
+            // so the numeric value also encodes the free-variable multiplier.
+            // Here we simply write the explicit sof the user typed.
+            parts[5] = String(newVal);
+            if (fvarCode >= 10) skipFvar.push(i);
+            const newLine = parts.join('  ');
+            doc.removeInLine(i, 0, line.length);
+            doc.insertInLine({ row: i, column: 0 }, newLine);
+            changed++;
+        });
+
+        this.tryRender('res');
+
+        const status = document.getElementById('status-bar-content');
+        if (status) {
+            status.textContent = `Occupancy set to ${newVal} for ${changed} atom line(s)`;
+            if (skipFvar.length) {
+                console.warn(`Note: ${skipFvar.length} line(s) had FVAR-linked sof (>=10) and were overwritten with an explicit value.`);
+            }
+        }
+
+        // Close the modal
+        const modalEl = document.getElementById('occupancyModal');
+        if (modalEl) {
+            const modal = bootstrap.Modal.getInstance(modalEl);
+            if (modal) modal.hide();
+        }
+    }
+
     // Collect atom rows from the editor document (label -> row index map)
     collectClusterAtoms() {
         const editor = this.state.editors.res;
@@ -2747,6 +4052,14 @@ class WMOLApp {
 
                 if (targetId === 'tab-split') {
                     this.onWindowResize();
+                } else if (targetId === 'tab-cif' || targetId === 'tab-lst') {
+                    // Static CIF/LST panes are 0x0 while hidden - re-measure and
+                    // re-render the editor once their tab becomes visible so the
+                    // last lines of text are never clipped.
+                    setTimeout(() => {
+                        if (this.state.editors.cif) this.state.editors.cif.resize();
+                        if (this.state.editors.lst) this.state.editors.lst.resize();
+                    }, 50);
                 } else if (targetId.startsWith('tab-file-')) {
                     // Resize the active file-tab editor
                     setTimeout(() => {
@@ -3029,6 +4342,23 @@ class WMOLApp {
             });
         }
 
+        // Solve Structure & Validate / Validate (CheckCIF-style)
+        const menuSolve = document.getElementById('menu-solve');
+        if (menuSolve) menuSolve.addEventListener('click', () => this.openSolveModal('solve'));
+        const menuValidate = document.getElementById('menu-validate');
+        if (menuValidate) menuValidate.addEventListener('click', () => this.openSolveModal('validate'));
+
+        // Solve modal buttons
+        const btnSolveRun = document.getElementById('btn-solve-run');
+        if (btnSolveRun) btnSolveRun.addEventListener('click', () => this.runSolvePipeline());
+        const btnSolveLoadRes = document.getElementById('btn-solve-load-res');
+        if (btnSolveLoadRes) btnSolveLoadRes.addEventListener('click', () => this.loadSolveResultRes());
+        const btnSolveCopyReport = document.getElementById('btn-solve-copy-report');
+        if (btnSolveCopyReport) btnSolveCopyReport.addEventListener('click', () => {
+            const out = document.getElementById('solve-report-text');
+            if (out && navigator.clipboard) navigator.clipboard.writeText(out.textContent);
+        });
+
         // --- Publish Menu ---
         const menuPublishCif = document.getElementById('menu-publish-cif');
         if (menuPublishCif) {
@@ -3123,6 +4453,22 @@ class WMOLApp {
         }
         if (btnClusterApply) {
             btnClusterApply.addEventListener('click', () => this.applyClusterRelabel());
+        }
+
+        // Change Occupancy Modal Logic
+        const btnPerformOccupancy = document.getElementById('btn-perform-occupancy');
+        const occInput = document.getElementById('occ-value-input');
+        if (btnPerformOccupancy) {
+            const doChangeOcc = () => this.performChangeOccupancy();
+            btnPerformOccupancy.addEventListener('click', doChangeOcc);
+            if (occInput) {
+                occInput.addEventListener('keypress', (e) => {
+                    if (e.key === 'Enter') {
+                        e.preventDefault();
+                        doChangeOcc();
+                    }
+                });
+            }
         }
     }
 
@@ -3793,6 +5139,7 @@ class WMOLApp {
         bindMenu('menu-correct-formula', 'correctFormula');
         bindMenu('menu-isotropic', 'makeIsotropic');
         bindMenu('menu-change-uiso', 'changeUiso');
+        bindMenu('menu-change-occ', 'changeOccupancy');
         bindMenu('menu-omit', 'omitError');
         bindMenu('menu-disp', 'calcDisp');
         bindMenu('menu-hfix', 'addHFIX');
@@ -3857,9 +5204,19 @@ class WMOLApp {
 
     onWindowResize() {
         const container = document.getElementById('three-container');
+
+        // Ace editors must always be resized, even when the 3D pane is hidden
+        // (e.g. while the CIF/LST/static panes are displayed) so the last lines
+        // of text stay visible and scrollable inside the container.
+        if (this.state.editors.res) this.state.editors.res.resize();
+        if (this.state.editors.cif) this.state.editors.cif.resize();
+        if (this.state.editors.lst) this.state.editors.lst.resize();
+        if (this.state.fileTabs) {
+            Object.values(this.state.fileTabs).forEach(t => t.editor && t.editor.resize());
+        }
+
+        // Only resize the renderer/camera when the 3D view is actually visible.
         if (!container || !this.state.camera || !this.state.renderer) return;
-        
-        // Check if visible
         if (container.clientWidth === 0 || container.clientHeight === 0) return;
 
         const aspect = container.clientWidth / container.clientHeight;
@@ -3877,13 +5234,6 @@ class WMOLApp {
         }
         
         this.state.renderer.setSize(container.clientWidth, container.clientHeight);
-        
-        // Ace resize
-        if (this.state.editors.res) this.state.editors.res.resize();
-        if (this.state.editors.cif) this.state.editors.cif.resize();
-        if (this.state.fileTabs) {
-            Object.values(this.state.fileTabs).forEach(t => t.editor && t.editor.resize());
-        }
     }
 
     deselectAll() {
@@ -5313,17 +6663,60 @@ class WMOLApp {
             menu.innerHTML = '<li><span class="dropdown-item-text text-muted small">No external programs detected on server</span></li>';
             return;
         }
-        menu.innerHTML = programs.map(p => `
+
+        const PLATON_ACTIONS = {
+            checkcif: 'CheckCIF',
+            addsymm: 'ADDSYM',
+            squeeze: 'SQUEEZE',
+            twinrotmat: 'TwinRotMat'
+        };
+
+        let html = '';
+        for (const p of programs) {
+            if (p.id === 'platon') {
+                // PLATON is interactive; offer its most useful single-purpose
+                // actions as a submenu, each run with the matching instruction.
+                html += `<li class="dropdown-submenu">
+                    <a class="dropdown-item" href="#" data-submenu="platon">
+                        <div class="d-flex justify-content-between align-items-center">
+                            <span>${p.label}</span>
+                            <i class="fa-solid fa-chevron-right text-muted small"></i>
+                        </div>
+                        <div class="text-muted small">${p.description}</div>
+                    </a>
+                    <ul class="dropdown-menu">
+                        ${Object.entries(PLATON_ACTIONS).map(([action, label]) => `
+                        <li><a class="dropdown-item" href="#" data-program="platon" data-action="${action}">
+                            <div class="d-flex justify-content-between align-items-center">
+                                <span>${label}</span>
+                                <span class="text-muted small">${action}</span>
+                            </div>
+                        </a></li>`).join('')}
+                    </ul>
+                </li>`;
+            } else {
+                html += `
             <li><a class="dropdown-item" href="#" data-program="${p.id}">
                 <div>${p.label}</div>
                 <div class="text-muted small">${p.description}</div>
-            </a></li>`).join('');
+            </a></li>`;
+            }
+        }
+        menu.innerHTML = html;
+
         menu.querySelectorAll('a[data-program]').forEach(a => {
             a.addEventListener('click', (e) => {
                 e.preventDefault();
                 const id = a.getAttribute('data-program');
                 const program = programs.find(p => p.id === id);
-                if (program) this.runExternalProgram(program);
+                if (!program) return;
+                const action = a.getAttribute('data-action') || null;
+                if (id === 'platon' && !action) {
+                    // Opening PLATON itself: default to CheckCIF.
+                    this.runExternalProgram({ ...program }, 'checkcif');
+                    return;
+                }
+                this.runExternalProgram({ ...program }, action);
             });
         });
     }
@@ -5344,11 +6737,16 @@ class WMOLApp {
         return null;
     }
 
-    // Run an external crystallography program (shelxl, shelxt, ...) on the
-    // currently loaded files and show the results in the results modal.
-    async runExternalProgram(program) {
+    // Run an external crystallography program (shelxl, shelxt, platon, ...) on
+    // the currently loaded files and show the results in the results modal.
+    // `action` is used for PLATON to choose which single-purpose task to run.
+    async runExternalProgram(program, action = null) {
         const inputs = program.inputs || [];
         const formData = new FormData();
+        if (program.id === 'platon') {
+            // The server maps this to the matching PLATON instruction.
+            formData.append('action', action || 'checkcif');
+        }
 
         let baseName = 'structure';
         if (this.state.hklName) {
@@ -5458,19 +6856,22 @@ class WMOLApp {
 
             // Load the primary output back into the editor when the program produces it.
             const primary = { shelxl: '.res', shelxs: '.res', shelxt: '.res', shelxd: '.res', shelxh: '.res', shelxe: '.res' }[program.id];
-            if (primary && data.files) {
-                const key = Object.keys(data.files).find(k => k.toLowerCase().endsWith(primary));
-                if (key && this.state.editors.res) {
-                    const content = data.files[key] || '';
-                    // Never wipe the editor with an empty output (e.g. SHELXL
-                    // aborting on a bad instruction leaves an empty .res).
-                    if (content.trim().length > 0) {
-                        this.state.editors.res.setValue(content, -1);
-                        this.state.loadedContent = content;
-                        this.renderContent(content, 'res');
-                    } else {
-                        console.warn(`Program produced an empty ${primary} - keeping current editor content.`);
-                    }
+            let primaryKey = primary ? Object.keys(data.files || {}).find(k => k.toLowerCase().endsWith(primary)) : null;
+            // PLATON SQUEEZE returns the updated model (.res/.ins) carrying ABIN.
+            if (program.id === 'platon' && data.squeezeApplied) {
+                primaryKey = Object.keys(data.files || {}).find(k => /\.res$/i.test(k))
+                    || Object.keys(data.files || {}).find(k => /\.ins$/i.test(k));
+            }
+            if (primaryKey && this.state.editors.res) {
+                const content = data.files[primaryKey] || '';
+                // Never wipe the editor with an empty output (e.g. SHELXL
+                // aborting on a bad instruction leaves an empty .res).
+                if (content.trim().length > 0) {
+                    this.state.editors.res.setValue(content, -1);
+                    this.state.loadedContent = content;
+                    this.renderContent(content, 'res');
+                } else {
+                    console.warn(`Program produced an empty ${primaryKey} - keeping current editor content.`);
                 }
             }
 
@@ -5501,6 +6902,18 @@ class WMOLApp {
                     resultsSummary.innerHTML = program.id === 'shelxl' && data.files
                         ? this.buildRefinementSummary(Object.values(data.files).join('\n'))
                         : '';
+                    // Show a clear banner after a successful PLATON SQUEEZE.
+                    if (program.id === 'platon' && data.squeezeApplied) {
+                        const fab = data.fabReady
+                            ? '<span class="text-success">.fab ready</span>'
+                            : '<span class="text-danger">.fab missing</span>';
+                        resultsSummary.innerHTML = `<div class="alert alert-success py-2 small mb-2">
+                            <i class="fa-solid fa-droplet me-1"></i>
+                            <strong>SQUEEZE applied:</strong> solvent mask subtracted. ABIN was added to the
+                            .ins/.res (now loaded in the editor) and the mask is available to SHELXL as the
+                            ${fab} project file. Run <em>Refine Structure</em> to re-refine with the mask.
+                        </div>` + resultsSummary.innerHTML;
+                    }
                     // Show a clear failure banner when SHELXL aborted.
                     if (program.id === 'shelxl' && (data.success === false || data.message)) {
                         const msg = data.message || 'SHELXL reported an error and did not complete the refinement.';
@@ -5740,6 +7153,188 @@ class WMOLApp {
         if (this._refineAbortTimeout) {
             clearTimeout(this._refineAbortTimeout);
             this._refineAbortTimeout = null;
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Solve Structure & Validate (CheckCIF-style)
+    // -----------------------------------------------------------------------
+
+    async apiSolveInfo() {
+        const res = await fetch(this.getApiUrl('/solve-info'));
+        if (!res.ok) throw new Error('Failed to query solve pipeline status');
+        return res.json();
+    }
+
+    openSolveModal(mode = 'solve') {
+        const modalEl = document.getElementById('solveModal');
+        if (!modalEl) return;
+        this.state.solveMode = mode;
+        this.state.solveResult = null;
+        const title = document.getElementById('solve-modal-title');
+        if (title) {
+            title.innerHTML = mode === 'validate'
+                ? '<i class="fa-solid fa-clipboard-check me-2"></i>Validate Structure (CheckCIF-style)'
+                : '<i class="fa-solid fa-wand-magic-sparkles me-2"></i>Solve Structure & Validate';
+        }
+        // Toggle solve-specific options.
+        for (const id of ['solve-program', 'solve-cycles', 'solve-do-refine', 'solve-do-platon']) {
+            const el = document.getElementById(id);
+            if (el) el.closest('.col-md-2,.col-md-3')?.classList.toggle('d-none', mode === 'validate');
+        }
+        const hint = modalEl.querySelector('.small.text-muted.mb-2');
+        if (hint) {
+            hint.textContent = mode === 'validate'
+                ? 'Runs disorder/twinning detection and a CheckCIF-style report on the current model + refinement log. No files are modified.'
+                : 'Automated pipeline: SHELXT/SHELXS solution (if no model) → SHELXL refinement → disorder/twinning detection + CheckCIF-style validation. Files are saved to projects/<name> on the server.';
+        }
+
+        // Context summary.
+        const ctx = document.getElementById('solve-context');
+        const name = this.state.loadedFilename
+            || (this.state.lastStructureTabKey && this.state.fileTabs[this.state.lastStructureTabKey]?.filename)
+            || '(none loaded)';
+        if (ctx) ctx.textContent = name;
+        if (ctx) ctx.title = name;
+
+        // Populate program dropdown from server availability (default auto).
+        this.apiSolveInfo().then(info => {
+            const sel = document.getElementById('solve-program');
+            if (!sel) return;
+            const sols = info.solutions || ['shelxt'];
+            sel.innerHTML = '<option value="auto">auto</option>'
+                + sols.map(p => `<option value="${p}">${p.toUpperCase()}</option>`).join('');
+            sel.value = 'auto';
+            if (mode === 'solve' && !info.solutions.length) {
+                const st = document.getElementById('solve-status');
+                if (st) st.textContent = 'No solution program available on the server.';
+            }
+        }).catch(() => {});
+
+        // Reset output panes.
+        for (const id of ['solve-log-text', 'solve-report-text', 'solve-platon-text', 'solve-res-text']) {
+            const el = document.getElementById(id);
+            if (el) el.textContent = id === 'solve-log-text' ? 'Click Run to start.' : '(waiting for run)';
+        }
+        const st = document.getElementById('solve-status');
+        if (st) st.textContent = '';
+        const modal = new bootstrap.Modal(modalEl);
+        modal.show();
+    }
+
+    // Build multipart body for solve/validate from current editor content.
+    buildSolveForm(mode) {
+        const structure = this.getStructureContent();
+        if (!structure) throw new Error('No structure loaded. Load a .res/.ins/.cif first.');
+        const base = this.state.hklName
+            ? this.state.hklName.replace(/\.hkl$/i, '')
+            : (this.state.loadedFilename ? this.state.loadedFilename.replace(/\.[^.]+$/, '') : 'structure');
+        const safeBase = base.replace(/[^a-zA-Z0-9_-]/g, '_');
+
+        if (mode === 'validate') {
+            const lst = this.state.editors.lst ? this.state.editors.lst.getValue() : '';
+            const form = new FormData();
+            form.append('res', new Blob([structure], { type: 'text/plain' }), safeBase + '.res');
+            if (lst && lst.trim()) {
+                form.append('lst', new Blob([lst], { type: 'text/plain' }), safeBase + '.lst');
+            }
+            form.append('platon', '0');
+            return { form, safeBase };
+        }
+
+        if (!this.state.hklContent) {
+            throw new Error('No HKL file loaded. Load an .hkl file to run the solve pipeline.');
+        }
+        const form = new FormData();
+        form.append('ins', new Blob([structure], { type: 'text/plain' }), safeBase + '.ins');
+        form.append('hkl', new Blob([this.state.hklContent], { type: 'text/plain' }), safeBase + '.hkl');
+        form.append('program', (document.getElementById('solve-program') || {}).value || 'auto');
+        form.append('cycles', (document.getElementById('solve-cycles') || {}).value || '3');
+        form.append('refine', document.getElementById('solve-do-refine')?.checked ? '1' : '0');
+        form.append('platon', document.getElementById('solve-do-platon')?.checked ? '1' : '0');
+        return { form, safeBase };
+    }
+
+    renderSolveResult(result) {
+        this.state.solveResult = result;
+        const log = document.getElementById('solve-log-text');
+        const report = document.getElementById('solve-report-text');
+        const platon = document.getElementById('solve-platon-text');
+        const res = document.getElementById('solve-res-text');
+        const status = document.getElementById('solve-status');
+        if (log) log.textContent = result.logText || (result.steps || []).map(s => `[${s.status}] ${s.label}${s.message ? ' — ' + s.message : ''}`).join('\n');
+        if (report) report.textContent = result.reportText || '(no report)';
+        if (platon) {
+            if (result.platon) {
+                const p = result.platon;
+                const text = p.ok
+                    ? `PLATON completed.\n\n${p.files ? Object.entries(p.files).map(([f, t]) => `===== ${f} =====\n${t}`).join('\n\n') : ''}${p.stdout || p.stderr ? `\n===== stdout/stderr =====\n${p.stdout || ''}${p.stderr || ''}` : ''}`
+                    : `PLATON: ${p.reason || 'not run'}\n${p.stdout || ''}${p.stderr ? '\n' + p.stderr : ''}`;
+                platon.textContent = text.trim() || 'PLATON returned no output.';
+            } else {
+                platon.textContent = '(PLATON not run)';
+            }
+        }
+        if (res && result.files && result.files.res) res.textContent = result.files.res;
+        if (status) {
+            const c = result.report?.count;
+            status.textContent = result.success
+                ? 'Done — no level-A alerts.'
+                : (c ? `Done — A:${c.A} B:${c.B} C:${c.C}` : 'Done');
+        }
+    }
+
+    async runSolvePipeline() {
+        const mode = this.state.solveMode || 'solve';
+        const btn = document.getElementById('btn-solve-run');
+        if (btn) btn.disabled = true;
+        const status = document.getElementById('solve-status');
+        const endpoint = mode === 'validate' ? '/validate-structure' : '/solve-structure';
+        if (status) status.textContent = 'Running… (SHELX runs can take a while)';
+        try {
+            const { form } = this.buildSolveForm(mode);
+            const controller = new AbortController();
+            this.solveAbort = controller;
+            const timeout = Math.max(this.state.preferences?.general?.refineTimeout || 180000, 600000);
+            const res = await fetch(this.getApiUrl(endpoint), {
+                method: 'POST',
+                body: form,
+                signal: typeof AbortSignal.any === 'function'
+                    ? AbortSignal.any([AbortSignal.timeout(timeout), controller.signal])
+                    : controller.signal
+            });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.error || data.details || `HTTP ${res.status}`);
+            this.renderSolveResult(data);
+        } catch (e) {
+            if (status) status.textContent = '';
+            const log = document.getElementById('solve-log-text');
+            if (log) log.textContent = (e.name === 'TimeoutError') ? 'Pipeline timed out.' : `Error: ${e.message}`;
+        } finally {
+            this.solveAbort = null;
+            if (btn) btn.disabled = false;
+        }
+    }
+
+    // Load the refined .res produced by a solve run into the structure editor.
+    loadSolveResultRes() {
+        const result = this.state.solveResult;
+        if (!result || !result.files || !result.files.res) {
+            alert('No refined .res result to load yet.');
+            return;
+        }
+        const editor = this.state.editors.res;
+        if (editor) {
+            editor.setValue(result.files.res, -1);
+            this.state.loadedContent = result.files.res;
+            this.state.loadedFilename = `${result.project || 'structure'}.res`;
+            this.state.loadedType = 'res';
+            this.renderContent(result.files.res, 'res');
+            this.tryRender('res');
+        }
+        if (result.files && result.files.lst) {
+            const lstEditor = this.state.editors.lst;
+            if (lstEditor) lstEditor.setValue(result.files.lst, -1);
         }
     }
 

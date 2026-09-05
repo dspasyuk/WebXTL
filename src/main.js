@@ -4826,6 +4826,22 @@ class WMOLApp {
             this.raycaster.setFromCamera(this.mouse, this.state.camera);
             const intersects = this.raycaster.intersectObjects(this.state.scene.children, true);
 
+            // Middle click on empty space: recenter the orbit/view target and
+            // the electron-density map on the plane through the current target,
+            // so "center view" works even when no atom/map surface is hit.
+            if (intersects.length === 0 && event.button === 1 && !this.state.rsr.active) {
+                event.preventDefault();
+                const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(
+                    this.state.camera.getWorldDirection(new THREE.Vector3()),
+                    this.state.controls.target
+                );
+                const hit = new THREE.Vector3();
+                if (this.raycaster.ray.intersectPlane(plane, hit)) {
+                    this.centerViewAndMapOn(hit);
+                }
+                return;
+            }
+
             if (intersects.length > 0) {
                 // Find first mesh/instancedMesh
                 const target = intersects.find(i => i.object.isMesh || i.object.isInstancedMesh);
@@ -5029,34 +5045,20 @@ class WMOLApp {
                         const newTarget = new THREE.Vector3();
 
                         if (target.object.isInstancedMesh) {
+                            // Center on the clicked atom itself (sphere centre).
                             const matrix = new THREE.Matrix4();
                             target.object.getMatrixAt(target.instanceId, matrix);
                             newTarget.setFromMatrixPosition(matrix);
                             newTarget.applyMatrix4(target.object.matrixWorld);
+                        } else if (target.point) {
+                            // Non-instanced object (e.g. density-map surface):
+                            // recenter exactly on the point that was clicked.
+                            newTarget.copy(target.point);
                         } else {
                             target.object.getWorldPosition(newTarget);
                         }
 
-                        const currentTarget = this.state.controls.target.clone();
-                        const delta = new THREE.Vector3().subVectors(newTarget, currentTarget);
-                        
-                        this.state.camera.position.add(delta);
-                        this.state.controls.target.copy(newTarget);
-                        this.state.controls.update();
-
-                        let atomData = null;
-                        if (target.object.isInstancedMesh && target.object.userData.atomMap) {
-                            atomData = target.object.userData.atomMap[target.instanceId];
-                        }
-                        if (!atomData) {
-                            const atomHit = intersects.find(i => i.object.isInstancedMesh && i.object.userData.atomMap);
-                            if (atomHit) {
-                                atomData = atomHit.object.userData.atomMap[atomHit.instanceId];
-                            }
-                        }
-                        if (atomData) {
-                            this.recenterMapToAtom(atomData);
-                        }
+                        this.centerViewAndMapOn(newTarget);
                     }
                 }
             } else if (this.state.rsr.active && this.state.fragment.active && this.state.fragment.selectedId && !this.state.preview.active) {
@@ -5883,7 +5885,25 @@ class WMOLApp {
 
     // ========== FRAGMENT PLACEMENT ==========
 
-    recenterMapToAtom(atomData) {
+    // Move the orbit/view target (and thus the whole scene's "centre of
+    // gravity") to `point`, then recenter the electron-density map to the same
+    // point so both move together on a middle click.
+    centerViewAndMapOn(point) {
+        if (!point || !this.state.controls) return;
+        const currentTarget = this.state.controls.target.clone();
+        const delta = new THREE.Vector3().subVectors(point, currentTarget);
+
+        this.state.camera.position.add(delta);
+        this.state.controls.target.copy(point);
+        this.state.controls.update();
+
+        this.recenterMapToWorldPoint(point);
+    }
+
+    // Recenter the electron-density map so its centre is the given point in
+    // world coordinates. Works for clicks on atoms, on the map surface or in
+    // empty space: both the orbit/view target and the map move together.
+    recenterMapToWorldPoint(worldPoint) {
         if (!this.state.currentMapData || !this.state.densityRenderer) return;
         if (!this.state.cachedMapData) return;
 
@@ -5892,15 +5912,20 @@ class WMOLApp {
         const level = parseFloat(document.getElementById('map-level').value) || 1.0;
         const color = new THREE.Color(this.state.preferences.map.color);
 
-        const fracToCartM = this.getFracToCartMatrix(mapCell);
+        // The molecule + map are children of moleculeRenderer.group, which is
+        // translated by -center so the whole structure sits at the origin.
+        // Recover the map-cell Cartesian frame position of the clicked point.
+        let offset = new THREE.Vector3();
+        if (this.state.moleculeRenderer && this.state.moleculeRenderer.group) {
+            offset.copy(this.state.moleculeRenderer.group.position);
+        }
+        const cx = worldPoint.x - offset.x;
+        const cy = worldPoint.y - offset.y;
+        const cz = worldPoint.z - offset.z;
+
         const cartToFracM = this.getCartToFracMatrix(mapCell);
 
-        // Atom's Cartesian position in the map-cell frame
-        const cx = fracToCartM.m11 * atomData.x + fracToCartM.m12 * atomData.y + fracToCartM.m13 * atomData.z;
-        const cy = fracToCartM.m22 * atomData.y + fracToCartM.m23 * atomData.z;
-        const cz = fracToCartM.m33 * atomData.z;
-
-        // Cube corners in Cartesian around the atom, converted to fractional bounds
+        // Cube corners in map Cartesian around the point -> fractional bounds
         const deltas = [
             [-1,-1,-1],[1,-1,-1],[-1,1,-1],[1,1,-1],
             [-1,-1,1],[1,-1,1],[-1,1,1],[1,1,1]

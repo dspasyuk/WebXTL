@@ -84,6 +84,7 @@ class WMOLApp {
             xrdspaceIns: null, // { filename, content } generated SHELX .ins for SHELXT
             hklContent: null,
             hklName: null,
+            hklServerProject: null, // project name when the HKL lives server-side (no content in browser)
             fcfRawContent: null,
             splitView: false,
             splitInstance: null,
@@ -143,7 +144,9 @@ class WMOLApp {
                     radius: 10.0,
                     resolution: 0.5,
                     color: '#0000ff',
-                    autoShow: false
+                    autoShow: false,
+                    style: 'wireframe',
+                    opacity: 0.4
                 }
             },
             selectionOrder: [], // Track order of selected rows
@@ -1003,8 +1006,9 @@ class WMOLApp {
             filename,
             hasStructure: !!structure,
             structurePreview: this.truncateForAI(structure, 20000),
-            hasHkl: !!this.state.hklContent,
-            hklName: this.state.hklName || null,
+            hasHkl: this.hasHkl(),
+            hklName: this.state.hklName || (this.hasHkl() ? this.hklBaseName() + '.hkl' : null),
+            hklServerSide: !!this.state.hklServerProject,
             hklHeader: this.state.hklContent ? this.truncateForAI(this.state.hklContent.split(/\r?\n/).slice(0, 25).join('\n'), 3000) : '',
             xrdspaceIns: this.state.xrdspaceIns ? this.truncateForAI(this.state.xrdspaceIns.content, 30000) : null,
             lastLstStats: this.lstStats()
@@ -1052,15 +1056,15 @@ class WMOLApp {
         // structure to run: explicit arg or current editor content
         let structure = (args && args.structure) || this.getStructureContent();
         if (!structure) return { error: 'No structure text available. Load a .ins/.res or call webxtl_apply_structure first.' };
-        if (!this.state.hklContent) {
-            return { error: 'No HKL file loaded. Load the .hkl file (File > Load HKL) before running a program.' };
+        if (!(await this.ensureHklForRun())) {
+            return { error: 'No HKL file available. Load the .hkl file (File > Load HKL) or open a project that contains one before running a program.' };
         }
 
-        const base = (this.state.hklName ? this.state.hklName.replace(/\.hkl$/i, '') : 'structure').replace(/[^a-zA-Z0-9_-]/g, '_');
+        const base = this.hklBaseName().replace(/[^a-zA-Z0-9_-]/g, '_');
         const form = new FormData();
         const needsHkl = ['shelxt', 'shelxs', 'shelxd', 'shelxl'].includes(programId);
         form.append('ins', new Blob([structure], { type: 'text/plain' }), base + '.ins');
-        if (needsHkl) form.append('hkl', new Blob([this.state.hklContent], { type: 'text/plain' }), base + '.hkl');
+        if (needsHkl) this.appendHklPart(form, base);
 
         const controller = new AbortController();
         this.state.aiAbortController = controller;
@@ -1148,13 +1152,13 @@ class WMOLApp {
     async aiToolRefine(args) {
         const structure = this.getStructureContent();
         if (!structure) return { error: 'No structure loaded to refine. Solve first or load a .res/.ins.' };
-        if (!this.state.hklContent) return { error: 'No HKL file loaded.' };
+        if (!(await this.ensureHklForRun())) return { error: 'No HKL file available. Load an .hkl file or open a project that contains one.' };
 
         const cycles = Math.max(1, Math.min(20, parseInt((args && args.cycles) || 3, 10) || 3));
-        const base = (this.state.hklName ? this.state.hklName.replace(/\.hkl$/i, '') : 'structure').replace(/[^a-zA-Z0-9_-]/g, '_');
+        const base = this.hklBaseName().replace(/[^a-zA-Z0-9_-]/g, '_');
         const form = new FormData();
         form.append('ins', new Blob([structure], { type: 'text/plain' }), base + '.ins');
-        form.append('hkl', new Blob([this.state.hklContent], { type: 'text/plain' }), base + '.hkl');
+        this.appendHklPart(form, base);
         form.append('cycles', String(cycles));
         form.append('mode', 'weight'); // apply recommended WGHT each cycle
 
@@ -1216,12 +1220,12 @@ class WMOLApp {
     async aiToolSolve(args) {
         const insText = this.getStructureContent();
         if (!insText) return { error: 'No structure template in the editor.' };
-        if (!this.state.hklContent) return { error: 'No HKL file loaded.' };
+        if (!(await this.ensureHklForRun())) return { error: 'No HKL file available. Load an .hkl file or open a project that contains one.' };
 
-        const base = (this.state.hklName ? this.state.hklName.replace(/\.hkl$/i, '') : 'structure').replace(/[^a-zA-Z0-9_-]/g, '_');
+        const base = this.hklBaseName().replace(/[^a-zA-Z0-9_-]/g, '_');
         const form = new FormData();
         form.append('ins', new Blob([insText], { type: 'text/plain' }), base + '.ins');
-        form.append('hkl', new Blob([this.state.hklContent], { type: 'text/plain' }), base + '.hkl');
+        this.appendHklPart(form, base);
         form.append('program', (args && args.program) || 'auto');
         form.append('cycles', String((args && args.cycles) || 3));
         form.append('refine', '1');
@@ -1278,11 +1282,17 @@ class WMOLApp {
     }
 
     async aiToolSpaceGroup(args) {
-        if (!this.state.hklContent) return { error: 'No HKL file loaded.' };
+        if (!(await this.ensureHklForRun())) return { error: 'No HKL file available. Load an .hkl file or open a project that contains one.' };
         const force = (args && args.force && String(args.force).trim()) || null;
         let result;
         try {
-            result = await this.apiXrdspaceAnalyze(this.state.hklContent, null, force);
+            result = await this.apiXrdspaceAnalyze(
+                this.state.hklContent,
+                null,
+                force,
+                null,
+                this.state.hklContent ? null : this.state.hklServerProject || this.state.currentProject
+            );
         } catch (e) {
             return { error: `xrdspace failed: ${e.message}` };
         }
@@ -1351,47 +1361,108 @@ class WMOLApp {
         }
     }
 
-    saveStateToLocalStorage() {
-        if (this.state.preferences && this.state.preferences.general.autoSave === false) return;
+    // localStorage helpers -----------------------------------------------------
+    // localStorage has a ~5 MB per-origin quota. Session content (HKL/FCF) is
+    // intentionally never persisted; only small metadata is stored. These
+    // wrappers drop oversized/legacy keys on quota errors instead of failing.
+    lsRemove(k) { try { localStorage.removeItem(k); } catch (e) { /* ignore */ } }
+    lsSet(k, v) {
         try {
-            if (this.state.loadedContent) {
-                localStorage.setItem('webxtl_res_content', this.state.loadedContent);
-                localStorage.setItem('webxtl_loaded_type', this.state.loadedType);
-                localStorage.setItem('webxtl_loaded_filename', this.state.loadedFilename || '');
-            }
-            if (this.state.currentProject) {
-                localStorage.setItem('webxtl_current_project', this.state.currentProject);
-            }
-            // Persist open file tabs (content + metadata) so they survive a refresh.
-            const tabs = [];
-            for (const [name, t] of Object.entries(this.state.fileTabs || {})) {
-                const content = t.editor ? t.editor.getValue() : '';
-                if (content.length < 3 * 1024 * 1024) {
-                    tabs.push({ filename: t.filename, type: t.type, project: t.project, content });
-                }
-            }
-            localStorage.setItem('webxtl_file_tabs', JSON.stringify(tabs));
-        } catch(e) { console.warn('localStorage save error:', e.message); }
-        try {
-            if (this.state.hklContent && this.state.hklContent.length < 3 * 1024 * 1024) {
-                localStorage.setItem('webxtl_hkl_content', this.state.hklContent);
-                localStorage.setItem('webxtl_hkl_name', this.state.hklName || '');
-            }
-        } catch(e) { console.warn('localStorage HKL save error:', e.message); }
-        try {
-            if (this.state.fcfRawContent && this.state.fcfRawContent.length < 3 * 1024 * 1024) {
-                localStorage.setItem('webxtl_fcf_content', this.state.fcfRawContent);
-            }
-        } catch(e) { console.warn('localStorage FCF save error:', e.message); }
+            localStorage.setItem(k, v);
+            return;
+        } catch (e) {
+            const quota = e && (e.name === 'QuotaExceededError' || /quota/i.test(e.message || ''));
+            if (!quota) { console.warn('localStorage save error:', e.message); return; }
+        }
+        // Quota exceeded: free the big legacy/session keys, then retry once.
+        ['webxtl_res_content', 'webxtl_file_tabs', 'webxtl_hkl_name', 'webxtl_hkl_project',
+         'webxtl_hkl_content', 'webxtl_fcf_content', 'webxtl_current_project',
+         'webxtl_loaded_type', 'webxtl_loaded_filename'].forEach(k => this.lsRemove(k));
+        try { localStorage.setItem(k, v); }
+        catch (e2) { /* still over quota - skip */ }
     }
 
-    restoreStateFromLocalStorage() {
+    saveStateToLocalStorage() {
+        if (this.state.preferences && this.state.preferences.general.autoSave === false) return;
+        // Never keep reflection data client-side: HKL lives in the server
+        // project, FCF is re-fetched from the project only to draw the map.
+        this.lsRemove('webxtl_hkl_content');
+        this.lsRemove('webxtl_fcf_content');
+
+        if (this.state.loadedContent && this.state.loadedContent.length < 512 * 1024) {
+            this.lsSet('webxtl_res_content', this.state.loadedContent);
+            this.lsSet('webxtl_loaded_type', this.state.loadedType);
+            this.lsSet('webxtl_loaded_filename', this.state.loadedFilename || '');
+        }
+        if (this.state.currentProject) {
+            this.lsSet('webxtl_current_project', this.state.currentProject);
+        }
+        // Persist open file tabs (content + metadata) so they survive a
+        // refresh, but only small text tabs - never HKL/FCF data.
+        const tabs = [];
+        for (const [name, t] of Object.entries(this.state.fileTabs || {})) {
+            if (t.type === 'hkl' || t.type === 'fcf') continue;
+            const content = t.editor ? t.editor.getValue() : '';
+            if (content.length < 128 * 1024) {
+                tabs.push({ filename: t.filename, type: t.type, project: t.project, content });
+            }
+        }
+        this.lsSet('webxtl_file_tabs', JSON.stringify(tabs));
+        // Persist only the HKL reference (name + project) - never the content.
+        this.lsSet('webxtl_hkl_name', this.state.hklName || '');
+        this.lsSet('webxtl_hkl_project', this.state.hklServerProject || '');
+    }
+
+    async restoreStateFromLocalStorage() {
         if (this.state.preferences && this.state.preferences.general.restoreSession === false) return;
+        // Purge any large reflection data left by earlier versions of the app so
+        // a full localStorage never breaks the quota again.
+        this.lsRemove('webxtl_hkl_content');
+        this.lsRemove('webxtl_fcf_content');
+        const currentProject = localStorage.getItem('webxtl_current_project');
+
+        // If the last session was a server project, reload the *latest* project
+        // from the server. This re-attaches the HKL reference, auto-loads the
+        // .fcf (density map) and .cif exactly like a manual project load, and
+        // avoids restoring stale editor text saved in localStorage.
+        if (currentProject) {
+            const ok = await this.loadProjectFromServer(currentProject, { silent: true });
+            if (ok) {
+                this.restoreAuxFileTabs();
+                return;
+            }
+            // Server unreachable / project missing - fall through to the saved text.
+        }
+
+        this.restoreSavedTextSession();
+    }
+
+    // Restore only auxiliary file tabs (pdb, lst, log, ...) from localStorage.
+    // HKL/FCF tabs are never persisted.
+    restoreAuxFileTabs() {
+        try {
+            const rawTabs = localStorage.getItem('webxtl_file_tabs');
+            if (rawTabs) {
+                const tabs = JSON.parse(rawTabs);
+                for (const t of tabs) {
+                    if (t && t.filename && t.type !== 'hkl' && t.type !== 'fcf') {
+                        this.openFileTab(t.filename, t.content, t.type, t.project || null, false);
+                    }
+                }
+            }
+        } catch (e) {
+            console.warn('Failed to restore file tabs:', e.message);
+        }
+    }
+
+    // Fallback used when no server project is known: restore the raw .res/.ins
+    // text plus HKL reference that were persisted before the restart.
+    restoreSavedTextSession() {
         const resContent = localStorage.getItem('webxtl_res_content');
         const loadedType = localStorage.getItem('webxtl_loaded_type');
         const filename = localStorage.getItem('webxtl_loaded_filename');
-        const hklContent = localStorage.getItem('webxtl_hkl_content');
         const hklName = localStorage.getItem('webxtl_hkl_name');
+        const hklProject = localStorage.getItem('webxtl_hkl_project');
         const fcfContent = localStorage.getItem('webxtl_fcf_content');
         const currentProject = localStorage.getItem('webxtl_current_project');
 
@@ -1411,34 +1482,29 @@ class WMOLApp {
         this.renderContent(resContent, loadedType);
         this.resetView();
 
-        if (hklContent) {
-            this.state.hklContent = hklContent;
+        // The HKL content is not persisted (only its name/project), so a
+        // restored session references the server-side file instead of holding
+        // the data in the browser.
+        if (hklName) {
             this.state.hklName = hklName || null;
-            const statusHkl = document.getElementById('status-hkl');
-            if (statusHkl) {
-                statusHkl.classList.remove('bg-secondary');
-                statusHkl.classList.add('bg-success');
-                statusHkl.title = "HKL Loaded: " + (hklName || 'unknown');
+            this.state.hklContent = null;
+            if (hklProject || this.state.currentProject) {
+                this.state.hklServerProject = hklProject || this.state.currentProject;
             }
+            this.refreshHklStatus();
         }
 
         if (fcfContent) {
             setTimeout(() => this.renderMap(fcfContent), 200);
         }
 
-        // Restore open file tabs (hkl, fcf, pdb, lst, ...).
-        try {
-            const rawTabs = localStorage.getItem('webxtl_file_tabs');
-            if (rawTabs) {
-                const tabs = JSON.parse(rawTabs);
-                for (const t of tabs) {
-                    if (t && t.filename) {
-                        this.openFileTab(t.filename, t.content, t.type, t.project || null, false);
-                    }
-                }
-            }
-        } catch (e) {
-            console.warn('Failed to restore file tabs:', e.message);
+        this.restoreAuxFileTabs();
+
+        // After a session restore the HKL lives only on the server; register the
+        // reference (without loading content) so the status badge shows it and
+        // refine/solve can run immediately.
+        if (!this.state.hklContent && !this.state.hklServerProject) {
+            setTimeout(() => { this.ensureHklForRun(); }, 150);
         }
     }
 
@@ -1523,6 +1589,8 @@ class WMOLApp {
             { id: 'pref-map-radius', path: 'map.radius', type: 'number' },
             { id: 'pref-map-resolution', path: 'map.resolution', type: 'number' },
             { id: 'pref-map-color', path: 'map.color', type: 'color' },
+            { id: 'pref-map-style', path: 'map.style' },
+            { id: 'pref-map-opacity', path: 'map.opacity', type: 'number' },
             { id: 'pref-map-autoshow', path: 'map.autoShow', type: 'checkbox' }
         ];
 
@@ -1555,12 +1623,16 @@ class WMOLApp {
 
     applyMapControlsFromPrefs() {
         const typeSel = document.getElementById('map-type');
+        const styleSel = document.getElementById('map-style');
         const levelIn = document.getElementById('map-level');
         const radiusIn = document.getElementById('map-radius');
+        const opacityIn = document.getElementById('map-opacity');
         const map = this.state.preferences.map;
         if (typeSel && map.type) typeSel.value = map.type;
+        if (styleSel && map.style) styleSel.value = map.style;
         if (levelIn && map.sigma) levelIn.value = map.sigma;
         if (radiusIn && map.radius) radiusIn.value = map.radius;
+        if (opacityIn && map.opacity != null) opacityIn.value = map.opacity;
     }
 
     applyPreferences() {
@@ -1584,6 +1656,10 @@ class WMOLApp {
             editor.setOption('showLineNumbers', prefs.showLineNumbers);
             editor.setOption('showGutter', prefs.showLineNumbers);
             editor.setOption('highlightActiveLine', prefs.highlightActiveLine);
+            // SHELX/CIF files are column/format driven - never auto-indent the
+            // next line when pressing Enter (keeps new lines at column 0).
+            editor.setOption('enableAutoIndent', false);
+            editor.setOption('behavioursEnabled', false);
         };
         applyEditorOpts(this.state.editors.res);
         applyEditorOpts(this.state.editors.cif);
@@ -1600,6 +1676,13 @@ class WMOLApp {
 
         // Sync toolbar map controls
         this.applyMapControlsFromPrefs();
+
+        // Apply map display style (wireframe vs smooth surface) and opacity
+        if (this.state.densityRenderer) {
+            this.state.densityRenderer.setStyle(this.state.preferences.map.style || 'wireframe');
+            this.state.densityRenderer.setOpacity(this.state.preferences.map.opacity != null
+                ? this.state.preferences.map.opacity : 0.4);
+        }
 
         // Re-render 3D content to apply bond/color changes
         if (this.state.loadedContent) {
@@ -1664,6 +1747,24 @@ class WMOLApp {
         return res.json();
     }
 
+    // Upload binary/large project companion files (HKL reflection data, SQUEEZE
+    // .fab masks, ...) to a server project without holding their content in the
+    // browser. Files keep their original names server-side.
+    async apiUploadProjectFiles(name, files) {
+        const form = new FormData();
+        for (const f of files) form.append('file', f, f.name);
+        const res = await fetch(this.getApiUrl(`/projects/${encodeURIComponent(name)}/upload`), {
+            method: 'POST',
+            body: form
+        });
+        if (!res.ok) {
+            let detail = '';
+            try { const e = await res.json(); detail = e.error || e.details || ''; } catch (err) { /* ignore */ }
+            throw new Error(detail || `Upload failed (HTTP ${res.status})`);
+        }
+        return res.json();
+    }
+
     async apiListBackups(name) {
         const res = await fetch(this.getApiUrl(`/projects/${name}/backups`));
         if (!res.ok) throw new Error('Failed to list backups');
@@ -1689,12 +1790,20 @@ class WMOLApp {
     }
 
     // POST an HKL file to the xrdspace analysis endpoint.
+    // `hklText` may be null when the HKL is a server-project file; in that case
+    // `project` names the project directory whose same-basename .hkl is used.
     // `cell` is optional: "a b c alpha beta gamma" or null.
     // `spaceGroup` is optional: number or Hermann-Mauguin symbol, or null.
     // `signal` is an optional AbortSignal for cancellation.
-    async apiXrdspaceAnalyze(hklText, cell, spaceGroup, signal) {
+    async apiXrdspaceAnalyze(hklText, cell, spaceGroup, signal, project) {
         const formData = new FormData();
-        formData.append('hkl', new Blob([hklText], { type: 'text/plain' }), 'data.hkl');
+        if (hklText) {
+            formData.append('hkl', new Blob([hklText], { type: 'text/plain' }), 'data.hkl');
+        } else if (project) {
+            formData.append('project', project);
+        } else {
+            throw new Error('No HKL data available for xrdspace analysis.');
+        }
         if (cell) formData.append('cell', cell);
         if (spaceGroup !== undefined && spaceGroup !== null && spaceGroup !== '') {
             formData.append('spaceGroup', String(spaceGroup));
@@ -2023,6 +2132,7 @@ class WMOLApp {
         this.state.currentProject = null;
         this.state.hklContent = null;
         this.state.hklName = null;
+        this.state.hklServerProject = null;
         this.state.fcfRawContent = null;
         this.state.cachedMapData = null;
         this.state.currentMapData = null;
@@ -2051,7 +2161,7 @@ class WMOLApp {
         try {
             ['webxtl_res_content', 'webxtl_loaded_type', 'webxtl_loaded_filename',
              'webxtl_current_project', 'webxtl_file_tabs', 'webxtl_hkl_content',
-             'webxtl_hkl_name', 'webxtl_fcf_content', 'webxtl_ai_logs'].forEach(k => localStorage.removeItem(k));
+             'webxtl_hkl_name', 'webxtl_hkl_project', 'webxtl_fcf_content', 'webxtl_ai_logs'].forEach(k => localStorage.removeItem(k));
         } catch (e) { /* ignore */ }
 
         // Stop any running AI analysis / solve pipeline.
@@ -2178,6 +2288,7 @@ class WMOLApp {
         if (ext === 'res' || ext === 'ins') return 'fa-solid fa-file-lines';
         if (ext === 'hkl') return 'fa-solid fa-table';
         if (ext === 'fcf') return 'fa-solid fa-mountain-sun';
+        if (ext === 'fab') return 'fa-solid fa-droplet';
         if (ext === 'lst' || ext === 'log') return 'fa-solid fa-list';
         return 'fa-solid fa-file';
     }
@@ -2270,6 +2381,10 @@ class WMOLApp {
         editor.setTheme(this.state.preferences.editor.theme);
         editor.setFontSize(this.state.preferences.editor.fontSize);
         editor.setOption('fontFamily', this.state.preferences.editor.fontFamily);
+        // Never auto-indent new lines or pair brackets - SHELX/CIF text is
+        // column driven, so pressing Enter must land at the start of the line.
+        editor.setOption('enableAutoIndent', false);
+        editor.setOption('behavioursEnabled', false);
         editor.session.setMode(this.getAceModeForExt(type));
         editor.setValue(content, -1);
 
@@ -2345,6 +2460,30 @@ class WMOLApp {
         const ext = filename.split('.').pop().toLowerCase();
 
         try {
+            // HKL files are kept server-side (they can be very large). Opening a
+            // project or clicking one of its files should NOT stream the whole
+            // reflection list into the browser - only the reference is recorded.
+            if (ext === 'hkl') {
+                this.state.currentProject = projectName;
+                this.state.hklName = filename;
+                this.state.hklContent = null;
+                this.state.hklServerProject = projectName;
+                this.refreshHklStatus();
+                this.saveStateToLocalStorage();
+                if (activate) {
+                    const statusHkl = document.getElementById('status-hkl');
+                    if (statusHkl) statusHkl.title = 'HKL on server: ' + filename;
+                }
+                return;
+            }
+            // .fab (SQUEEZE solvent mask) is consumed server-side by SHELXL next
+            // to <basename>.ins - no need to pull its content into the browser.
+            if (ext === 'fab') {
+                this.state.currentProject = projectName;
+                this.saveStateToLocalStorage();
+                if (activate) alert('FAB mask is already available in project "' + projectName + '" as ' + filename + '.\nSHELXL will pick it up when the model uses ABIN.');
+                return;
+            }
             const content = await this.apiGetProjectFile(projectName, filename);
 
             if (['res', 'ins'].includes(ext)) {
@@ -2381,21 +2520,14 @@ class WMOLApp {
                 this.resetView();
                 this.openFileTab(filename, content, ext, projectName, activate);
             } else {
-                // Other text files (hkl, fcf, lst, log, ...) -> editable text tab
+                // FCF: read only to render the electron-density map client-side
+                // (never open in a text tab - it is a static companion file).
                 this.state.currentProject = projectName;
-                this.openFileTab(filename, content, ext, projectName, activate);
-
-                if (ext === 'hkl') {
-                    this.state.hklContent = content;
-                    this.state.hklName = filename;
-                    const statusHkl = document.getElementById('status-hkl');
-                    if (statusHkl) {
-                        statusHkl.classList.remove('bg-secondary');
-                        statusHkl.classList.add('bg-success');
-                        statusHkl.title = "HKL Loaded: " + filename;
-                    }
-                } else if (ext === 'fcf') {
+                if (ext === 'fcf') {
                     this.renderMap(content);
+                } else {
+                    // lst, log, ... -> editable text tab
+                    this.openFileTab(filename, content, ext, projectName, activate);
                 }
             }
         } catch (err) {
@@ -2404,10 +2536,16 @@ class WMOLApp {
         this.saveStateToLocalStorage();
     }
     
-    async loadProjectFromServer(name) {
+    async loadProjectFromServer(name, opts = {}) {
+        const silent = !!(opts && opts.silent);
         try {
             // 1. Load Main Structure
             const data = await this.apiLoadProject(name);
+            if (!data || !data.content) {
+                // Project has no .res/.ins model - nothing to display.
+                if (!silent) alert(`Project '${name}' has no structure file (.res/.ins) to load.`);
+                return false;
+            }
             this.state.currentProject = data.name;
             this.state.loadedType = data.type;
             this.state.loadedContent = data.content;
@@ -2420,14 +2558,28 @@ class WMOLApp {
             // 2. Auto-load associated HKL and FCF if they exist
             const files = await this.apiListProjectFiles(name);
             
-            // Look for HKL
-            const hklFile = files.find(f => f.name.toLowerCase() === `${name.toLowerCase()}.hkl`);
+            // Look for HKL (register the same-basename reflections file so runs
+            // reuse it server-side; content is never downloaded to the browser).
+            const lower = name.toLowerCase();
+            const hklFile = files.find(f => f.name.toLowerCase() === `${lower}.hkl`)
+                || files.find(f => /\.hkl$/i.test(f.name) && f.name.toLowerCase().startsWith(lower + '_'))
+                || files.find(f => /\.hkl$/i.test(f.name));
             if (hklFile) {
-                await this.loadSpecificFileFromServer(name, hklFile.name, true, false);
+                this.state.currentProject = name;
+                this.state.hklName = hklFile.name;
+                this.state.hklContent = null;
+                this.state.hklServerProject = name;
+                this.refreshHklStatus();
+            } else {
+                // Project has no HKL companion - no server-side reflections.
+                this.state.hklContent = null;
+                this.state.hklServerProject = null;
             }
             
-            // Look for FCF
-            const fcfFile = files.find(f => f.name.toLowerCase() === `${name.toLowerCase()}.fcf`);
+            // Look for FCF (any same-basename variant, e.g. name.fcf or name_2.fcf)
+            const fcfFile = files.find(f => f.name.toLowerCase() === `${name.toLowerCase()}.fcf`)
+                || files.find(f => /\.fcf$/i.test(f.name) && f.name.toLowerCase().startsWith(name.toLowerCase() + '_'))
+                || files.find(f => /\.fcf$/i.test(f.name));
             if (fcfFile) {
                 await this.loadSpecificFileFromServer(name, fcfFile.name, true, false);
             }
@@ -2449,11 +2601,13 @@ class WMOLApp {
             this.saveStateToLocalStorage();
 
             const modalEl = document.getElementById('projectManagerModal');
-            const modal = bootstrap.Modal.getInstance(modalEl);
-            if (modal) modal.hide();
+            const modal = modalEl ? bootstrap.Modal.getInstance(modalEl) : null;
+            if (modal && !silent) modal.hide();
 
+            return true;
         } catch (err) {
-            alert(`Error loading project: ${err.message}`);
+            if (!silent) alert(`Error loading project: ${err.message}`);
+            return false;
         }
     }
     
@@ -2803,11 +2957,32 @@ class WMOLApp {
             this.tryRender('res');
         };
 
-        // Kill Q (Ctrl-Alt-K)
+        // Kill Q (Ctrl-Alt-K). Always removes ALL Q-peak lines in the document
+        // regardless of the current selection - a Q peak (difference peak) is a
+        // whole-file concept and killing only a highlighted fragment confuses users.
         editor.commands.addCommand({
             name: 'killQ',
             bindKey: {win: 'Ctrl-Alt-K', mac: 'Command-Alt-K'},
-            exec: (editor) => killPattern(/^Q\d+/i, "Q Peaks", false) // No confirm for Q? Python didn't seem to ask.
+            exec: (editor) => {
+                const doc = editor.getSession().getDocument();
+                const lines = doc.getAllLines();
+                const keep = [];
+                lines.forEach((line, i) => {
+                    if (/^Q\d+/i.test(line.trim())) return;
+                    keep.push(i);
+                });
+                if (keep.length === lines.length) {
+                    const status = document.getElementById('status-bar-content');
+                    if (status) status.textContent = 'No Q peaks found.';
+                    return;
+                }
+                const kept = lines.filter(line => !/^Q\d+/i.test(line.trim()));
+                editor.setValue(kept.join('\n'), -1);
+                this.tryRender('res');
+                const removed = lines.length - kept.length;
+                const status = document.getElementById('status-bar-content');
+                if (status) status.textContent = `Removed ${removed} Q peak(s).`;
+            }
         });
 
         // Kill H (Ctrl-Alt-H)
@@ -2863,35 +3038,73 @@ class WMOLApp {
             name: 'makeIsotropic',
             bindKey: {win: 'Ctrl-Alt-I', mac: 'Command-Alt-I'},
             exec: (editor) => {
-                // Remove Uij parameters (keep x, y, z, sof, Uiso)
-                // Standard Shelx atom: Label type x y z sof Uiso [U11 U22 U33 U23 U13 U12]
-                // Usually 7 fields + 6 optional
-                const range = editor.getSelectionRange();
+                // Remove anisotropic Uij parameters, keeping the isotropic form:
+                //   Label type x y z sof Uiso
+                // SHELX wraps long atom lines by ending the physical line with
+                // "=" and continuing the remaining Uij on the next line(s), so a
+                // single atom may span several editor rows. Merge the wrapped
+                // continuation lines first, then keep only the first 7 tokens.
                 const doc = editor.getSession().getDocument();
+                const range = editor.getSelectionRange();
                 const startRow = range.isEmpty() ? 0 : range.start.row;
                 const endRow = range.isEmpty() ? doc.getLength() - 1 : range.end.row;
 
+                // Continuation line => previous line ended with "=" and this one
+                // starts with a number (or "="), i.e. still atom data.
+                const isContinuation = (line) => {
+                    const trimmed = line.trim();
+                    if (!trimmed) return false;
+                    if (trimmed === '=') return true;
+                    const first = trimmed.split(/\s+/)[0];
+                    return /^[+\-]?\d/.test(first);
+                };
+
+                const segments = []; // { start, end, tokens[] }
                 for (let i = startRow; i <= endRow; i++) {
                     let line = doc.getLine(i);
-                    let parts = line.trim().split(/\s+/);
-                    // Heuristic: if more than 8 parts, truncate to 8 (Label type x y z sof Uiso)
-                    // Or check if parts are numbers.
-                    // Let's assume standard format for now.
-                    if (parts.length > 7) {
-                         // Keep first 7 parts (indices 0-6) + maybe 8th if it's not Uij?
-                         // Actually Uiso is the 6th or 7th parameter depending on format.
-                         // Let's just keep the first 7 tokens if they look like an atom line.
-                         // Atom line usually starts with letter.
-                         const label = parts[0].toUpperCase();
-                         const keywords = ['TITL', 'CELL', 'ZERR', 'LATT', 'SYMM', 'SFAC', 'UNIT', 'HFIX', 'BOND', 'CONF', 'MPLA', 'HTAB', 'EQIV', 'CONN', 'PART', 'AFIX', 'RESI', 'MOLE', 'PLAN', 'SIZE', 'TEMP', 'WGHT', 'FVAR', 'HKLF', 'END', 'REM', 'Q', 'OMIT', 'DISP', 'ISOR', 'RIGI', 'SIMU', 'DELU', 'DANG', 'BUMP'];
-                         
-                         if (/^[A-Z]/i.test(parts[0]) && !keywords.includes(label)) {
-                             const newLine = parts.slice(0, 7).join('  ');
-                             // Replace line
-                             doc.removeInLine(i, 0, line.length);
-                             doc.insertInLine({row: i, column: 0}, newLine);
-                         }
+                    let parts = line.trim().split(/\s+/).filter(p => p && p !== '=');
+                    // Atom lines must start with a label; skip keywords/instructions.
+                    if (!parts.length || !/^[A-Za-z]/.test(parts[0])) continue;
+                    if (this.getShelxKeywords().includes(parts[0].toUpperCase())) continue;
+
+                    let start = i;
+                    let tokens = parts.slice();
+                    let j = i;
+                    // Absorb wrapped continuation rows that belong to this atom
+                    // (SHELX ends a physical line with "=" when it wraps).
+                    while (j + 1 <= endRow && /=\s*$/.test(doc.getLine(j))) {
+                        const next = doc.getLine(j + 1);
+                        if (!isContinuation(next)) break;
+                        j++;
+                        const nextParts = next.trim().split(/\s+/).filter(p => p && p !== '=');
+                        tokens = tokens.concat(nextParts);
                     }
+                    // Anisotropic atom: >7 tokens -> Label type x y z sof U11 U22 U33 U23 U13 U12
+                    if (tokens.length > 7) {
+                        const u11 = parseFloat(tokens[6]);
+                        const u22 = parseFloat(tokens[7]);
+                        const u33 = parseFloat(tokens[8]);
+                        const uiso = (Number.isFinite(u11) && Number.isFinite(u22) && Number.isFinite(u33))
+                            ? ((u11 + u22 + u33) / 3).toFixed(5) : (tokens[6] || '0.05');
+                        segments.push({ start, end: j, tokens: tokens.slice(0, 6), uiso });
+                    }
+                    i = j;
+                }
+
+                // Rebuild lines bottom-up so row indices stay valid.
+                for (let k = segments.length - 1; k >= 0; k--) {
+                    const seg = segments[k];
+                    // Keep the standard column spacing (label, type, coords, sof, Uiso).
+                    const label = seg.tokens[0];
+                    const type = seg.tokens[1];
+                    const x = seg.tokens[2];
+                    const y = seg.tokens[3];
+                    const z = seg.tokens[4];
+                    const sof = seg.tokens[5];
+                    const newLine = `${label.padEnd(4)} ${type}  ${x}  ${y}  ${z}  ${sof}  ${seg.uiso}`;
+                    const Range = ace.require('ace/range').Range;
+                    const last = doc.getLine(seg.end);
+                    editor.session.replace(new Range(seg.start, 0, seg.end, last.length), newLine);
                 }
             }
         });
@@ -3727,11 +3940,176 @@ class WMOLApp {
             && !isNaN(parseFloat(parts[4])));
     }
 
+    // -----------------------------------------------------------------------
+    // Disorder restraints: apply SIMU/DELU/FLAT/ISOR/EADP/SADI to the atoms
+    // that are selected in the RES editor (whole document if nothing selected).
+    // Restraint instruction lines are inserted before the first atom record.
+    // -----------------------------------------------------------------------
+
+    // Natural (alphanumeric) sort used to order atom labels C1A, C10A ...
+    naturalAtomCompare(a, b) {
+        const re = /(\d+)|(\D+)/g;
+        const split = (s) => {
+            const out = [];
+            let m;
+            while ((m = re.exec(s)) !== null) out.push([m[1] ? parseInt(m[1], 10) : null, (m[2] || '').toLowerCase()]);
+            return out;
+        };
+        const aa = split(a), bb = split(b);
+        for (let i = 0; i < Math.max(aa.length, bb.length); i++) {
+            const x = aa[i], y = bb[i];
+            if (!x) return -1;
+            if (!y) return 1;
+            if (x[1] !== y[1]) return x[1] < y[1] ? -1 : 1;
+            if (x[0] === null && y[0] !== null) return -1;
+            if (x[0] !== null && y[0] === null) return 1;
+            if (x[0] !== null && y[0] !== null && x[0] !== y[0]) return x[0] - y[0];
+        }
+        return 0;
+    }
+
+    // Atom label (first token) of a line, or null if it is not an atom.
+    atomLabelOf(line) {
+        if (!this.isShelxAtomLine(line)) return null;
+        const label = line.trim().split(/\s+/)[0];
+        if (/^Q/i.test(label)) return null; // Q peaks cannot be restrained
+        return label;
+    }
+
+    // Row numbers that are atom records inside the current selection
+    // (whole document when the selection is empty).
+    selectedAtomRows(editor) {
+        const doc = editor.getSession().getDocument();
+        const lines = doc.getAllLines();
+        const ranges = editor.selection.getAllRanges();
+        const hasSel = ranges.length > 0 && !(ranges.length === 1 && ranges[0].isEmpty());
+        const rows = new Set();
+        if (hasSel) {
+            ranges.forEach(r => { for (let i = r.start.row; i <= r.end.row; i++) rows.add(i); });
+        } else {
+            lines.forEach((_, i) => rows.add(i));
+        }
+        return [...rows].filter(i => this.isShelxAtomLine(lines[i]));
+    }
+
+    // Sorted unique atom labels of the current selection.
+    selectedDisorderLabels(editor) {
+        const doc = editor.getSession().getDocument();
+        const rows = this.selectedAtomRows(editor);
+        const labels = [...new Set(rows.map(r => this.atomLabelOf(doc.getLine(r))).filter(Boolean))];
+        labels.sort((a, b) => this.naturalAtomCompare(a, b));
+        return labels;
+    }
+
+    // Row right before the first atom record of the document (restraints are
+    // typically placed before the atom list).
+    firstAtomRow(editor) {
+        const doc = editor.getSession().getDocument();
+        for (let i = 0; i < doc.getLength(); i++) {
+            if (this.isShelxAtomLine(doc.getLine(i))) return i;
+        }
+        return 0;
+    }
+
+    // Insert instruction lines directly above the selected atom block
+    // (falls back to the first atom of the document when nothing is selected),
+    // preserving undo.
+    insertRestraintLines(text) {
+        const editor = this.state.editors.res;
+        if (!editor) return;
+        const ranges = editor.selection.getAllRanges();
+        const hasSel = ranges.length > 0 && !(ranges.length === 1 && ranges[0].isEmpty());
+        const selRows = this.selectedAtomRows(editor); // atom rows within the selection
+        let row;
+        if (hasSel && selRows.length) {
+            // Insert just above the first atom line of the selection.
+            row = selRows[0];
+        } else {
+            row = this.firstAtomRow(editor);
+        }
+        editor.session.insert({ row, column: 0 }, text + '\n');
+        this.tryRender('res');
+        const status = document.getElementById('status-bar-content');
+        if (status) status.textContent = `Inserted restraints:\n${text}`;
+    }
+
+    // Generic: "REST esd label label ..." inserted for selected atoms.
+    applyDisorderRestraint(rest, esd) {
+        const editor = this.state.editors.res;
+        if (!editor) return;
+        const labels = this.selectedDisorderLabels(editor);
+        if (!labels.length) { alert('No atom lines selected/available to restrain.'); return; }
+        const head = rest + (esd ? ' ' + esd : '');
+        const lines = this.chunkLabels(labels).map(c => `${head} ${c.join(' ')}`.trim());
+        this.insertRestraintLines(lines.join('\n'));
+    }
+
+    // Split a label list into lines of at most `per` atoms (SHELXL restraint
+    // instructions are usually kept to a limited number of atoms per line).
+    chunkLabels(labels, per = 18) {
+        const chunks = [];
+        for (let i = 0; i < labels.length; i += per) chunks.push(labels.slice(i, i + per));
+        return chunks;
+    }
+
+    // Menu entry wrappers ---------------------------------------------------
+    disorderSimu() { this.applyDisorderRestraint('SIMU', '0.01'); }
+    disorderDelu() { this.applyDisorderRestraint('DELU', '0.01'); }
+    disorderFlat() { this.applyDisorderRestraint('FLAT', '0.01'); }
+    disorderIsor() { this.applyDisorderRestraint('ISOR', '0.01'); }
+    disorderEadp() { this.applyDisorderRestraint('EADP', ''); }
+    disorderSadiBonds() { this.applyDisorderSadiBondsCore(); }
+    disorderSadiAngles() { this.applyDisorderSadiAnglesCore(); }
+
+    // SADI for bonds: chain of consecutive pairs (a-b, b-c, c-d, ...).
+    applyDisorderSadiBondsCore() {
+        const editor = this.state.editors.res;
+        if (!editor) return;
+        const labels = this.selectedDisorderLabels(editor);
+        if (labels.length < 2) { alert('Select at least two atoms for SADI restraints.'); return; }
+        const pairs = [];
+        for (let i = 0; i + 1 < labels.length; i++) pairs.push(labels[i], labels[i + 1]);
+        const lines = this.chunkLabels(pairs).map(c => `SADI 0.02 ${c.join(' ')}`);
+        this.insertRestraintLines(lines.join('\n'));
+    }
+
+    // SADI for angles: pair each atom with the one after next (a-c, b-d, ...).
+    applyDisorderSadiAnglesCore() {
+        const editor = this.state.editors.res;
+        if (!editor) return;
+        const labels = this.selectedDisorderLabels(editor);
+        if (labels.length < 3) { alert('Select at least three atoms for angle SADI restraints.'); return; }
+        const pairs = [];
+        for (let i = 0; i + 2 < labels.length; i++) pairs.push(labels[i], labels[i + 2]);
+        const lines = this.chunkLabels(pairs).map(c => `SADI 0.02 ${c.join(' ')}`);
+        this.insertRestraintLines(lines.join('\n'));
+    }
+
+    // Remove all restraint keywords (SIMU/DELU/FLAT/ISOR/EADP/SADI/DFIX/DANG/
+    // RIGU/SAME) from the document - undoes accidentally inserted restraints.
+    clearDisorderRestraints() {
+        const editor = this.state.editors.res;
+        if (!editor) return;
+        const doc = editor.getSession().getDocument();
+        const keys = ['SIMU', 'DELU', 'FLAT', 'ISOR', 'EADP', 'SADI', 'DFIX', 'DANG', 'RIGU', 'SAME', 'AFIX'];
+        const rows = [];
+        for (let i = 0; i < doc.getLength(); i++) {
+            const first = doc.getLine(i).trim().split(/\s+/)[0];
+            if (keys.includes(first)) rows.push(i);
+        }
+        if (!rows.length) { alert('No restraint instructions found to remove.'); return; }
+        for (let k = rows.length - 1; k >= 0; k--) doc.removeLines(rows[k], rows[k]);
+        this.tryRender('res');
+        const status = document.getElementById('status-bar-content');
+        if (status) status.textContent = `Removed ${rows.length} restraint line(s).`;
+    }
+
+
     openChangeOccupancyDialog(editor) {
         const modalEl = document.getElementById('occupancyModal');
         if (!modalEl) return;
         const input = document.getElementById('occ-value-input');
-        if (input) input.value = '1.0';
+        if (input) input.value = '10.5';
 
         const hint = document.getElementById('occ-scope-hint');
         if (hint) {
@@ -5183,6 +5561,16 @@ class WMOLApp {
         bindMenu('menu-rsr', 'toggleRSR');
         bindMenu('tool-rsr', 'toggleRSR');
 
+        // Disorder menu (apply automatic restraints to selected atoms)
+        bindMenu('menu-disorder-simu', 'disorderSimu');
+        bindMenu('menu-disorder-delu', 'disorderDelu');
+        bindMenu('menu-disorder-flat', 'disorderFlat');
+        bindMenu('menu-disorder-isor', 'disorderIsor');
+        bindMenu('menu-disorder-eadp', 'disorderEadp');
+        bindMenu('menu-disorder-sadi-bonds', 'disorderSadiBonds');
+        bindMenu('menu-disorder-sadi-angles', 'disorderSadiAngles');
+        bindMenu('menu-disorder-clear', 'clearDisorderRestraints');
+
         // Clipping Plane Control (Ctrl + Scroll)
         this.state.renderer.domElement.addEventListener('wheel', (event) => {
             if (event.ctrlKey) {
@@ -5400,28 +5788,20 @@ class WMOLApp {
 
         const hklInput = document.getElementById('hkl-input');
 
-        hklInput.addEventListener('change', (e) => {
+        hklInput.addEventListener('change', async (e) => {
             const file = e.target.files[0];
             if (!file) return;
-            
-            const reader = new FileReader();
-            reader.onload = (event) => {
-                this.state.hklContent = event.target.result;
-                this.state.hklName = file.name;
-                this.openFileTab(file.name, event.target.result, 'hkl', null, true);
-                console.log("HKL file loaded:", file.name);
-                
-                // Update UI
-                const statusHkl = document.getElementById('status-hkl');
-                if (statusHkl) {
-                    statusHkl.classList.remove('bg-secondary');
-                    statusHkl.classList.add('bg-success');
-                    statusHkl.title = "HKL Loaded: " + file.name;
-                }
-                
-                alert("HKL file loaded: " + file.name);
-            };
-            reader.readAsText(file);
+
+            // HKL reflection data is consumed server-side by SHELX/PLATON, so it
+            // is uploaded straight into a project and only referenced client-side.
+            const ok = await this.loadLocalHklFile(file);
+            if (ok) {
+                console.log("HKL file uploaded:", file.name);
+                this.refreshHklStatus();
+                alert("HKL uploaded to server project '" + (this.state.hklServerProject || '?') + "'.");
+            } else {
+                alert("Could not upload the HKL file to the server. Is the backend running?");
+            }
         });
 
         // Save Handling
@@ -5485,13 +5865,26 @@ class WMOLApp {
             const files = Array.from(e.target.files);
             if (files.length === 0) return;
 
-            // Sort files: Structure -> HKL -> FCF
+            // Structure files: pick the best one to drive the split RES editor.
+            // Prefer SHELX .res/.ins over CIF/PDB (and .res over .ins) so that
+            // loading a project folder that contains e.g. x.cif, x.res and x.ins
+            // fills the RES editor with the real model instead of leaving the
+            // startup "Example RES" in place.
             const structureFiles = files.filter(f => {
                 const n = f.name.toLowerCase();
                 return n.endsWith('.res') || n.endsWith('.ins') || n.endsWith('.cif') || n.endsWith('.pdb');
             });
+            const rank = f => {
+                const n = f.name.toLowerCase();
+                if (n.endsWith('.res')) return 0;
+                if (n.endsWith('.ins')) return 1;
+                if (n.endsWith('.cif')) return 2;
+                return 3; // .pdb
+            };
+            structureFiles.sort((a, b) => rank(a) - rank(b));
             const hklFiles = files.filter(f => f.name.toLowerCase().endsWith('.hkl'));
             const fcfFiles = files.filter(f => f.name.toLowerCase().endsWith('.fcf'));
+            const fabFiles = files.filter(f => f.name.toLowerCase().endsWith('.fab'));
 
             // Process structure first
             if (structureFiles.length > 0) {
@@ -5529,27 +5922,36 @@ class WMOLApp {
                 }
             }
 
-            // Process HKL
+            // Process HKL: upload the reflection data server-side; the browser
+            // never holds (or localStorage-persists) the full HKL content.
             if (hklFiles.length > 0) {
                 const file = hklFiles[0];
-                const content = await file.text();
-                this.state.hklContent = content;
-                this.state.hklName = file.name;
-                this.openFileTab(file.name, content, 'hkl', null, true);
-                const statusHkl = document.getElementById('status-hkl');
-                if (statusHkl) {
-                    statusHkl.classList.remove('bg-secondary');
-                    statusHkl.classList.add('bg-success');
-                    statusHkl.title = "HKL Loaded: " + file.name;
+                const ok = await this.loadLocalHklFile(file);
+                if (!ok) {
+                    alert("HKL file could not be uploaded to the server: " + file.name);
+                } else {
+                    console.log("HKL file uploaded:", file.name);
                 }
             }
 
-            // Process FCF
+            // Process FCF: read only to draw the electron-density map client-side
+            // (it is a static companion file - never opened in a text tab).
             if (fcfFiles.length > 0) {
                 const file = fcfFiles[0];
                 const content = await file.text();
-                this.openFileTab(file.name, content, 'fcf', null, true);
                 this.renderMap(content);
+            }
+
+            // Process FAB (SQUEEZE solvent mask): SHELXL reads <basename>.fab
+            // next to the .ins, so upload it into the project directory.
+            if (fabFiles.length > 0) {
+                const file = fabFiles[0];
+                const project = await this.uploadLocalProjectCompanion(file, '.fab');
+                if (!project) {
+                    alert("FAB file could not be uploaded to the server: " + file.name);
+                } else {
+                    console.log("FAB file uploaded:", file.name, '->', project);
+                }
             }
 
             this.saveStateToLocalStorage();
@@ -5748,8 +6150,10 @@ class WMOLApp {
 
     setupMapControls() {
         const typeSelect = document.getElementById('map-type');
+        const styleSelect = document.getElementById('map-style');
         const levelInput = document.getElementById('map-level');
         const radiusInput = document.getElementById('map-radius');
+        const opacityInput = document.getElementById('map-opacity');
         const toggleBtn = document.getElementById('tool-map-toggle');
 
         const updateMap = () => {
@@ -5882,6 +6286,33 @@ class WMOLApp {
         if (typeSelect) typeSelect.addEventListener('change', updateMap);
         if (levelInput) levelInput.addEventListener('change', updateMap);
         if (radiusInput) radiusInput.addEventListener('change', updateMap);
+
+        // Style switch only swaps the material - no need to re-march the surface
+        if (styleSelect) {
+            styleSelect.addEventListener('change', () => {
+                const style = styleSelect.value;
+                this.state.preferences.map.style = style;
+                if (this.state.densityRenderer) {
+                    this.state.densityRenderer.setStyle(style);
+                }
+                this.savePreferences();
+            });
+        }
+
+        // Opacity only tweaks the materials - no re-marching either
+        if (opacityInput) {
+            opacityInput.addEventListener('input', () => {
+                let opacity = parseFloat(opacityInput.value);
+                if (!isFinite(opacity)) opacity = 0.4;
+                opacity = Math.min(1, Math.max(0, opacity));
+                opacityInput.value = opacity;
+                this.state.preferences.map.opacity = opacity;
+                if (this.state.densityRenderer) {
+                    this.state.densityRenderer.setOpacity(opacity);
+                }
+                this.savePreferences();
+            });
+        }
         
         if (toggleBtn) {
             toggleBtn.addEventListener('click', () => {
@@ -6793,6 +7224,160 @@ class WMOLApp {
         return null;
     }
 
+    // -----------------------------------------------------------------------
+    // HKL availability. Since SHELX/PLATON run on the server against files that
+    // live in the project directory, the browser does not need the full HKL
+    // content. `hklContent` is only present when the user explicitly loaded a
+    // local .hkl for one-shot analysis; otherwise the HKL is referenced by
+    // name (`hklName`) and kept server-side in `hklServerProject`.
+    // -----------------------------------------------------------------------
+
+    // True when an HKL is usable for a server program run: either full content
+    // is in the browser, or the same-basename .hkl is stored in a server project.
+    hasHkl() {
+        return !!this.state.hklContent || !!this.state.hklServerProject;
+    }
+
+    // When the browser holds no HKL content, locate the reflections on the
+    // server by listing the project directory that matches the current run
+    // basename and registering the same-basename .hkl there. Returns true when
+    // a usable HKL is available (client content or a server project file).
+    async ensureHklForRun() {
+        if (this.state.hklContent || this.state.hklServerProject) return true;
+        const candidates = [];
+        if (this.state.currentProject) candidates.push(this.state.currentProject);
+        if (this.state.hklName) candidates.push(this.state.hklName.replace(/\.hkl$/i, ''));
+        if (this.state.loadedFilename) {
+            candidates.push(this.state.loadedFilename.replace(/\.[^.]+$/, ''));
+        }
+        const seen = new Set();
+        for (const base of candidates) {
+            const clean = String(base).replace(/[^a-zA-Z0-9_-]/g, '_');
+            if (!clean || seen.has(clean)) continue;
+            seen.add(clean);
+            try {
+                const files = await this.apiListProjectFiles(clean);
+                const lower = clean.toLowerCase();
+                const hkl = files.find(f => f.name.toLowerCase() === `${lower}.hkl`)
+                    || files.find(f => /\.hkl$/i.test(f.name) && f.name.toLowerCase().startsWith(lower + '_'))
+                    || files.find(f => /\.hkl$/i.test(f.name));
+                if (hkl) {
+                    this.state.hklName = hkl.name;
+                    this.state.hklContent = null;
+                    this.state.hklServerProject = clean;
+                    this.state.currentProject = this.state.currentProject || clean;
+                    this.refreshHklStatus();
+                    this.saveStateToLocalStorage();
+                    return true;
+                }
+            } catch (e) {
+                // project dir does not exist - try the next candidate
+            }
+        }
+        return false;
+    }
+
+    // The basename SHELX/PLATON runs and project files use (e.g. "efrk1_a").
+    // Prefers the HKL name, then the loaded structure name, then the project.
+    hklBaseName() {
+        if (this.state.hklServerProject) return this.state.hklServerProject;
+        if (this.state.hklName) return this.state.hklName.replace(/\.hkl$/i, '');
+        if (this.state.loadedFilename) return this.state.loadedFilename.replace(/\.[^.]+$/, '');
+        return this.state.currentProject || 'structure';
+    }
+
+    // Project name whose directory holds the server-side HKL for the current
+    // basename, or null when the HKL only exists as local browser content.
+    hklProject() {
+        if (this.state.hklServerProject) return this.state.hklServerProject;
+        return null;
+    }
+
+    // Append the HKL to a run's FormData. When the HKL is a server-project file
+    // (no content in the browser) we omit the file - the server reuses the
+    // same-basename .hkl already stored in the project directory. Returns the
+    // blob field name used, or null when the server-side file should be reused.
+    appendHklPart(formData, base) {
+        if (this.state.hklContent) {
+            formData.append('hkl', new Blob([this.state.hklContent], { type: 'text/plain' }), base + '.hkl');
+            return 'hkl';
+        }
+        return null; // server reuses project-dir <base>.hkl
+    }
+
+    // Update the HKL status badge in the toolbar.
+    refreshHklStatus() {
+        const statusHkl = document.getElementById('status-hkl');
+        if (!statusHkl) return;
+        const present = this.hasHkl();
+        statusHkl.classList.toggle('bg-success', !!present);
+        statusHkl.classList.toggle('bg-secondary', !present);
+        statusHkl.title = present
+            ? (this.state.hklContent
+                ? 'HKL Loaded: ' + (this.state.hklName || 'data.hkl')
+                : 'HKL on server: ' + (this.state.hklName || (this.hklBaseName() + '.hkl')))
+            : 'No HKL loaded';
+    }
+
+    // Forget any client-side HKL content but keep the name/project reference so
+    // that server-side runs still work without holding the file in the browser.
+    keepOnlyHklReference() {
+        this.state.hklContent = null;
+        this.state.hklName = this.state.hklName || (this.state.currentProject
+            ? this.state.currentProject + '.hkl' : null);
+        if (this.state.currentProject) this.state.hklServerProject = this.state.currentProject;
+        this.refreshHklStatus();
+    }
+
+    // Load a local .hkl file picked by the user. SHELX/PLATON consume the data
+    // server-side, so the file is uploaded straight into the current (or a new)
+    // server project under the canonical <basename>.hkl name and only a
+    // reference is kept in the browser - the raw content is never read into
+    // memory or localStorage. Returns true when uploaded, false when no server
+    // project could be used.
+    async loadLocalHklFile(file) {
+        const project = await this.uploadLocalProjectCompanion(file, '.hkl');
+        if (!project) return false;
+        this.state.currentProject = project;
+        this.state.hklName = `${project}.hkl`;
+        this.state.hklContent = null;
+        this.state.hklServerProject = project;
+        this.refreshHklStatus();
+        this.saveStateToLocalStorage();
+        return true;
+    }
+
+    // Upload a local companion file (HKL reflections, SQUEEZE .fab mask, ...)
+    // into a server project under the canonical <basename><ext> name so the
+    // server-side SHELX/PLATON runs find it next to the structure. The content
+    // is streamed to the server and never held in the browser. Returns the
+    // project name used, or null on failure.
+    async uploadLocalProjectCompanion(file, ext) {
+        const base = (this.state.currentProject || this.hklBaseName()
+            || (this.state.loadedFilename ? this.state.loadedFilename.replace(/\.[^.]+$/, '') : null)
+            || file.name.replace(/\.[^.]+$/, ''))
+            .replace(/[^a-zA-Z0-9_-]/g, '_');
+        try {
+            const form = new FormData();
+            form.append('file', file, base + ext);
+            const res = await fetch(this.getApiUrl(`/projects/${encodeURIComponent(base)}/upload`), {
+                method: 'POST', body: form
+            });
+            if (!res.ok) {
+                let detail = '';
+                try { const e = await res.json(); detail = e.error || e.details || ''; } catch (err) { /* ignore */ }
+                throw new Error(detail || `Upload failed (HTTP ${res.status})`);
+            }
+            const data = await res.json();
+            this.state.currentProject = this.state.currentProject || data.project || base;
+            this.saveStateToLocalStorage();
+            return this.state.currentProject;
+        } catch (e) {
+            console.error(`Companion upload failed (${ext}):`, e.message);
+            return null;
+        }
+    }
+
     // Run an external crystallography program (shelxl, shelxt, platon, ...) on
     // the currently loaded files and show the results in the results modal.
     // `action` is used for PLATON to choose which single-purpose task to run.
@@ -6804,11 +7389,16 @@ class WMOLApp {
             formData.append('action', action || 'checkcif');
         }
 
-        let baseName = 'structure';
-        if (this.state.hklName) {
-            baseName = this.state.hklName.replace(/\.hkl$/i, '');
+        // Programs that need reflections: first make sure an HKL is available.
+        // This locates (without loading into the browser) a same-basename .hkl
+        // stored in the current project directory when the user did not load one.
+        const needsHkl = inputs.includes('.hkl');
+        if (needsHkl && !(await this.ensureHklForRun())) {
+            alert('No HKL file available. Please load an .hkl file or open a project that contains one.');
+            return;
         }
-        baseName = baseName.replace(/[^a-zA-Z0-9_-]/g, '_');
+
+        let baseName = this.hklBaseName().replace(/[^a-zA-Z0-9_-]/g, '_');
 
         const needsRes = inputs.includes('.res') || inputs.includes('.ins') || inputs.includes('.cif');
         if (needsRes) {
@@ -6852,13 +7442,25 @@ class WMOLApp {
             }
 
             formData.append(ext.slice(1), new Blob([content], { type: 'text/plain' }), baseName + ext);
-        }
-        if (inputs.includes('.hkl')) {
-            if (!this.state.hklContent) {
-                alert('No HKL file loaded. Please load an .hkl file first.');
+        } else if (inputs.includes('.hkl') && /^shelx[ces]$/.test(program.id) && this.hasHkl() && !this.state.hklContent) {
+            // SHELXC/SHELXE take reflections only (.hkl). When the HKL is a
+            // server project file (not uploaded) there must still be at least one
+            // uploaded file so the server can resolve the run directory; attach
+            // the current structure as <base>.ins if one is present.
+            const content = this.getStructureContent();
+            if (content) {
+                formData.append('ins', new Blob([content], { type: 'text/plain' }), baseName + '.ins');
+            } else {
+                alert('No structure or HKL content available to run this program on the server.');
                 return;
             }
-            formData.append('hkl', new Blob([this.state.hklContent], { type: 'text/plain' }), baseName + '.hkl');
+        }
+        if (inputs.includes('.hkl')) {
+            if (!this.hasHkl()) {
+                alert('No HKL file available. Please load an .hkl file or open a project that contains one.');
+                return;
+            }
+            this.appendHklPart(formData, baseName);
         }
 
         const btn = document.getElementById('tool-refine');
@@ -7045,26 +7647,34 @@ class WMOLApp {
     }
 
     // Load the corrected/merged HKL (SHELX format) as the active HKL in the UI
-    // so subsequent steps (e.g. SHELXD / SHELXT) operate on it. Also generates
-    // a matching SHELX .ins with the correct cell/space group. Returns the
-    // merged HKL filename, or null if no merged HKL was produced.
-    applyMergedHkl(result) {
+    // so subsequent steps (e.g. SHELXD / SHELXT) operate on it. The merged data
+    // is uploaded into a server project (only referenced client-side), and a
+    // matching SHELX .ins with the correct cell/space group is generated.
+    // Returns the merged HKL basename, or null if no merged HKL was produced.
+    async applyMergedHkl(result) {
         if (!result.merge || !result.merge.shelxHkl) return null;
         let base = 'structure';
         if (this.state.hklName) base = this.state.hklName.replace(/\.hkl$/i, '');
         base = base.replace(/[^a-zA-Z0-9_-]/g, '_');
-        const mergedName = base + '_merged.hkl';
+        const mergedBase = base + '_merged';
 
-        this.state.hklContent = result.merge.shelxHkl;
-        this.state.hklName = mergedName;
-
-        const statusHkl = document.getElementById('status-hkl');
-        if (statusHkl) {
-            statusHkl.classList.remove('bg-secondary');
-            statusHkl.classList.add('bg-success');
-            statusHkl.title = 'HKL Loaded (merged): ' + mergedName;
+        // Persist the merged reflections server-side so SHELXD/SHELXT runs reuse
+        // them without the browser ever holding the content.
+        try {
+            const form = new FormData();
+            form.append('file', new Blob([result.merge.shelxHkl], { type: 'text/plain' }), mergedBase + '.hkl');
+            const res = await fetch(this.getApiUrl(`/projects/${encodeURIComponent(mergedBase)}/upload`), {
+                method: 'POST', body: form
+            });
+            if (!res.ok) throw new Error('upload failed');
+        } catch (e) {
+            throw new Error('Could not store the merged HKL on the server: ' + e.message);
         }
-        this.openFileTab(mergedName, result.merge.shelxHkl, 'hkl', null, false);
+
+        this.state.hklContent = null;
+        this.state.hklName = mergedBase + '.hkl';
+        this.state.hklServerProject = mergedBase;
+        this.refreshHklStatus();
 
         // Generate a matching SHELX .ins (same basename) so SHELXD / SHELXT
         // can be run directly with the correct unit cell and space group.
@@ -7078,7 +7688,7 @@ class WMOLApp {
             if (formula !== null && formula.trim() !== '') {
                 insText = this.applyFormulaToIns(insText, formula);
             }
-            const insName = base + '_merged.ins';
+            const insName = mergedBase + '.ins';
             this.state.xrdspaceIns = { filename: insName, content: insText };
             // The merged .ins becomes the active structure; ignore any previously
             // shown file tab when picking the file for external programs.
@@ -7094,7 +7704,7 @@ class WMOLApp {
         }
 
         this.saveStateToLocalStorage();
-        return mergedName;
+        return mergedBase;
     }
 
     // Show the progress dialog for long-running jobs (external programs,
@@ -7282,10 +7892,7 @@ class WMOLApp {
     buildSolveForm(mode) {
         const structure = this.getStructureContent();
         if (!structure) throw new Error('No structure loaded. Load a .res/.ins/.cif first.');
-        const base = this.state.hklName
-            ? this.state.hklName.replace(/\.hkl$/i, '')
-            : (this.state.loadedFilename ? this.state.loadedFilename.replace(/\.[^.]+$/, '') : 'structure');
-        const safeBase = base.replace(/[^a-zA-Z0-9_-]/g, '_');
+        const safeBase = this.hklBaseName().replace(/[^a-zA-Z0-9_-]/g, '_');
 
         if (mode === 'validate') {
             const lst = this.state.editors.lst ? this.state.editors.lst.getValue() : '';
@@ -7298,12 +7905,12 @@ class WMOLApp {
             return { form, safeBase };
         }
 
-        if (!this.state.hklContent) {
-            throw new Error('No HKL file loaded. Load an .hkl file to run the solve pipeline.');
+        if (!this.hasHkl()) {
+            throw new Error('No HKL file available. Load an .hkl file or open a project that contains one to run the solve pipeline.');
         }
         const form = new FormData();
         form.append('ins', new Blob([structure], { type: 'text/plain' }), safeBase + '.ins');
-        form.append('hkl', new Blob([this.state.hklContent], { type: 'text/plain' }), safeBase + '.hkl');
+        this.appendHklPart(form, safeBase);
         form.append('program', (document.getElementById('solve-program') || {}).value || 'auto');
         form.append('cycles', (document.getElementById('solve-cycles') || {}).value || '3');
         form.append('refine', document.getElementById('solve-do-refine')?.checked ? '1' : '0');
@@ -7348,6 +7955,9 @@ class WMOLApp {
         const endpoint = mode === 'validate' ? '/validate-structure' : '/solve-structure';
         if (status) status.textContent = 'Running… (SHELX runs can take a while)';
         try {
+            if (mode !== 'validate' && !(await this.ensureHklForRun())) {
+                throw new Error('No HKL file available. Load an .hkl file or open a project that contains one to run the solve pipeline.');
+            }
             const { form } = this.buildSolveForm(mode);
             const controller = new AbortController();
             this.solveAbort = controller;
@@ -7516,14 +8126,18 @@ class WMOLApp {
         }
         if (btnLoad) {
             btnLoad.classList.remove('d-none');
-            btnLoad.onclick = () => {
-                const mergedName = this.applyMergedHkl(result);
-                const summary = document.getElementById('results-summary');
-                if (mergedName && summary) {
-                    const note = document.createElement('div');
-                    note.className = 'alert alert-success py-1 px-2 small mb-0 mt-1';
-                    note.textContent = `Merged HKL loaded as ${mergedName} — ready for SHELXD / SHELXT.`;
-                    summary.appendChild(note);
+            btnLoad.onclick = async () => {
+                try {
+                    const mergedBase = await this.applyMergedHkl(result);
+                    const summary = document.getElementById('results-summary');
+                    if (mergedBase && summary) {
+                        const note = document.createElement('div');
+                        note.className = 'alert alert-success py-1 px-2 small mb-0 mt-1';
+                        note.textContent = `Merged HKL loaded as ${mergedBase}.hkl — ready for SHELXD / SHELXT.`;
+                        summary.appendChild(note);
+                    }
+                } catch (e) {
+                    alert('Could not load the merged HKL: ' + e.message);
                 }
             };
         }
@@ -7582,10 +8196,13 @@ class WMOLApp {
     // data and show the result in the results modal. `forced` optionally pins
     // a specific space group (number or Hermann-Mauguin symbol).
     async runSpaceGroupAnalysis(forced) {
-        if (!this.state.hklContent) {
-            alert('No HKL file loaded. Please load an .hkl file first.');
+        if (!(await this.ensureHklForRun())) {
+            alert('No HKL file available. Please load an .hkl file first.');
             return;
         }
+        // The HKL may be stored server-side (project) rather than in the browser.
+        const hklContent = this.state.hklContent;
+        const project = hklContent ? null : (this.state.hklServerProject || this.state.currentProject);
 
         const btn = document.getElementById('tool-refine');
         const originalIcon = btn ? btn.innerHTML : '';
@@ -7600,7 +8217,7 @@ class WMOLApp {
         const controller = new AbortController();
         const cancelBtn = document.getElementById('btn-cancel-progress');
         if (cancelBtn) cancelBtn.onclick = () => controller.abort();
-        const hasCellInFile = /!UNIT_CELL_CONSTANTS\s*=/.test(this.state.hklContent || '');
+        const hasCellInFile = hklContent && /!UNIT_CELL_CONSTANTS\s*=/.test(hklContent);
 
         try {
             let result;
@@ -7608,7 +8225,7 @@ class WMOLApp {
                 this.showProgressDialog('Space-group determination (xrdspace)...',
                     'Analyzing Laue symmetry, centering and systematic absences.');
             }
-            result = await this.apiXrdspaceAnalyze(this.state.hklContent, null, forced, controller.signal);
+            result = await this.apiXrdspaceAnalyze(hklContent, null, forced, controller.signal, project);
 
             // The HKL file carries no unit-cell parameters: ask for them.
             if (result.error === 'NO_CELL') {
@@ -7617,7 +8234,7 @@ class WMOLApp {
                 if (input === null) return; // cancelled - no analysis ran, no dialog
                 this.showProgressDialog('Space-group determination (xrdspace)...',
                     'Analyzing Laue symmetry, centering and systematic absences.');
-                result = await this.apiXrdspaceAnalyze(this.state.hklContent, input, forced, controller.signal);
+                result = await this.apiXrdspaceAnalyze(hklContent, input, forced, controller.signal, project);
             }
 
             if (!result.ok) {
@@ -7755,26 +8372,19 @@ class WMOLApp {
             return;
         }
 
-        if (!this.state.hklContent) {
-            alert("No HKL file loaded. Please load an .hkl file first.");
+        if (!(await this.ensureHklForRun())) {
+            alert("No HKL file available. Please load an .hkl file first.");
             return;
         }
 
         const formData = new FormData();
         const insBlob = new Blob([resContent], { type: 'text/plain' });
-        const hklBlob = new Blob([this.state.hklContent], { type: 'text/plain' });
 
-        // Ensure consistent filenames. Use HKL name as base if available, otherwise 'structure'.
-        let baseName = 'structure';
-        if (this.state.hklName) {
-            baseName = this.state.hklName.replace(/\.hkl$/i, '');
-        }
-
-        // Sanitize basename to be safe
-        baseName = baseName.replace(/[^a-zA-Z0-9_-]/g, '_');
+        // Ensure consistent filenames. Use the HKL/project basename if available.
+        let baseName = this.hklBaseName().replace(/[^a-zA-Z0-9_-]/g, '_');
 
         formData.append('ins', insBlob, baseName + '.ins');
-        formData.append('hkl', hklBlob, baseName + '.hkl');
+        this.appendHklPart(formData, baseName);
 
         await this.runRefinement(formData, 'tool-refine', 'Refining structure (SHELXL)...');
     }
@@ -7790,8 +8400,8 @@ class WMOLApp {
             return;
         }
 
-        if (!this.state.hklContent) {
-            alert("No HKL file loaded. Please load an .hkl file first.");
+        if (!(await this.ensureHklForRun())) {
+            alert("No HKL file available. Please load an .hkl file first.");
             return;
         }
 
@@ -7804,16 +8414,11 @@ class WMOLApp {
 
         const formData = new FormData();
         const insBlob = new Blob([resContent], { type: 'text/plain' });
-        const hklBlob = new Blob([this.state.hklContent], { type: 'text/plain' });
 
-        let baseName = 'structure';
-        if (this.state.hklName) {
-            baseName = this.state.hklName.replace(/\.hkl$/i, '');
-        }
-        baseName = baseName.replace(/[^a-zA-Z0-9_-]/g, '_');
+        let baseName = this.hklBaseName().replace(/[^a-zA-Z0-9_-]/g, '_');
 
         formData.append('ins', insBlob, baseName + '.ins');
-        formData.append('hkl', hklBlob, baseName + '.hkl');
+        this.appendHklPart(formData, baseName);
         formData.append('cycles', String(cycles));
         formData.append('mode', 'weight');
 

@@ -223,6 +223,107 @@ function runShelxl(projectDir, basename, signal) {
     return runProgram(PROGRAMS.shelxl, [basename], projectDir, undefined, signal);
 }
 
+function escapeRegExp(s) {
+    return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+// List non-hidden, non-backup files in a project directory (files only).
+function listProjectFiles(projectDir) {
+    try {
+        return fs.readdirSync(projectDir).filter(f =>
+            f !== 'backup' && !f.startsWith('.') && fs.statSync(path.join(projectDir, f)).isFile());
+    } catch (e) {
+        return [];
+    }
+}
+
+// Promote any <basename>_*<ext> companion file (e.g. PLATON's <base>_sq.fab or
+// <base>_sq.hkl) to the canonical <basename><ext> name SHELXL/PLATON look for,
+// so a same-basename file stored in a project is exposed to the next run even
+// when the client did not upload it. Returns the canonical path, or null.
+function promoteCompanionToCanonical(projectDir, basename, ext) {
+    if (!fs.existsSync(projectDir)) return null;
+    const canonical = path.join(projectDir, `${basename}${ext}`);
+    if (fs.existsSync(canonical)) {
+        try {
+            if (fs.statSync(canonical).size > 0) return canonical;
+        } catch (e) { /* fall through */ }
+    }
+    const re = new RegExp('^' + escapeRegExp(basename) + '_[^.]*' + escapeRegExp(ext) + '$', 'i');
+    const match = listProjectFiles(projectDir).find(f => re.test(f));
+    if (!match) return null;
+    try {
+        fs.copyFileSync(path.join(projectDir, match), canonical);
+        return canonical;
+    } catch (e) {
+        return null;
+    }
+}
+
+// Ensure the companion files a program needs are present in the project
+// directory under the canonical <basename><ext> name. Files the client already
+// uploaded are kept as-is; anything else is taken from a same-basename file
+// already stored in the project (including _sq variants). Returns the list of
+// canonical names that are actually available for the run.
+function ensureCompanionInputs(projectDir, basename, uploadedNames, exts) {
+    const available = [];
+    for (const ext of exts || []) {
+        const name = `${basename}${ext}`;
+        if (uploadedNames.includes(name)) {
+            available.push(name);
+            continue;
+        }
+        if (fs.existsSync(path.join(projectDir, name))) {
+            available.push(name);
+            continue;
+        }
+        if (promoteCompanionToCanonical(projectDir, basename, ext)) {
+            available.push(name);
+        }
+    }
+    return available;
+}
+
+// After a program run, promote any suffixed companion outputs (PLATON writes
+// <base>_sq.{fab,hkl}, SHELX/PLATON may write other _ variants) back into the
+// canonical <basename>.<ext> files in the project directory so the next run of
+// SHELXL (or PLATON) picks them up. Returns names that were promoted.
+function promoteCompanionOutputs(projectDir, basename, exts) {
+    const promoted = [];
+    for (const ext of exts || ['.fab', '.fcf', '.hkl']) {
+        if (promoteCompanionToCanonical(projectDir, basename, ext)) {
+            const name = `${basename}${ext}`;
+            if (!promoted.includes(name)) promoted.push(name);
+        }
+    }
+    return promoted;
+}
+
+// True when a SHELX instruction file (.ins/.res) requests the SQUEEZE solvent
+// mask via an ABIN instruction (SHELXL then needs <basename>.fab next to it).
+function insRequestsFab(projectDir, basename) {
+    for (const ext of ['.ins', '.res']) {
+        const p = path.join(projectDir, `${basename}${ext}`);
+        if (!fs.existsSync(p)) continue;
+        try {
+            if (/^\s*ABIN\b/m.test(fs.readFileSync(p, 'utf8'))) return true;
+        } catch (e) { /* ignore */ }
+    }
+    return false;
+}
+
+// Find an HKL (or other companion) file stored in a project under the given
+// basename. Prefers the canonical <basename>.<ext>, then any same-basename
+// file (e.g. <basename>_sq.hkl, <basename>_merged.hkl). Returns full path.
+function findCompanionFile(projectDir, basename, ext) {
+    if (!fs.existsSync(projectDir)) return null;
+    const canonical = path.join(projectDir, `${basename}${ext}`);
+    if (fs.existsSync(canonical)) return canonical;
+    const re = new RegExp('^' + escapeRegExp(basename) + '(_[^.]*)?' + escapeRegExp(ext) + '$', 'i');
+    const match = listProjectFiles(projectDir).find(f => re.test(f));
+    return match ? path.join(projectDir, match) : null;
+}
+
 // Parse the "Recommended weighting scheme: WGHT a b" line from a SHELXL .lst.
 // Returns { a, b } or null.
 function parseRecommendedWght(lstText) {
@@ -288,13 +389,16 @@ app.post('/refine', upload.fields([{ name: 'ins', maxCount: 1 }, { name: 'hkl', 
     res.on('close', () => { if (!res.writableEnded) controller.abort(); });
 
     try {
-        // Validate inputs
-        if (!req.files || !req.files['ins'] || !req.files['hkl']) {
-            return res.status(400).json({ error: 'Both .ins and .hkl files are required.' });
+        // Validate inputs. The .ins is always required (SHELXL reads it). The
+        // .hkl may be omitted when the project directory already holds a
+        // same-basename reflection file (the client keeps HKL server-side and
+        // never streams it through the browser).
+        if (!req.files || !req.files['ins']) {
+            return res.status(400).json({ error: 'An .ins file is required.' });
         }
 
         const insFile = req.files['ins'][0];
-        const hklFile = req.files['hkl'][0];
+        const hklFile = req.files['hkl'] && req.files['hkl'][0] ? req.files['hkl'][0] : null;
 
         // Determine basename from uploaded .ins file
         const originalName = insFile.originalname;
@@ -335,7 +439,22 @@ app.post('/refine', upload.fields([{ name: 'ins', maxCount: 1 }, { name: 'hkl', 
         // Note: renameSync might fail across partitions, but usually fine in same container/fs
         // If upload.dest is on same fs, rename works.
         fs.renameSync(insFile.path, insPath);
-        fs.renameSync(hklFile.path, hklPath);
+        if (hklFile) {
+            fs.renameSync(hklFile.path, hklPath);
+        } else {
+            // No .hkl uploaded: reuse the exact same-basename reflections already
+            // stored in this project directory (the client keeps HKL server-side).
+            if (!fs.existsSync(hklPath)) {
+                return res.status(400).json({
+                    error: `No .hkl reflections available for '${basename}'. Upload a .hkl file (File > Load HKL) or run from a project that contains ${basename}.hkl.`
+                });
+            }
+        }
+        // SHELXL consumes the SQUEEZE mask only when <basename>.fab sits next to
+        // the refinement input; promote any stored _sq fab before refining.
+        if (insRequestsFab(projectDir, basename)) {
+            promoteCompanionToCanonical(projectDir, basename, '.fab');
+        }
 
         // Create Backup
         const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
@@ -497,6 +616,41 @@ app.post('/run/:program', upload.any(), async (req, res) => {
 
         console.log(`[${jobId}] Running ${program.label} on '${basename}'...`);
 
+        // Companion files: SHELX/PLATON programs consume the reflections, solvent
+        // mask or structure files that share the run's basename. When the client
+        // did not upload one of these (they stay server-side in the project dir)
+        // expose the same-basename file already stored here so the run works
+        // without re-streaming the (potentially huge) content through the browser.
+        if (fs.existsSync(projectDir)) {
+            if (program.inputs && program.inputs.length) {
+                // Only .fab/.fcf are safely promoted from _sq variants; the HKL
+                // must remain the exact <basename>.hkl the client is working on.
+                const promoteExts = program.inputs.filter(e => ['.fab', '.fcf'].includes(e.toLowerCase()));
+                if (promoteExts.length) {
+                    ensureCompanionInputs(projectDir, basename, uploadedNames, promoteExts);
+                }
+            }
+            // A SHELXL model carrying ABIN needs <basename>.fab next to the
+            // refinement input; promote any _sq fab stored in the project.
+            if (insRequestsFab(projectDir, basename)) {
+                promoteCompanionToCanonical(projectDir, basename, '.fab');
+            }
+            if (programId === 'platon') {
+                promoteCompanionToCanonical(projectDir, basename, '.fcf');
+            }
+        }
+        // If a program needs a reflection/instruction file that is not uploaded
+        // and is not present in the project directory, fail early with a clear
+        // message instead of letting the program abort cryptically. SHELXL
+        // reads <basename>.hkl, so a _sq/_merged sibling does not substitute.
+        if (program.inputs && program.inputs.includes('.hkl')
+            && !uploadedNames.includes(`${basename}.hkl`)
+            && !fs.existsSync(path.join(projectDir, `${basename}.hkl`))) {
+            return res.status(400).json({
+                error: `No .hkl reflections available for '${basename}'. Upload a .hkl file (File > Load HKL) or run from a project that contains ${basename}.hkl.`
+            });
+        }
+
         // PLATON is interactive/X11 software; the generic runner would hang on
         // the GUI. Use the best-effort check runner instead (short timeout,
         // collects any report files PLATON writes, reports missing runtime).
@@ -577,8 +731,22 @@ app.post('/run/:program', upload.any(), async (req, res) => {
                     r.stdout = (r.stdout || '') + '\n\n[SQUEEZE] Note: PLATON did not write a usable SQUEEZE model file.';
                 }
             }
+            // For every PLATON action also promote any produced companion files
+            // (_sq.fab, .fcf) back to the canonical project names so a following
+            // SHELXL run picks the solvent mask up from the project dir. The
+            // reflection dataset (.hkl) is never overwritten by a _sq sibling.
+            if (fs.existsSync(projectDir)) {
+                promoteCompanionOutputs(projectDir, basename, ['.fab', '.fcf']);
+            }
         } else {
             r = await runProgram(program, [basename], projectDir, program.stdin, controller.signal);
+            // Promote any companion outputs the program wrote under suffixed
+            // names (e.g. _sq.fab) to the canonical project files so the next
+            // SHELXL/PLATON run picks them up from the project dir. The
+            // reflection dataset (.hkl) is never overwritten by a _sq sibling.
+            if (fs.existsSync(projectDir)) {
+                promoteCompanionOutputs(projectDir, basename, ['.fab', '.fcf']);
+            }
         }
 
         const result = {
@@ -702,6 +870,12 @@ async function refineModel(projectDir, basename, weightCycles) {
     // SHELXL reads basename.ins; if only a .res was stored, copy it over.
     if (!fs.existsSync(insPath) && fs.existsSync(resPath)) {
         fs.copyFileSync(resPath, insPath);
+    }
+
+    // A model carrying ABIN needs <basename>.fab next to the refinement input;
+    // make sure any stored SQUEEZE mask (e.g. <basename>_sq.fab) is exposed.
+    if (insRequestsFab(projectDir, basename)) {
+        promoteCompanionToCanonical(projectDir, basename, '.fab');
     }
 
     let lastRec = null;
@@ -845,7 +1019,13 @@ async function runSolvePipeline(projectDir, basename, insText, hklUploaded, opts
     // --- Store inputs -----------------------------------------------
     fs.writeFileSync(path.join(projectDir, `${basename}.ins`), insText, 'utf8');
     const hklPath = path.join(projectDir, `${basename}.hkl`);
-    fs.renameSync(hklUploaded.path, hklPath);
+    if (hklUploaded && hklUploaded.path) {
+        fs.renameSync(hklUploaded.path, hklPath);
+    } else if (!fs.existsSync(hklPath)) {
+        // The HKL is kept server-side by the client; only the exact canonical
+        // <basename>.hkl can feed SHELXL, so require it (no _sq/_merged sibling).
+        throw new Error(`No .hkl reflections available for '${basename}'. Upload a .hkl file (File > Load HKL) or run from a project that contains ${basename}.hkl.`);
+    }
     const uploadedNames = [`${basename}.ins`, `${basename}.hkl`];
 
     let modelText = insText;
@@ -959,11 +1139,11 @@ app.post('/solve-structure', upload.fields([
     const controller = new AbortController();
     res.on('close', () => { if (!res.writableEnded) controller.abort(); });
     try {
-        if (!req.files || !req.files['ins'] || !req.files['hkl']) {
-            return res.status(400).json({ error: 'Both an .ins/.res and an .hkl file are required.' });
+        if (!req.files || !req.files['ins']) {
+            return res.status(400).json({ error: 'An .ins/.res model file is required.' });
         }
         const insFile = req.files['ins'][0];
-        const hklFile = req.files['hkl'][0];
+        const hklFile = req.files['hkl'] && req.files['hkl'][0] ? req.files['hkl'][0] : null;
         const insText = readUploadText(insFile);
         fs.rmSync(insFile.path, { force: true });
 
@@ -1101,12 +1281,25 @@ app.post('/xrdspace/transform-model', upload.fields([{ name: 'res', maxCount: 1 
  */
 app.post('/xrdspace/analyze', upload.fields([{ name: 'hkl', maxCount: 1 }]), (req, res) => {
     try {
-        if (!req.files || !req.files['hkl']) {
-            return res.status(400).json({ error: 'An HKL file is required.' });
+        let text = null;
+        // Prefer an uploaded HKL file; otherwise, if the client references an
+        // existing server project (field 'project'), reuse the same-basename
+        // reflection file already stored there so no big data is streamed.
+        if (req.files && req.files['hkl'] && req.files['hkl'][0]) {
+            const file = req.files['hkl'][0];
+            text = fs.readFileSync(file.path, 'utf8');
+            fs.rmSync(file.path, { force: true }); // temp upload, no persistence
+        } else {
+            const project = req.body && req.body.project;
+            if (project) {
+                const base = path.basename(String(project)).replace(/\.hkl$/i, '');
+                const p = findCompanionFile(path.join(PROJECTS_DIR, base), base, '.hkl');
+                if (p) text = fs.readFileSync(p, 'utf8');
+            }
+            if (text === null) {
+                return res.status(400).json({ error: 'An HKL file is required.' });
+            }
         }
-        const file = req.files['hkl'][0];
-        const text = fs.readFileSync(file.path, 'utf8');
-        fs.rmSync(file.path, { force: true }); // temp upload, no persistence
 
         let cell = null;
         const cellField = req.body && req.body.cell;
@@ -1297,6 +1490,48 @@ app.post('/projects/:name/savefile', (req, res) => {
     } catch (error) {
         console.error("Save file error:", error);
         res.status(500).json({ error: 'Failed to save file', details: error.message });
+    }
+});
+
+// 4b. Upload an arbitrary binary/large file into a project without forcing the
+// client to keep its content in the browser. Files are stored under their
+// original names (a same-basename companion of the project structure is kept
+// as <project><ext>). Used mainly for HKL reflection data and SQUEEZE .fab
+// masks which are consumed by server-side SHELX/PLATON runs.
+app.post('/projects/:name/upload', upload.any(), (req, res) => {
+    try {
+        const basename = path.basename(req.params.name);
+        if (!req.files || req.files.length === 0) {
+            return res.status(400).json({ error: 'At least one file is required.' });
+        }
+        const projectDir = path.join(PROJECTS_DIR, basename);
+        fs.mkdirSync(projectDir, { recursive: true });
+        const backupDir = path.join(projectDir, 'backup');
+        fs.mkdirSync(backupDir, { recursive: true });
+
+        const stored = [];
+        for (const file of req.files) {
+            const original = path.basename(file.originalname);
+            // Canonical companion naming: a file whose stem equals the project
+            // name is stored as <project><ext> (what SHELX/PLATON expect).
+            const stem = original.replace(/\.[^.]+$/, '');
+            const ext = path.extname(original).toLowerCase();
+            const name = (stem.toLowerCase() === basename.toLowerCase() || basename + ext === original)
+                ? `${basename}${ext}`
+                : original;
+            const dest = path.join(projectDir, name);
+            if (fs.existsSync(dest)) {
+                const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+                fs.copyFileSync(dest, path.join(backupDir, `${name}_${timestamp}`));
+                fs.rmSync(dest);
+            }
+            fs.renameSync(file.path, dest);
+            stored.push(name);
+        }
+        res.json({ success: true, project: basename, files: stored });
+    } catch (error) {
+        console.error('project upload error:', error);
+        res.status(500).json({ error: 'Failed to upload file', details: error.message });
     }
 });
 

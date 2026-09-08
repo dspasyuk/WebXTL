@@ -6,7 +6,9 @@ export class DensityRenderer {
     constructor(parent) {
         this.parent = parent;
         this.mesh = null;
-        this.material = new THREE.MeshBasicMaterial({
+
+        // Wireframe isosurface (classic look)
+        this.wireframeMaterial = new THREE.MeshBasicMaterial({
             color: 0x0000ff,
             side: THREE.DoubleSide,
             transparent: true,
@@ -14,7 +16,51 @@ export class DensityRenderer {
             depthWrite: false,
             wireframe: true
         });
+
+        // Smooth, lit, semi-transparent isosurface. MarchingCubes provides
+        // per-vertex normals interpolated from the field gradient, so a lit
+        // material renders a soft blob like COOT/mercury rather than flat faces.
+        this.surfaceMaterial = new THREE.MeshPhongMaterial({
+            color: 0x0000ff,
+            side: THREE.DoubleSide,
+            transparent: true,
+            opacity: 0.4,
+            depthWrite: false,
+            shininess: 60,
+            specular: 0x111111
+        });
+
+        this.material = this.wireframeMaterial;
+        this.style = 'wireframe';
+        this.opacity = 0.4;
         this.isoLevel = 1.0;
+    }
+
+    setStyle(style) {
+        if (style !== 'smooth' && style !== 'wireframe') style = 'wireframe';
+        this.style = style;
+        this.material = style === 'smooth' ? this.surfaceMaterial : this.wireframeMaterial;
+        if (this.mesh) {
+            this.mesh.material = this.material;
+            this.material.color.set(this.color);
+        }
+        return this.material;
+    }
+
+    setColor(color) {
+        this.color = color;
+        this.wireframeMaterial.color.set(color);
+        this.surfaceMaterial.color.set(color);
+        if (this.mesh) this.mesh.material.color.set(color);
+    }
+
+    setOpacity(opacity) {
+        opacity = parseFloat(opacity);
+        if (!isFinite(opacity)) opacity = 0.4;
+        this.opacity = Math.min(1, Math.max(0, opacity));
+        this.wireframeMaterial.opacity = this.opacity;
+        this.surfaceMaterial.opacity = this.opacity;
+        if (this.mesh) this.mesh.material.opacity = this.opacity;
     }
 
     render(mapData, cell, level = 1.0, color = 0x0000ff, bounds = null, center = null, radius = null) {
@@ -24,7 +70,7 @@ export class DensityRenderer {
         }
 
         this.isoLevel = level;
-        this.material.color.set(color);
+        this.setColor(color);
 
         const { data, nx, ny, nz } = mapData;
         

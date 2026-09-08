@@ -140,6 +140,27 @@
                             </ul>
                         </li>
                         <li class="nav-item dropdown">
+                            <a class="nav-link dropdown-toggle" href="#" id="disorderDropdown" role="button"
+                                data-bs-toggle="dropdown">Disorder</a>
+                            <ul class="dropdown-menu" style="min-width: 240px;">
+                                <li><span class="dropdown-item-text text-muted small">Apply restraints to selected atoms</span></li>
+                                <li><a class="dropdown-item" href="#" id="menu-disorder-simu">SIMU</a></li>
+                                <li><a class="dropdown-item" href="#" id="menu-disorder-delu">DELU</a></li>
+                                <li><a class="dropdown-item" href="#" id="menu-disorder-flat">FLAT</a></li>
+                                <li><a class="dropdown-item" href="#" id="menu-disorder-isor">ISOR</a></li>
+                                <li><a class="dropdown-item" href="#" id="menu-disorder-eadp">EADP</a></li>
+                                <li>
+                                    <hr class="dropdown-divider">
+                                </li>
+                                <li><a class="dropdown-item" href="#" id="menu-disorder-sadi-bonds">SADI for bonds</a></li>
+                                <li><a class="dropdown-item" href="#" id="menu-disorder-sadi-angles">SADI for angles</a></li>
+                                <li>
+                                    <hr class="dropdown-divider">
+                                </li>
+                                <li><a class="dropdown-item" href="#" id="menu-disorder-clear">Remove all restraint keywords</a></li>
+                            </ul>
+                        </li>
+                        <li class="nav-item dropdown">
                             <a class="nav-link dropdown-toggle" href="#" id="calculateDropdown" role="button"
                                 data-bs-toggle="dropdown">Calculate</a>
                             <ul class="dropdown-menu">
@@ -264,10 +285,17 @@
                     <option value="2Fo-Fc">2Fo-Fc</option>
                     <option value="Fo-Fc">Fo-Fc</option>
                 </select>
+                <select class="form-select px-1" id="map-style" style="width: 100px;"
+                    title="Map display style">
+                    <option value="wireframe">Wireframe</option>
+                    <option value="smooth">Surface</option>
+                </select>
                 <input type="number" class="form-control px-1" id="map-level" value="1.0" step="0.1"
                     style="width: 60px;" title="Sigma Level">
                 <input type="number" class="form-control px-1" id="map-radius" value="10.0" step="0.5"
                     style="width: 60px;" title="Map Radius (Å)">
+                <input type="number" class="form-control px-1" id="map-opacity" value="0.4" step="0.05" min="0" max="1"
+                    style="width: 55px;" title="Map Opacity (0-1)">
                 <button class="btn btn-outline-secondary" id="tool-map-toggle" title="Toggle Map"><i
                         class="fa-solid fa-layer-group"></i></button>
             </div>
@@ -345,7 +373,7 @@
         </div>
     </div>
 
-    <input type="file" id="file-input" style="display: none;" accept=".res,.cif,.ins,.pdb,.hkl,.fcf" multiple>
+    <input type="file" id="file-input" style="display: none;" accept=".res,.cif,.ins,.pdb,.hkl,.fcf,.fab" multiple>
     <input type="file" id="hkl-input" style="display: none;" accept=".hkl">
     <!-- Preferences Modal -->
     <div class="modal fade" id="preferencesModal" tabindex="-1" aria-labelledby="preferencesModalLabel"
@@ -584,6 +612,20 @@
                                         <label for="pref-map-color" class="form-label">Map Color</label>
                                         <input type="color" class="form-control form-control-color" id="pref-map-color"
                                             value="#0000ff">
+                                    </div>
+                                    <div class="mb-3">
+                                        <label for="pref-map-opacity" class="form-label">Map Opacity (0-1)</label>
+                                        <input type="number" class="form-control" id="pref-map-opacity" value="0.4"
+                                            step="0.05" min="0" max="1">
+                                        <div class="form-text">Applies to both wireframe mesh and smooth surface.</div>
+                                    </div>
+                                    <div class="mb-3">
+                                        <label for="pref-map-style" class="form-label">Map Style</label>
+                                        <select class="form-select" id="pref-map-style">
+                                            <option value="wireframe">Wireframe</option>
+                                            <option value="smooth">Surface</option>
+                                        </select>
+                                        <div class="form-text">Surface renders the density as a lit, translucent solid.</div>
                                     </div>
                                     <div class="mb-3">
                                         <label for="pref-map-autoshow" class="form-label mb-1">Show Map when FCF is loaded</label>
@@ -1262,7 +1304,7 @@
                 <div class="modal-body">
                     <div class="mb-3">
                         <label for="occ-value-input" class="form-label">New occupancy value</label>
-                        <input type="number" class="form-control" id="occ-value-input" value="1.0" step="any" min="0"
+                        <input type="number" class="form-control" id="occ-value-input" value="10.5" step="any" min="0"
                             autofocus>
                         <div class="form-text">Sets the SOF field (5th numeric column) of atom lines. Values above 10
                             (e.g. 11.0) refine the occupancy via the corresponding FVAR free variable.</div>

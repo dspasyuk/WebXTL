@@ -21,6 +21,7 @@ import { FcfParser } from './js/parser/FcfParser.js';
 import { MapCalculator } from './js/compute/MapCalculator.js';
 import { DensityRenderer } from './js/viewer/DensityRenderer.js';
 import { RealSpaceRefiner } from './js/compute/RealSpaceRefiner.js';
+import { MoleculeCluster } from './js/compute/MoleculeCluster.js';
 import { FRAGMENTS } from './js/compute/FragmentLibrary.js';
 import './js/ace/mode-cif.js';
 import './js/ace/mode-shelx.js';
@@ -1407,6 +1408,15 @@ class WMOLApp {
             }
         });
 
+        // Cluster Molecules & Relabel (Alt-M)
+        editor.commands.addCommand({
+            name: 'clusterMolecules',
+            bindKey: {win: 'Alt-M', mac: 'Alt-M'},
+            exec: (editor) => {
+                this.openClusterDialog(editor);
+            }
+        });
+
         editor.commands.addCommand({
             name: 'autoHfix',
             bindKey: {win: 'Ctrl-H', mac: 'Command-H'},
@@ -2494,6 +2504,213 @@ class WMOLApp {
         }
     }
 
+    // Collect atom rows from the editor document (label -> row index map)
+    collectClusterAtoms() {
+        const editor = this.state.editors.res;
+        if (!editor) return null;
+        const doc = editor.getSession().getDocument();
+        const lines = doc.getAllLines();
+        const sfacElements = this.getSfacElements(lines);
+        const atoms = [];
+        const rows = [];
+        lines.forEach((line, i) => {
+            const atom = this.parseRelabelAtomLine(line, sfacElements);
+            if (!atom) return;
+            atoms.push({ label: atom.label, element: atom.element, x: 0, y: 0, z: 0 });
+            rows.push(i);
+        });
+        return { atoms, rows, lines };
+    }
+
+    openClusterDialog(editor) {
+        if (!this.state.parsedData || !this.state.parsedData.atoms || !this.state.parsedData.cell) {
+            alert("No structure data available. Please load a valid file.");
+            return;
+        }
+        const modalEl = document.getElementById('clusterModal');
+        if (!modalEl) return;
+        const modal = new bootstrap.Modal(modalEl);
+        const body = document.getElementById('cluster-preview-body');
+        const summary = document.getElementById('cluster-summary');
+        const btnApply = document.getElementById('btn-cluster-apply');
+        if (body) body.innerHTML = '<tr><td colspan="6" class="text-center text-muted">Click Analyze to preview</td></tr>';
+        if (summary) summary.textContent = '';
+        if (btnApply) btnApply.disabled = true;
+        this.state.clusterResult = null;
+        modal.show();
+    }
+
+    analyzeCluster() {
+        // Always re-parse the live editor content so the plan matches the
+        // current labels (parsedData can be stale after edits/relabels).
+        const editor = this.state.editors.res;
+        if (!editor) {
+            alert("No editor available.");
+            return;
+        }
+        const content = editor.getSession().getValue();
+        const parsed = new ShelxParser().parse(content);
+        if (!parsed || !parsed.atoms || !parsed.atoms.length || !parsed.cell) {
+            alert("No structure data available. Please load a valid file.");
+            return;
+        }
+
+        // Q-peaks are not real atoms yet (unrefined difference peaks), so they
+        // are excluded from clustering and left untouched in the file.
+        const realAtoms = parsed.atoms.filter(a => !/^Q/i.test(a.label));
+        if (!realAtoms.length) {
+            alert("No (non-Q) atoms found to cluster.");
+            return;
+        }
+
+        const bondFactor = parseFloat(document.getElementById('cluster-bond-factor').value) || 1.25;
+        const minBond = parseFloat(document.getElementById('cluster-min-bond').value) || 0.85;
+        const maxBond = parseFloat(document.getElementById('cluster-max-bond').value) || 2.2;
+
+        const cluster = new MoleculeCluster(parsed.cell, realAtoms, { bondFactor, minBond, maxBond });
+        const result = cluster.buildPlan();
+        this.state.clusterResult = result;
+
+        const body = document.getElementById('cluster-preview-body');
+        const summary = document.getElementById('cluster-summary');
+        const btnApply = document.getElementById('btn-cluster-apply');
+
+        if (body) {
+            body.innerHTML = '';
+            result.molecules.forEach((mol, mi) => {
+                const tr = document.createElement('tr');
+                const comp = Object.entries(mol.composition)
+                    .map(([el, n]) => el + n)
+                    .join(' ');
+                const pos = `${mol.centroid.x.toFixed(3)} ${mol.centroid.y.toFixed(3)} ${mol.centroid.z.toFixed(3)}`;
+                const molPlan = result.plan.filter(p => mol.indices.includes(p.index));
+                const oldLabels = molPlan.map(p => p.oldLabel).join(' ');
+                const newLabels = molPlan.map(p => p.newLabel).join(' ');
+                [mi + 1, mol.indices.length, comp, pos, oldLabels, newLabels].forEach((val, ci) => {
+                    const td = document.createElement('td');
+                    td.textContent = val;
+                    if (ci >= 4) td.style.fontFamily = 'monospace';
+                    tr.appendChild(td);
+                });
+                body.appendChild(tr);
+            });
+        }
+
+        if (summary) {
+            const total = result.plan.length;
+            const changed = result.plan.filter(p => p.oldLabel !== p.newLabel).length;
+            summary.textContent = `${result.molecules.length} molecule(s) found, ${total} atoms, ${changed} label(s) will change.`;
+        }
+
+        if (btnApply) btnApply.disabled = result.plan.length === 0;
+    }
+
+    applyClusterRelabel() {
+        const result = this.state.clusterResult;
+        if (!result || !result.plan.length) {
+            alert("Nothing to apply. Run Analyze first.");
+            return;
+        }
+
+        const editor = this.state.editors.res;
+        if (!editor) return;
+        const doc = editor.getSession().getDocument();
+
+        const lines = doc.getAllLines();
+
+        // The plan was built from a fresh parse of this same content, so its
+        // oldLabels are exactly the current real-atom labels. Use that set to
+        // detect atom rows (avoids mis-identifying header lines like
+        // "created by..." or ZERR/UNIT as atoms, and leaves Q-peaks alone).
+        const atomLabels = new Set(result.plan.map(p => p.oldLabel));
+        const firstToken = (line) => (line.trim().split(/\s+/)[0] || '');
+        const isAtomRow = (line) => atomLabels.has(firstToken(line));
+        const isKeyword = (line) => this.getRelabelKeywords().includes(firstToken(line).toUpperCase());
+
+        const atomLabelRows = [];
+        lines.forEach((line, i) => {
+            if (isAtomRow(line)) atomLabelRows.push(i);
+        });
+        if (atomLabelRows.length === 0) {
+            alert("No atoms found.");
+            return;
+        }
+
+        // Build a block for each atom: its label line plus any ADP
+        // continuation lines that follow (stops at a blank line, the next atom,
+        // or a keyword). This keeps ADPs attached even for the last atom.
+        const blocksByLabel = {};
+        atomLabelRows.forEach((row) => {
+            const label = firstToken(lines[row]);
+            const block = [lines[row]];
+            let r = row + 1;
+            while (r < lines.length) {
+                const next = lines[r];
+                if (!next.trim() || isAtomRow(next) || isKeyword(next)) break;
+                block.push(next);
+                r++;
+            }
+            blocksByLabel[label] = block;
+        });
+
+        // The real atoms are contiguous (Q-peaks excluded), so the region to
+        // replace runs from the first atom label row to the end of the last
+        // atom block. Extend the start upward to absorb any REM MOLn separators
+        // left over from a previous run (keeps the operation idempotent).
+        let firstRow = atomLabelRows[0];
+        let sawRem = false;
+        while (firstRow - 1 >= 0) {
+            const t = lines[firstRow - 1].trim();
+            if (/^REM\s+MOL\d+/i.test(t)) {
+                firstRow--;
+                sawRem = true;
+            } else if (t === '' && sawRem) {
+                firstRow--;
+            } else {
+                break;
+            }
+        }
+        const lastBlock = blocksByLabel[firstToken(lines[atomLabelRows[atomLabelRows.length - 1]])];
+        const lastRow = atomLabelRows[atomLabelRows.length - 1] + lastBlock.length - 1;
+
+        // Rebuild the region: for each molecule (in order) emit a REM MOLn
+        // separator followed by its atoms in proximity-walk order, relabeled.
+        const out = [];
+        let applied = 0;
+        result.molecules.forEach((mol, mi) => {
+            out.push(`REM MOL${mi + 1}`);
+            const molPlan = result.plan.filter(p => p.molecule === mi + 1);
+            molPlan.forEach(p => {
+                const block = blocksByLabel[p.oldLabel];
+                if (!block) return;
+                const relabeled = block.map((line, li) => {
+                    if (li !== 0) return line;
+                    const match = line.match(/\S+/);
+                    if (!match) return line;
+                    return line.substring(0, match.index) + p.newLabel + line.substring(match.index + p.oldLabel.length);
+                });
+                out.push(...relabeled);
+                if (p.oldLabel !== p.newLabel) applied++;
+            });
+        });
+
+        // Replace the atom region with the reordered, relabeled clusters.
+        editor.session.replace({
+            start: { row: firstRow, column: 0 },
+            end: { row: lastRow, column: doc.getLine(lastRow).length }
+        }, out.join('\n'));
+
+        this.tryRender('res');
+        this.deselectAll();
+
+        const modalEl = document.getElementById('clusterModal');
+        if (modalEl) {
+            const modal = bootstrap.Modal.getInstance(modalEl);
+            if (modal) modal.hide();
+        }
+        alert(`Grouped ${result.molecules.length} molecule(s) with REM separators and relabeled ${applied} atom(s).`);
+    }
+
     setupUIEvents() {
         // Handle Tab Switching
         const tabEls = document.querySelectorAll('button[data-bs-toggle="tab"]');
@@ -2896,6 +3113,16 @@ class WMOLApp {
                     });
                 }
             });
+        }
+
+        // Cluster Molecules Modal Logic
+        const btnClusterAnalyze = document.getElementById('btn-cluster-analyze');
+        const btnClusterApply = document.getElementById('btn-cluster-apply');
+        if (btnClusterAnalyze) {
+            btnClusterAnalyze.addEventListener('click', () => this.analyzeCluster());
+        }
+        if (btnClusterApply) {
+            btnClusterApply.addEventListener('click', () => this.applyClusterRelabel());
         }
     }
 
@@ -3547,6 +3774,8 @@ class WMOLApp {
         bindMenu('menu-add-trailer', 'addTrailer');
         bindMenu('menu-relabel', 'relabelAtoms');
         bindMenu('tool-relabel', 'relabelAtoms'); // Toolbar
+        bindMenu('menu-cluster', 'clusterMolecules');
+        bindMenu('tool-cluster', 'clusterMolecules'); // Toolbar
         bindMenu('menu-autohfix', 'autoHfix');
         bindMenu('menu-comment', 'toggleComment');
 

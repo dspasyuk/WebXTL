@@ -3116,14 +3116,27 @@ class WMOLApp {
             exec: (editor) => {
                 const hfix = prompt("Enter HFIX instruction (e.g. 137):");
                 if (hfix) {
-                    const range = editor.getSelectionRange();
                     const doc = editor.getSession().getDocument();
-                    const selectedLines = doc.getLines(range.start.row, range.end.row);
                     const instructions = [];
-                    
+
+                    // Collect every selected row across all ranges. Atom selections made by
+                    // Ctrl-clicking in the model/editor create one separate Ace range per row,
+                    // so getSelectionRange() (the primary range) would only ever see one atom.
+                    const selectedRows = new Set();
+                    const ranges = editor.selection.getAllRanges();
+                    const hasSelection = ranges.length > 0 && !(ranges.length === 1 && ranges[0].isEmpty());
+                    if (hasSelection) {
+                        ranges.forEach(r => {
+                            for (let i = r.start.row; i <= r.end.row; i++) selectedRows.add(i);
+                        });
+                    } else {
+                        // No text selection: fall back to the line under the cursor
+                        selectedRows.add(editor.getCursorPosition().row);
+                    }
+
                     // Identify atoms in selection
-                    selectedLines.forEach(line => {
-                        const parts = line.trim().split(/\s+/);
+                    selectedRows.forEach(row => {
+                        const parts = doc.getLine(row).trim().split(/\s+/);
                         // Check if atom: starts with letter, has coordinates (at least 4 parts)
                         // Heuristic: Label starts with letter, not a keyword
                         const keywords = ['TITL', 'CELL', 'ZERR', 'LATT', 'SYMM', 'SFAC', 'UNIT', 'HFIX', 'BOND', 'CONF', 'MPLA', 'HTAB', 'EQIV', 'CONN', 'PART', 'AFIX', 'RESI', 'MOLE', 'PLAN', 'SIZE', 'TEMP', 'WGHT', 'FVAR', 'HKLF', 'END', 'REM', 'Q', 'OMIT', 'DISP', 'ISOR', 'RIGI', 'SIMU', 'DELU', 'DANG', 'BUMP'];

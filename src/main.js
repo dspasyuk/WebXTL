@@ -20,6 +20,7 @@ import { MoleculeRenderer } from './js/viewer/MoleculeRenderer.js';
 import { FcfParser } from './js/parser/FcfParser.js';
 import { MapCalculator } from './js/compute/MapCalculator.js';
 import { DensityRenderer } from './js/viewer/DensityRenderer.js';
+import { Symmetry } from './js/utils/Symmetry.js';
 import { RealSpaceRefiner } from './js/compute/RealSpaceRefiner.js';
 import { MoleculeCluster } from './js/compute/MoleculeCluster.js';
 import { FRAGMENTS } from './js/compute/FragmentLibrary.js';
@@ -1693,14 +1694,13 @@ class WMOLApp {
         if (this.state.currentMapData && this.state.densityRenderer) {
             const btn = document.getElementById('tool-map-toggle');
             if (btn && btn.classList.contains('active')) {
-                this.state.densityRenderer.render(
+                this.renderDensitySurface(
                     this.state.cachedMapData,
                     this.state.currentMapData.cell,
                     parseFloat(document.getElementById('map-level').value) || 1.0,
-                    new THREE.Color(this.state.preferences.map.color),
+                    this.state.currentMapRadius,
                     this.state.currentMapBounds,
-                    this.state.currentMapCenter,
-                    this.state.currentMapRadius
+                    this.state.currentMapCenter
                 );
             }
         }
@@ -2108,14 +2108,8 @@ class WMOLApp {
             this.state.moleculeRenderer.materials = {};
             this.state.moleculeRenderer.labelCache = {};
         }
-        if (this.state.densityRenderer && this.state.densityRenderer.mesh) {
-            if (this.state.densityRenderer.parent) {
-                this.state.densityRenderer.parent.remove(this.state.densityRenderer.mesh);
-            }
-            if (this.state.densityRenderer.mesh.geometry) {
-                this.state.densityRenderer.mesh.geometry.dispose();
-            }
-            this.state.densityRenderer.mesh = null;
+        if (this.state.densityRenderer) {
+            this.state.densityRenderer.disposeMeshes();
         }
         if (this.state.moleculeRenderer && this.state.moleculeRenderer.group) {
             while (this.state.moleculeRenderer.group.children.length > 0) {
@@ -2549,7 +2543,22 @@ class WMOLApp {
             this.state.currentProject = data.name;
             this.state.loadedType = data.type;
             this.state.loadedContent = data.content;
-            
+
+            // The project folder name drives server-side runs (SHELXL/PLATON)
+            // and HKL matching. Warn when the structure file stored inside has a
+            // different basename, since those runs will look for <project>.hkl.
+            if (data.filename) {
+                const structBase = String(data.filename).replace(/\.[^.]+$/, '');
+                if (structBase.toLowerCase() !== String(name).toLowerCase()) {
+                    const msg = `Project name '${name}' differs from its structure file '${data.filename}'.\n\n`
+                        + `Refinement and other server-side runs use the project name '${name}', `
+                        + `so they look for '${name}.ins' and '${name}.hkl'. Rename the files to match the `
+                        + `project (or create a project named '${structBase}') before refining.`;
+                    if (silent) console.warn(msg);
+                    else alert(msg);
+                }
+            }
+
             const editor = this.state.editors[data.type] || this.state.editors.res;
             if (editor) editor.setValue(data.content, -1);
             this.renderContent(data.content, data.type);
@@ -5466,18 +5475,26 @@ class WMOLApp {
                         event.preventDefault();
                         const newTarget = new THREE.Vector3();
 
-                        if (target.object.isInstancedMesh) {
+                        // Prefer the atom under the cursor. The semi-transparent
+                        // density map (and its periodic images) is often the
+                        // first ray hit; centering on that surface point would
+                        // recenter the map a whole cell away from the model.
+                        const atomHit = intersects.find(i =>
+                            i.object.isInstancedMesh && i.object.userData.atomMap);
+                        const hit = atomHit || target;
+
+                        if (hit.object.isInstancedMesh) {
                             // Center on the clicked atom itself (sphere centre).
                             const matrix = new THREE.Matrix4();
-                            target.object.getMatrixAt(target.instanceId, matrix);
+                            hit.object.getMatrixAt(hit.instanceId, matrix);
                             newTarget.setFromMatrixPosition(matrix);
-                            newTarget.applyMatrix4(target.object.matrixWorld);
-                        } else if (target.point) {
+                            newTarget.applyMatrix4(hit.object.matrixWorld);
+                        } else if (hit.point) {
                             // Non-instanced object (e.g. density-map surface):
                             // recenter exactly on the point that was clicked.
-                            newTarget.copy(target.point);
+                            newTarget.copy(hit.point);
                         } else {
-                            target.object.getWorldPosition(newTarget);
+                            hit.object.getWorldPosition(newTarget);
                         }
 
                         this.centerViewAndMapOn(newTarget);
@@ -5980,6 +5997,22 @@ class WMOLApp {
         reader.readAsText(file);
     }
 
+    // Draw the density surface the way Coot does: a single blue surface for
+    // 2Fo-Fc/Fo, and separate green (+) / red (-) surfaces for a Fo-Fc
+    // difference map.
+    renderDensitySurface(mapData, mapCell, level, radius, bounds, centerFrac) {
+        if (!this.state.densityRenderer) return;
+        const type = (document.getElementById('map-type') || {}).value || '2Fo-Fc';
+        let color = new THREE.Color(this.state.preferences.map.color);
+        const options = {};
+        if (type === 'Fo-Fc') {
+            color = new THREE.Color(0x00cc00);          // positive difference density
+            options.negativeLevel = -Math.abs(level);   // negative difference density
+            options.negativeColor = 0xff0000;
+        }
+        this.state.densityRenderer.render(mapData, mapCell, level, color, bounds, centerFrac, radius, options);
+    }
+
     renderMap(content) {
         this.state.fcfRawContent = content;
         this.state.mapFocusFrac = null;
@@ -5995,12 +6028,23 @@ class WMOLApp {
             const cell = this.state.parsedData.cell; 
             const mapCell = (cell && cell.a) ? cell : fcfData.cell;
 
-            // Use symmetry-expanded atoms for correct phase calculation
+            // Phase calculation needs the FULL unit-cell content, not just the
+            // asymmetric unit, and must not depend on whether the unit cell is
+            // currently drawn. Expand the model with the FCF (or model) symmetry
+            // operators so every symmetry mate contributes to the structure
+            // factors; otherwise the phases are wrong and the map looks
+            // dispersed instead of sitting on the atoms.
+            const symOps = (fcfData.symmetry && fcfData.symmetry.length)
+                ? fcfData.symmetry
+                : ((this.state.parsedData.symmetry && this.state.parsedData.symmetry.length)
+                    ? this.state.parsedData.symmetry
+                    : null);
             let phaseAtoms = this.state.parsedData.atoms;
-            if (this.state.moleculeRenderer && this.state.moleculeRenderer.expandedAtoms) {
+            if (symOps) {
+                phaseAtoms = Symmetry.generateEquivalentPositions(this.state.parsedData.atoms, symOps, true);
+            } else if (this.state.moleculeRenderer && this.state.moleculeRenderer.expandedAtoms) {
+                // No symmetry available: fall back to the renderer's atom list.
                 const exp = this.state.moleculeRenderer.expandedAtoms;
-                // Deduplicate by grouping atoms with identical fractional coordinates
-                // to avoid double-counting in structure factor sum
                 const seen = new Set();
                 phaseAtoms = [];
                 exp.forEach(a => {
@@ -6012,16 +6056,23 @@ class WMOLApp {
                 });
             }
             
-            this.state.mapCalculator.calculateStructureFactors(phaseAtoms, fcfData.reflections, mapCell);
+            // FCF files hold only the unique reflections. Expand them over the
+            // Laue group so the Fourier synthesis spans the full reciprocal
+            // lattice (otherwise the map uses ~1/8 of the data and looks
+            // dispersed instead of showing compact peaks at the atoms).
+            const allReflections = this.state.mapCalculator.expandReflections(
+                fcfData.reflections, fcfData.symmetry);
+
+            this.state.mapCalculator.calculateStructureFactors(phaseAtoms, allReflections, mapCell);
             
             // Calculate Map
             const level = parseFloat(document.getElementById('map-level').value) || 1.0;
             const radius = parseFloat(document.getElementById('map-radius').value) || 4.0;
             const type = document.getElementById('map-type').value || '2Fo-Fc';
             
-            this.state.currentMapData = { reflections: fcfData.reflections, cell: mapCell }; // Store for updates
+            this.state.currentMapData = { reflections: allReflections, cell: mapCell }; // Store for updates
             
-            const mapData = this.state.mapCalculator.calculateMap(fcfData.reflections, mapCell, this.state.preferences.map.resolution, type); 
+            const mapData = this.state.mapCalculator.calculateMap(allReflections, mapCell, this.state.preferences.map.resolution, type); 
             this.state.cachedMapData = mapData; // Cache for RSR
         
         // Calculate Center (Cartesian) and Bounds
@@ -6140,7 +6191,7 @@ class WMOLApp {
 
         // Render only if the user opted to show maps automatically
         if (this.state.preferences.map.autoShow) {
-            this.state.densityRenderer.render(mapData, mapCell, level, new THREE.Color(this.state.preferences.map.color), bounds, centerFrac, radius);
+            this.renderDensitySurface(mapData, mapCell, level, radius, bounds, centerFrac);
             const btn = document.getElementById('tool-map-toggle');
             if (btn) {
                 btn.classList.add('active');
@@ -6175,7 +6226,6 @@ class WMOLApp {
                  const radius = parseFloat(radiusInput.value) || 4.0;
                  const type = typeSelect.value;
                  const resolution = this.state.preferences.map.resolution;
-                 const color = new THREE.Color(this.state.preferences.map.color);
                  
                  let needsRecalc = false;
                  
@@ -6292,7 +6342,7 @@ class WMOLApp {
                  this.state.currentMapCenter = centerFrac;
                  this.state.currentMapRadius = radius;
                  
-                 this.state.densityRenderer.render(this.state.cachedMapData, mapCell, level, new THREE.Color(this.state.preferences.map.color), bounds, centerFrac, radius);
+                 this.renderDensitySurface(this.state.cachedMapData, mapCell, level, radius, bounds, centerFrac);
              }
         };
 
@@ -6332,8 +6382,8 @@ class WMOLApp {
                 if (toggleBtn.classList.contains('active')) {
                     toggleBtn.classList.remove('active');
                     toggleBtn.setAttribute('aria-pressed', 'false');
-                    if (this.state.densityRenderer && this.state.densityRenderer.mesh) {
-                        this.state.densityRenderer.mesh.visible = false;
+                    if (this.state.densityRenderer) {
+                        this.state.densityRenderer.setVisible(false);
                     }
                 } else {
                     if (!this.state.currentMapData) {
@@ -6349,7 +6399,7 @@ class WMOLApp {
                     if (!this.state.cachedMapData) {
                         updateMap();
                     } else if (this.state.densityRenderer && this.state.densityRenderer.mesh) {
-                        this.state.densityRenderer.mesh.visible = true;
+                        this.state.densityRenderer.setVisible(true);
                     } else {
                         updateMap();
                     }
@@ -6380,12 +6430,22 @@ class WMOLApp {
     // empty space: both the orbit/view target and the map move together.
     recenterMapToWorldPoint(worldPoint) {
         if (!this.state.currentMapData || !this.state.densityRenderer) return;
-        if (!this.state.cachedMapData) return;
+        // The cache is invalidated whenever the structure editor re-renders
+        // (e.g. the delayed re-render after loading a project). Recompute it
+        // here, matching the other map paths, so recentering still works.
+        if (!this.state.cachedMapData) {
+            const type = (document.getElementById('map-type') || {}).value || '2Fo-Fc';
+            this.state.cachedMapData = this.state.mapCalculator.calculateMap(
+                this.state.currentMapData.reflections,
+                this.state.currentMapData.cell,
+                this.state.preferences.map.resolution,
+                type
+            );
+        }
 
         const mapCell = this.state.currentMapData.cell;
         const radius = parseFloat(document.getElementById('map-radius').value) || this.state.currentMapRadius || 4.0;
         const level = parseFloat(document.getElementById('map-level').value) || 1.0;
-        const color = new THREE.Color(this.state.preferences.map.color);
 
         // The molecule + map are children of moleculeRenderer.group, which is
         // translated by -center so the whole structure sits at the origin.
@@ -6438,9 +6498,9 @@ class WMOLApp {
         const btn = document.getElementById('tool-map-toggle');
         const wasVisible = !btn || btn.classList.contains('active');
 
-        this.state.densityRenderer.render(this.state.cachedMapData, mapCell, level, color, bounds, centerFrac, radius);
-        if (!wasVisible && this.state.densityRenderer.mesh) {
-            this.state.densityRenderer.mesh.visible = false;
+        this.renderDensitySurface(this.state.cachedMapData, mapCell, level, radius, bounds, centerFrac);
+        if (!wasVisible) {
+            this.state.densityRenderer.setVisible(false);
         }
     }
 
@@ -8479,7 +8539,12 @@ class WMOLApp {
             });
 
             if (!response.ok) {
-                throw new Error(`Server error: ${response.statusText}`);
+                let detail = '';
+                try {
+                    const errBody = await response.json();
+                    detail = errBody.error || errBody.details || '';
+                } catch (err) { /* non-JSON error body */ }
+                throw new Error(`Server error: ${response.statusText}${detail ? ` — ${detail}` : ''}`);
             }
 
             const data = await response.json();

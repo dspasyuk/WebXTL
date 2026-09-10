@@ -169,6 +169,13 @@ export class ShelxParser {
                             
                             if (isNaN(uiso)) uiso = 0.05;
 
+                            // SHELXL writes a negative U for riding hydrogens
+                            // (the magnitude is a multiplier on the parent Ueq).
+                            // Left negative, exp(-8*pi^2*uiso*s^2) grows with
+                            // resolution and the H atoms overwhelm the structure
+                            // factors, so convert it to a small positive U.
+                            if (uiso < 0) uiso = Math.abs(uiso) * 0.02;
+
                             this.data.atoms.push({
                                 label: parts[0],
                                 element: element,

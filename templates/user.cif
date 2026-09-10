@@ -7,7 +7,7 @@ data_global
 
 
 
-_publ_contact_author_name   'Linxtl User'
+_publ_contact_author_name   'WebXTL User'
 
 _publ_contact_author_address
 ;
@@ -21,7 +21,7 @@ _publ_contact_author_address
 
 _publ_contact_author_phone        '1-111-111-1111'
 _publ_contact_author_fax          '1-111-111-1111'
-_publ_contact_author_email        'linxtl.user@user.com'
+_publ_contact_author_email        'WebXTL.user@user.com'
 
 
 
@@ -70,7 +70,7 @@ _journal_suppl_publ_pages         ?
 
 _publ_section_title
 ;
-Structure of Linxtl compound  
+Structure of WebXTL compound  
 ;
 
 # The loop structure below should contain the names and addresses of all
@@ -79,7 +79,7 @@ Structure of Linxtl compound
 loop_
     _publ_author_name
     _publ_author_address
-          'linxtl, user'
+          'WebXTL, user'
 ;
       D\'epartement de Chimie
       Universit\'e de Montr\'eal
@@ -88,7 +88,7 @@ loop_
       Canada H3C 3J7
 
 ;
-      'linxtl, user'
+      'WebXTL, user'
 ;
        D\'epartement de Chimie
        Universit\'e de Montr\'eal

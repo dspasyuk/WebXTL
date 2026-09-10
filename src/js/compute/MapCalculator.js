@@ -75,6 +75,62 @@ export class MapCalculator {
         }
     }
 
+    // Expand the unique (asymmetric-unit) reflections over the Laue group so a
+    // Fourier synthesis covers the full reciprocal lattice. SHELXL LIST 4/6
+    // FCF files contain only the unique reflections; without this expansion the
+    // map is built from a fraction of reciprocal space and looks weak/dispersed.
+    expandReflections(reflections, symmetry) {
+        const ops = this.laueOperations(symmetry);
+        if (!ops.length) return reflections;
+        const expanded = new Map();
+        for (const r of reflections) {
+            for (const R of ops) {
+                const h = R[0][0] * r.h + R[0][1] * r.k + R[0][2] * r.l;
+                const k = R[1][0] * r.h + R[1][1] * r.k + R[1][2] * r.l;
+                const l = R[2][0] * r.h + R[2][1] * r.k + R[2][2] * r.l;
+                const key = h + ',' + k + ',' + l;
+                if (!expanded.has(key)) {
+                    expanded.set(key, { h, k, l, Fo2: r.Fo2, Fc2: r.Fc2, sigma: r.sigma, status: r.status });
+                }
+            }
+        }
+        return [...expanded.values()];
+    }
+
+    // Integer rotation matrices for the Laue group implied by the space-group
+    // symmetry operators, including inversion (Friedel's law for the observed
+    // amplitudes). Translations do not affect the hkl orbit.
+    laueOperations(symmetry) {
+        const idx = { x: 0, y: 1, z: 2 };
+        const ops = [];
+        const seen = new Set();
+        const add = (R) => {
+            const key = R[0].join(',') + ';' + R[1].join(',') + ';' + R[2].join(',');
+            if (!seen.has(key)) { seen.add(key); ops.push(R); }
+        };
+        for (const op of symmetry || []) {
+            const parts = String(op).split(',');
+            if (parts.length !== 3) continue;
+            const R = [[0, 0, 0], [0, 0, 0], [0, 0, 0]];
+            let ok = true;
+            parts.forEach((comp, row) => {
+                const re = /([+-]?)\s*(\d*)\s*([xyz])/g;
+                let m;
+                let found = false;
+                while ((m = re.exec(comp)) !== null) {
+                    found = true;
+                    const sign = m[1] === '-' ? -1 : 1;
+                    const num = m[2] === '' ? 1 : parseInt(m[2], 10);
+                    R[row][idx[m[3]]] += sign * num;
+                }
+                if (!found) ok = false;
+            });
+            if (ok) add(R);
+        }
+        for (const R of ops.slice()) add(R.map(row => row.map(v => -v)));
+        return ops;
+    }
+
     calculateMap(reflections, cell, resolution = 0.5, type = '2Fo-Fc') {
         const na = Math.ceil(cell.a / resolution);
         const nb = Math.ceil(cell.b / resolution);
@@ -98,7 +154,8 @@ export class MapCalculator {
             } else if (type === 'Fo-Fc') {
                 F = fo - fc;
             } else {
-                F = fo; 
+                // 'Fo' (Fobserved) and any other type use observed amplitudes
+                F = fo;
             }
             
             const phi = refl.phase;

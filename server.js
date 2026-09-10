@@ -1360,24 +1360,38 @@ app.get('/projects/:name', (req, res) => {
             return res.status(404).json({ error: 'Project not found' });
         }
 
-        const resPath = path.join(projectDir, `${basename}.res`);
-        const insPath = path.join(projectDir, `${basename}.ins`);
-        
-        let content = '';
-        let type = 'res';
+        // Prefer a structure file that matches the project name, but fall back to
+        // any .res/.ins stored in the project directory. Projects are sometimes
+        // created by uploading files whose basename differs from the folder name
+        // (e.g. project 'nickel3' holding 'denis7.res'), and those must load too.
+        let structPath = null;
+        for (const ext of ['.res', '.ins']) {
+            const p = path.join(projectDir, `${basename}${ext}`);
+            if (fs.existsSync(p)) { structPath = p; break; }
+        }
+        if (!structPath) {
+            const candidates = fs.readdirSync(projectDir)
+                .filter(f => /\.(res|ins)$/i.test(f) && fs.lstatSync(path.join(projectDir, f)).isFile())
+                .sort((a, b) => {
+                    const ea = path.extname(a).toLowerCase();
+                    const eb = path.extname(b).toLowerCase();
+                    if (ea !== eb) return ea === '.res' ? -1 : 1;
+                    return a.localeCompare(b);
+                });
+            if (candidates.length) structPath = path.join(projectDir, candidates[0]);
+        }
 
-        if (fs.existsSync(resPath)) {
-            content = fs.readFileSync(resPath, 'utf8');
-        } else if (fs.existsSync(insPath)) {
-            content = fs.readFileSync(insPath, 'utf8');
-            type = 'ins';
-        } else {
+        if (!structPath) {
             // If neither exists, just return the file list so the user can pick
             const files = fs.readdirSync(projectDir).filter(f => fs.lstatSync(path.join(projectDir, f)).isFile());
             return res.json({ name: basename, files: files });
         }
 
-        res.json({ name: basename, type: type, content: content });
+        const filename = path.basename(structPath);
+        const type = path.extname(structPath).toLowerCase() === '.ins' ? 'ins' : 'res';
+        const content = fs.readFileSync(structPath, 'utf8');
+
+        res.json({ name: basename, filename: filename, type: type, content: content });
     } catch (error) {
         res.status(500).json({ error: 'Failed to load project', details: error.message });
     }

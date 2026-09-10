@@ -1,0 +1,126 @@
+
+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
++  XPREP - DATA PREPARATION & RECIPROCAL SPACE EXPLORATION    Ver. 5.1/NT   +
++  COPYRIGHT(c) 1997 Bruker Analytical X-ray Systems  All Rights Reserved    +
++  denis7                                   started at 16:34:22 on 10-DEC-0  +
+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+
+
+Original cell in Angstroms and degrees:
+
+    9.408    9.826   21.166    90.00    90.00    90.00
+
+   30617 Reflections read from file denis7.raw; mean (I/sigma) =   19.54
+
+
+Lattice exceptions:  P      A      B      C      I      F     Obv    Rev    All
+
+N (total) =           0  15261  15324  15339  15324  22962  20407  20418  30617
+N (int>3sigma) =      0  13124  13334  13328  13358  19893  17919  17915  26939
+Mean intensity =    0.0  139.6  141.8  139.0  141.8  140.1  138.0  137.5  139.4
+Mean int/sigma =    0.0   19.2   19.7   19.3   19.5   19.4   19.5   19.4   19.6
+
+Lattice type: P chosen          Volume:      1956.60
+
+-------------------------------------------------------------------------------
+
+DETERMINATION OF REDUCED (NIGGLI) CELL
+
+Transformation from original cell (HKLF-matrix): 
+    1.0000  0.0000  0.0000    0.0000  1.0000  0.0000    0.0000  0.0000  1.0000
+
+Unitcell:       9.408    9.826   21.166   90.00   90.00   90.00
+
+Niggli form:     a.a =     88.50      b.b =     96.55      c.c =    448.01
+                 b.c =      0.00      a.c =      0.00      a.b =      0.00
+
+-------------------------------------------------------------------------------
+
+SEARCH FOR HIGHER METRIC SYMMETRY
+
+------------------------------------------------------------------------------
+Option A: FOM = 0.000 deg.   ORTHORHOMBIC  P-lattice   R(int) = 0.106 [ 28641]
+Cell:    9.408   9.826  21.166   90.00   90.00   90.00    Volume:      1956.60
+Matrix: 1.0000  0.0000  0.0000  0.0000  1.0000  0.0000  0.0000  0.0000  1.0000
+
+Option A selected
+
+-------------------------------------------------------------------------------
+
+SPACE GROUP DETERMINATION
+
+
+Lattice exceptions:  P      A      B      C      I      F     Obv    Rev    All
+
+N (total) =           0  15261  15324  15339  15324  22962  20407  20418  30617
+N (int>3sigma) =      0  13124  13334  13328  13358  19893  17919  17915  26939
+Mean intensity =    0.0  139.6  141.8  139.0  141.8  140.1  138.0  137.5  139.4
+Mean int/sigma =    0.0   19.2   19.7   19.3   19.5   19.4   19.5   19.4   19.6
+
+
+Crystal system O and Lattice type P selected
+
+Mean |E*E-1| = 0.771 [expected .968 centrosym and .736 non-centrosym]
+
+Chiral flag NOT set
+
+
+
+Systematic absence exceptions:
+
+         b--   c--   n--  21--   -c-   -a-   -n-  -21-   --a   --b   --n  --21 
+
+N      1459  1450  1449     6   893   899   896    38   372   378   370    83
+N I>3s 1118  1128  1118     0     1   445   446     0   190   190     0     1
+<I>   225.2 246.7 251.8   0.6   0.7 204.5 205.2   0.6 120.4 118.5   0.7   0.6
+<I/s>  26.9  27.4  25.7   0.5   0.4  20.6  20.6   0.4  17.2  17.0   0.4   0.4
+
+
+Option  Space Group  No.  Type  Axes  CSD  R(int) N(eq)  Syst. Abs.   CFOM
+
+[A] Pna2(1)        # 33  non-cen  4   903  0.106 28641   0.5 / 17.0   0.84
+[B] Pnma           # 62  centro   5   894  0.106 28641   0.5 / 17.0   4.58
+
+Option [A] chosen
+
+-------------------------------------------------------------------------------
+
+Determination of unit-cell contents
+
+Formula: C20H22ONPNiBr2                                    
+
+Formula weight =    541.89
+
+Tentative Z (number of formula units/cell) =   4.0  giving rho = 1.840,
+non-H atomic volume =  18.8  and following cell contents and analysis:
+
+ C      80.00    44.33 %              H      88.00     4.09 %
+ N       4.00     2.59 %              O       4.00     2.95 %
+ P       4.00     5.72 %              Ni      4.00    10.83 %
+ Br      8.00    29.49 %
+
+F(000) =    1080.0        Cu-K(alpha) radiation        Mu (mm-1) =   7.06
+
+
+-------------------------------------------------------------------------------
+
+File dens.ins set up as follows:
+
+TITL dens in Pna2(1) 
+CELL 1.54178  21.1662   9.8262   9.4075  90.000  90.000  90.000
+ZERR    4.00   0.0004   0.0002   0.0002   0.000   0.000   0.000
+LATT -1
+SYMM -X, -Y, 0.5+Z
+SYMM 0.5+X, 0.5-Y, Z
+SYMM 0.5-X, 0.5+Y, 0.5+Z
+SFAC C H N O P NI BR
+UNIT 80 88 4 4 4 4 8
+TEMP 23.000
+TREF
+HKLF 4
+END 
+
+   30617 Reflections written to new reflection file dens.hkl
+
+-------------------------------------------------------------------------------
+

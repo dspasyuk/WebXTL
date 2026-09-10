@@ -3895,6 +3895,7 @@ class WMOLApp {
         }
 
         const applied = [];
+        const qPeaksToMove = [];
         rows.forEach(row => {
             const line = doc.getLine(row);
             const atom = this.parseRelabelAtomLine(line, sfacElements);
@@ -3918,11 +3919,47 @@ class WMOLApp {
                 }
             }
 
-            doc.removeInLine(row, 0, line.length);
-            doc.insertInLine({row: row, column: 0}, newLine);
+            if (atom.element === 'Q') {
+                // A relabeled Q-peak becomes a real atom and is moved to the
+                // end of the atom list (deferred until the in-place edits are
+                // applied so row indices stay valid).
+                qPeaksToMove.push({ row, newLine });
+            } else {
+                doc.removeInLine(row, 0, line.length);
+                doc.insertInLine({row: row, column: 0}, newLine);
+            }
             counters[element] = number + 1;
             applied.push({ element, number, label: newLabel });
         });
+
+        // Move the relabeled Q-peaks to the end of the atom list, preserving
+        // their original relative order.
+        if (qPeaksToMove.length > 0) {
+            const ordered = qPeaksToMove.slice().sort((a, b) => a.row - b.row);
+            // Remove from the bottom up so earlier rows keep their indices.
+            qPeaksToMove.slice().sort((a, b) => b.row - a.row).forEach(item => {
+                doc.removeLines(item.row, item.row);
+            });
+            const currentLines = doc.getAllLines();
+            // The atom list ends at the HKLF instruction (the Q-peaks that
+            // follow it are residual peaks, not part of the model). Insert the
+            // relabeled atom just before HKLF; if there is no HKLF, fall back
+            // to after the last atom line.
+            let insertRow = -1;
+            for (let i = 0; i < currentLines.length; i++) {
+                if (/^\s*HKLF\b/i.test(currentLines[i])) { insertRow = i; break; }
+            }
+            if (insertRow === -1) {
+                insertRow = currentLines.length;
+                for (let i = currentLines.length - 1; i >= 0; i--) {
+                    if (this.parseRelabelAtomLine(currentLines[i], sfacElements)) {
+                        insertRow = i + 1;
+                        break;
+                    }
+                }
+            }
+            doc.insertLines(insertRow, ordered.map(item => item.newLine));
+        }
 
         // Warn if SHELX's 999-atoms-per-type limit is exceeded
         const overLimit = applied.filter(a => a.number > 999);

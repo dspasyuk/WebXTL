@@ -9,13 +9,15 @@ import { fileURLToPath } from 'url';
 import { buildPublishCif, buildPublishCifFromTemplates, buildReportDocx, parseDevFile, parseCif } from './publish.js';
 import { analyzeHkl } from './src/js/xrdspace/index.js';
 import { transformModelToSpaceGroup } from './src/js/xrdspace/sg-model.js';
+import { searchByCell } from './src/js/xrdspace/cell-search.js';
+import { importStructureToProject } from './src/js/xrdspace/fetch-structure.js';
 import { validateStructure, renderReport, parseStructure, detectDisorder, detectTwinning } from './src/js/validate/structureValidation.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
-const port = 3000;
+const port = process.env.PORT || 3000;
 
 // Middleware
 // Middleware
@@ -1332,6 +1334,87 @@ app.post('/xrdspace/analyze', upload.fields([{ name: 'hkl', maxCount: 1 }]), (re
     }
 });
 
+// --- xrdspace: COD / PDB structure fetch ---
+
+// Normalise a unit cell supplied as "a b c alpha beta gamma" or an object.
+function normalizeCell(cellField) {
+    if (!cellField) return null;
+    if (typeof cellField === 'string') {
+        const v = cellField.trim().split(/\s+/).map(parseFloat);
+        if (v.length === 6 && v.every(Number.isFinite)) {
+            return { a: v[0], b: v[1], c: v[2], alpha: v[3], beta: v[4], gamma: v[5] };
+        }
+        return null;
+    }
+    if (typeof cellField === 'object') {
+        const c = {
+            a: parseFloat(cellField.a), b: parseFloat(cellField.b), c: parseFloat(cellField.c),
+            alpha: parseFloat(cellField.alpha), beta: parseFloat(cellField.beta), gamma: parseFloat(cellField.gamma),
+        };
+        return [c.a, c.b, c.c, c.alpha, c.beta, c.gamma].every(Number.isFinite) ? c : null;
+    }
+    return null;
+}
+
+/**
+ * POST /xrdspace/db-search
+ * Search the COD and/or PDB for structures with a matching unit cell.
+ * Body (JSON): { cell: "a b c alpha beta gamma" | {a,...}, databases: ['COD','PDB'],
+ *                tolLen: 0.01, tolAng: 1.5, limit: 20 }
+ * Returns the ranked matches from cell-search.js (metadata only, no downloads).
+ */
+app.post('/xrdspace/db-search', async (req, res) => {
+    try {
+        const body = req.body || {};
+        const cell = normalizeCell(body.cell);
+        if (!cell) {
+            return res.status(400).json({ error: 'A unit cell (a b c alpha beta gamma) is required.' });
+        }
+        let databases = Array.isArray(body.databases) ? body.databases : ['COD', 'PDB'];
+        databases = databases.map(d => String(d).toUpperCase()).filter(d => d === 'COD' || d === 'PDB');
+        if (!databases.length) databases = ['COD', 'PDB'];
+
+        const tolLen = Number.isFinite(Number(body.tolLen)) ? Number(body.tolLen) : 0.01;
+        const tolAng = Number.isFinite(Number(body.tolAng)) ? Number(body.tolAng) : 1.5;
+        const limit = Number.isFinite(Number(body.limit)) ? Math.min(Math.max(Number(body.limit), 1), 200) : 20;
+
+        const result = await searchByCell(cell, { databases, tolLen, tolAng, limit });
+        res.json(result);
+    } catch (error) {
+        console.error('xrdspace db-search error:', error);
+        res.status(500).json({ error: 'Database search failed', details: error.message });
+    }
+});
+
+/**
+ * POST /xrdspace/db-fetch
+ * Download a COD/PDB entry and save it as a new project (projects/<DB>_<id>/).
+ * Body (JSON): { database: 'COD'|'PDB', id, format: 'pdb'|'cif', overwrite: bool }
+ * Returns the project name, stored files and provenance metadata.
+ */
+app.post('/xrdspace/db-fetch', async (req, res) => {
+    try {
+        const body = req.body || {};
+        const database = String(body.database || '').toUpperCase();
+        const id = body.id;
+        if (!database || id === undefined || id === null || String(id).trim() === '') {
+            return res.status(400).json({ error: 'database and id are required.' });
+        }
+        if (database !== 'COD' && database !== 'PDB') {
+            return res.status(400).json({ error: `Unknown database '${database}' (expected COD or PDB).` });
+        }
+        const imported = await importStructureToProject(PROJECTS_DIR, database, id, {
+            format: body.format === 'cif' ? 'cif' : 'pdb',
+            overwrite: !!body.overwrite,
+            includeHkl: body.includeHkl !== false,
+        });
+        res.json({ ok: true, ...imported });
+    } catch (error) {
+        console.error('xrdspace db-fetch error:', error);
+        res.status(500).json({ error: 'Failed to fetch structure', details: error.message });
+    }
+});
+
 // --- Project Management API ---
 
 // 1. List Projects
@@ -1361,21 +1444,25 @@ app.get('/projects/:name', (req, res) => {
         }
 
         // Prefer a structure file that matches the project name, but fall back to
-        // any .res/.ins stored in the project directory. Projects are sometimes
-        // created by uploading files whose basename differs from the folder name
-        // (e.g. project 'nickel3' holding 'denis7.res'), and those must load too.
+        // any .res/.ins/.cif/.pdb stored in the project directory. Projects are
+        // sometimes created by uploading files whose basename differs from the
+        // folder name (e.g. project 'nickel3' holding 'denis7.res'), and those
+        // must load too. .cif/.pdb are included so database-fetched projects
+        // (COD_*/PDB_*) load like any other project.
+        const STRUCT_EXTS = ['.res', '.ins', '.cif', '.mmcif', '.pdb'];
         let structPath = null;
-        for (const ext of ['.res', '.ins']) {
+        for (const ext of STRUCT_EXTS) {
             const p = path.join(projectDir, `${basename}${ext}`);
             if (fs.existsSync(p)) { structPath = p; break; }
         }
         if (!structPath) {
+            const rank = new Map(STRUCT_EXTS.map((e, i) => [e, i]));
             const candidates = fs.readdirSync(projectDir)
-                .filter(f => /\.(res|ins)$/i.test(f) && fs.lstatSync(path.join(projectDir, f)).isFile())
+                .filter(f => /\.(res|ins|cif|mmcif|pdb)$/i.test(f) && fs.lstatSync(path.join(projectDir, f)).isFile())
                 .sort((a, b) => {
                     const ea = path.extname(a).toLowerCase();
                     const eb = path.extname(b).toLowerCase();
-                    if (ea !== eb) return ea === '.res' ? -1 : 1;
+                    if (ea !== eb) return (rank.get(ea) ?? 99) - (rank.get(eb) ?? 99);
                     return a.localeCompare(b);
                 });
             if (candidates.length) structPath = path.join(projectDir, candidates[0]);
@@ -1388,7 +1475,11 @@ app.get('/projects/:name', (req, res) => {
         }
 
         const filename = path.basename(structPath);
-        const type = path.extname(structPath).toLowerCase() === '.ins' ? 'ins' : 'res';
+        const structExt = path.extname(structPath).toLowerCase();
+        const type = structExt === '.ins' ? 'ins'
+            : (structExt === '.cif' || structExt === '.mmcif') ? 'cif'
+                : structExt === '.pdb' ? 'pdb'
+                    : 'res';
         const content = fs.readFileSync(structPath, 'utf8');
 
         res.json({ name: basename, filename: filename, type: type, content: content });

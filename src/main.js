@@ -132,7 +132,10 @@ class WMOLApp {
                     },
                     atoms: {
                         scale: 0.3,
-                        resolution: 'medium'
+                        resolution: 'medium',
+                        // Safety ceiling: stop parsing atoms above this count so a
+                        // pathological file cannot exhaust the browser heap.
+                        maxAtoms: 4000000
                     },
                     bonds: {
                         radius: 0.05,
@@ -1580,6 +1583,7 @@ class WMOLApp {
             { id: 'pref-bond-radius', path: 'viewer.bonds.radius', type: 'number' },
             { id: 'pref-atom-scale', path: 'viewer.atoms.scale', type: 'number' },
             { id: 'pref-quality', path: 'viewer.atoms.resolution' },
+            { id: 'pref-max-atoms', path: 'viewer.atoms.maxAtoms', type: 'number' },
             { id: 'pref-label-size', path: 'viewer.labels.fontSize', type: 'number' },
             { id: 'pref-label-offx', path: 'viewer.labels.offsetX', type: 'number' },
             { id: 'pref-label-offy', path: 'viewer.labels.offsetY', type: 'number' },
@@ -1827,6 +1831,36 @@ class WMOLApp {
             throw new Error(`Could not reach xrdspace at ${url} — ${hint} (${e.message})`);
         }
         if (!res.ok) throw new Error('Space-group analysis failed');
+        return res.json();
+    }
+
+    // Search the COD / PDB by unit cell (server-side, metadata only).
+    async apiDbSearch(params) {
+        const res = await fetch(this.getApiUrl('/xrdspace/db-search'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(params)
+        });
+        if (!res.ok) {
+            let detail = '';
+            try { const e = await res.json(); detail = e.error || e.details || ''; } catch (err) { /* ignore */ }
+            throw new Error(detail || `Database search failed (HTTP ${res.status})`);
+        }
+        return res.json();
+    }
+
+    // Download a COD / PDB entry into a new project on the server.
+    async apiDbFetch(database, id, opts = {}) {
+        const res = await fetch(this.getApiUrl('/xrdspace/db-fetch'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ database, id, ...opts })
+        });
+        if (!res.ok) {
+            let detail = '';
+            try { const e = await res.json(); detail = e.error || e.details || ''; } catch (err) { /* ignore */ }
+            throw new Error(detail || `Fetch failed (HTTP ${res.status})`);
+        }
         return res.json();
     }
 
@@ -2492,14 +2526,21 @@ class WMOLApp {
                 this.renderContent(content, 'res');
                 this.resetView();
                 if (activate) this.switchToTab('tab-split');
-            } else if (ext === 'cif') {
-                // CIF -> CIF tab + 3D render
+            } else if (ext === 'cif' || ext === 'mmcif') {
+                // CIF / PDBx-mmCIF -> CIF tab + 3D render
                 this.state.currentProject = projectName;
                 this.state.loadedType = 'cif';
                 this.state.loadedContent = content;
                 this.state.loadedFilename = filename;
 
-                if (this.state.editors.cif) this.state.editors.cif.setValue(content, -1);
+                // Very large CIF/mmCIF files are rendered in 3D but only a
+                // truncated head is put into the Ace editor (loading 100s of
+                // MB of text into Ace crashes/hangs the tab).
+                if (this.state.editors.cif) {
+                    this.setEditorValueProgrammatic(this.state.editors.cif, this.truncateContent(content));
+                    this.state.editors.cif.loadedFile = content;
+                    this.state.editors.cif.fileId = this.state.fileId;
+                }
                 this.renderContent(content, 'cif');
                 this.resetView();
                 if (activate) this.switchToTab('tab-cif');
@@ -2536,8 +2577,8 @@ class WMOLApp {
             // 1. Load Main Structure
             const data = await this.apiLoadProject(name);
             if (!data || !data.content) {
-                // Project has no .res/.ins model - nothing to display.
-                if (!silent) alert(`Project '${name}' has no structure file (.res/.ins) to load.`);
+                // Project has no structure file (.res/.ins/.cif/.pdb) - nothing to display.
+                if (!silent) alert(`Project '${name}' has no structure file (.res/.ins/.cif/.pdb) to load.`);
                 return false;
             }
             this.state.currentProject = data.name;
@@ -2560,10 +2601,25 @@ class WMOLApp {
             }
 
             const editor = this.state.editors[data.type] || this.state.editors.res;
-            if (editor) editor.setValue(data.content, -1);
+            if (editor && data.type !== 'pdb') {
+                if (data.type === 'cif') {
+                    this.setEditorValueProgrammatic(editor, this.truncateContent(data.content));
+                    editor.loadedFile = data.content;
+                    editor.fileId = this.state.fileId;
+                } else {
+                    editor.setValue(data.content, -1);
+                }
+            }
             this.renderContent(data.content, data.type);
             this.resetView();
-            
+            // Non-SHELX primaries (database-fetched CIF/PDB projects) get their
+            // own view: CIF tab for CIF, a file tab for PDB.
+            if (data.type === 'cif') {
+                this.switchToTab('tab-cif');
+            } else if (data.type === 'pdb') {
+                this.openFileTab(data.filename, data.content, 'pdb', name, true);
+            }
+
             // 2. Auto-load associated HKL and FCF if they exist
             const files = await this.apiListProjectFiles(name);
             
@@ -2599,7 +2655,7 @@ class WMOLApp {
                 try {
                     const content = await this.apiGetProjectFile(name, cifFile.name);
                     if (this.state.editors.cif) {
-                        this.state.editors.cif.setValue(content, -1);
+                        this.setEditorValueProgrammatic(this.state.editors.cif, this.truncateContent(content));
                         this.state.editors.cif.loadedFile = content;
                     }
                 } catch (e) {
@@ -2685,6 +2741,30 @@ class WMOLApp {
     truncateContent(content, limit = 5 * 1024 * 1024) { // 5MB limit
         if (content.length <= limit) return content;
         return content.substring(0, limit) + "\n\n# ... FILE TRUNCATED FOR PERFORMANCE (Original size: " + (content.length / 1024 / 1024).toFixed(2) + " MB) ...";
+    }
+
+    // Set editor text without triggering the debounced re-render used for user
+    // edits. Needed because the parsed source of truth (`loadedContent`) can be
+    // larger than what the editor holds (huge CIF/mmCIF files are truncated in
+    // the editor but rendered in full).
+    setEditorValueProgrammatic(editor, text) {
+        if (!editor) return;
+        this._suppressEditorRender = true;
+        try {
+            editor.setValue(text, -1);
+        } finally {
+            this._suppressEditorRender = false;
+        }
+    }
+
+    // Resolve the atom behind a raycaster hit, supporting both the normal
+    // instanced spheres and the large-structure THREE.Points cloud.
+    resolveHitAtom(hit) {
+        const o = hit && hit.object;
+        if (!o || !o.userData || !o.userData.atomMap) return null;
+        if (o.isPoints) return o.userData.atomMap[hit.index];
+        if (o.isInstancedMesh) return o.userData.atomMap[hit.instanceId];
+        return null;
     }
 
     setupEditorCommands() {
@@ -4548,7 +4628,7 @@ class WMOLApp {
                     if (this.state.loadedType === 'cif' && this.state.loadedContent) {
                         if (!this.state.editors.cif.loadedFile || this.state.editors.cif.loadedFile !== this.state.loadedContent) {
                             const truncated = this.truncateContent(this.state.loadedContent);
-                            this.state.editors.cif.setValue(truncated, -1);
+                            this.setEditorValueProgrammatic(this.state.editors.cif, truncated);
                             this.state.editors.cif.loadedFile = this.state.loadedContent;
                             this.state.editors.cif.fileId = this.state.fileId;
                         }
@@ -4808,6 +4888,25 @@ class WMOLApp {
         const menuSgTransform = document.getElementById('menu-sg-transform');
         if (menuSgTransform) {
             menuSgTransform.addEventListener('click', () => this.transformModelToSgPrompt());
+        }
+
+        // Fetch Structure from COD / PDB
+        const menuFetchDb = document.getElementById('menu-fetch-db');
+        if (menuFetchDb) menuFetchDb.addEventListener('click', () => this.openFetchDbModal());
+        const btnFetchUseCell = document.getElementById('btn-fetch-use-cell');
+        if (btnFetchUseCell) btnFetchUseCell.addEventListener('click', () => this.useCurrentCellForFetch());
+        const btnFetchSearch = document.getElementById('btn-fetch-search');
+        if (btnFetchSearch) btnFetchSearch.addEventListener('click', () => this.runDbCellSearch());
+        const btnFetchById = document.getElementById('btn-fetch-by-id');
+        if (btnFetchById) btnFetchById.addEventListener('click', () => this.fetchDbById());
+        const fetchIdDb = document.getElementById('fetch-id-db');
+        if (fetchIdDb) {
+            const toggleFmt = () => {
+                const wrap = document.getElementById('fetch-id-format-wrap');
+                if (wrap) wrap.classList.toggle('d-none', fetchIdDb.value !== 'PDB');
+            };
+            fetchIdDb.addEventListener('change', toggleFmt);
+            toggleFmt();
         }
 
         // Solve Structure & Validate / Validate (CheckCIF-style)
@@ -5159,6 +5258,11 @@ class WMOLApp {
         // CIF Editor Event
         if (this.state.editors.cif) {
             this.state.editors.cif.session.on('change', () => {
+                // Ignore programmatic setValue (file loads, tab lazy-load): only
+                // user edits should re-parse. Otherwise loading a huge CIF would
+                // re-render its truncated editor copy (no atoms) over the good
+                // full-content render.
+                if (this._suppressEditorRender) return;
                 if (this.state.loadedType === 'cif') {
                     this.tryRender('cif');
                 }
@@ -5183,7 +5287,8 @@ class WMOLApp {
             } else if (type === 'pdb') {
                 data = this.state.parsers.pdb.parse(content);
             } else {
-                data = this.state.parsers.cif.parse(content);
+                const maxAtoms = this.state.preferences.viewer.maxAtoms;
+                data = this.state.parsers.cif.parse(content, { maxAtoms });
             }
             
             this.state.parsedData = data; // Store for calculations (e.g. bond length)
@@ -5196,6 +5301,15 @@ class WMOLApp {
                     preferences: this.state.preferences
                 };
                 this.state.moleculeRenderer.render(data, renderSettings);
+            }
+            // Tell the user when a very large structure was capped (the viewer
+            // renders as a points cloud above ~150k atoms automatically).
+            if (data && data.truncated) {
+                const statusEl = document.getElementById('status-bar-content');
+                if (statusEl) {
+                    statusEl.textContent = `Large structure: showing first ${data.atoms.length.toLocaleString()} `
+                        + `of ${data.totalAtoms.toLocaleString()} atoms (raise "Max atoms" in Settings)`;
+                }
             }
             this.saveStateToLocalStorage();
         } catch (e) {
@@ -5317,14 +5431,10 @@ class WMOLApp {
                 if (target) {
                     // --- Fragment Placement Mode ---
                     if (this.state.rsr.active && this.state.fragment.active && this.state.fragment.selectedId && !this.state.preview.active) {
-                        let atomData = null;
-                        if (target.object.isInstancedMesh && target.object.userData.atomMap) {
-                            atomData = target.object.userData.atomMap[target.instanceId];
-                        } else {
-                            const atomHit = intersects.find(i => i.object.isInstancedMesh && i.object.userData.atomMap);
-                            if (atomHit) {
-                                atomData = atomHit.object.userData.atomMap[atomHit.instanceId];
-                            }
+                        let atomData = this.resolveHitAtom(target);
+                        if (!atomData) {
+                            const atomHit = intersects.find(i => this.resolveHitAtom(i));
+                            if (atomHit) atomData = this.resolveHitAtom(atomHit);
                         }
                         document.body.style.cursor = 'wait';
                         this.placeFragment(atomData, event);
@@ -5334,15 +5444,11 @@ class WMOLApp {
                     // --- RSR Mode ---
                     if (this.state.rsr.active) {
                         // Find atomData from target or nearest hit
-                        let atomData = null;
-                        if (target.object.isInstancedMesh && target.object.userData.atomMap) {
-                            atomData = target.object.userData.atomMap[target.instanceId];
-                        } else {
-                            // If we hit something else (like a bond), try to find the nearest atom mesh
-                            const atomHit = intersects.find(i => i.object.isInstancedMesh && i.object.userData.atomMap);
-                            if (atomHit) {
-                                atomData = atomHit.object.userData.atomMap[atomHit.instanceId];
-                            }
+                        let atomData = this.resolveHitAtom(target);
+                        if (!atomData) {
+                            // If we hit something else (like a bond), try to find a nearby atom
+                            const atomHit = intersects.find(i => this.resolveHitAtom(i));
+                            if (atomHit) atomData = this.resolveHitAtom(atomHit);
                         }
 
                         if (atomData) {
@@ -5379,15 +5485,10 @@ class WMOLApp {
                     if (event.button === 0) {
                         // Find the atom data: prefer the directly-hit atom mesh, otherwise fall
                         // back to the nearest atom hit (bonds/unit-cell meshes intercept rays too)
-                        let atomData = null;
-                        if (target.object.isInstancedMesh && target.object.userData.atomMap) {
-                            atomData = target.object.userData.atomMap[target.instanceId];
-                        }
+                        let atomData = this.resolveHitAtom(target);
                         if (!atomData) {
-                            const atomHit = intersects.find(i => i.object.isInstancedMesh && i.object.userData.atomMap);
-                            if (atomHit) {
-                                atomData = atomHit.object.userData.atomMap[atomHit.instanceId];
-                            }
+                            const atomHit = intersects.find(i => this.resolveHitAtom(i));
+                            if (atomHit) atomData = this.resolveHitAtom(atomHit);
                         }
                         if (atomData && (atomData.lineNumber || atomData.startLine)) {
                                 // Scroll RES editor if available
@@ -5939,13 +6040,14 @@ class WMOLApp {
             // startup "Example RES" in place.
             const structureFiles = files.filter(f => {
                 const n = f.name.toLowerCase();
-                return n.endsWith('.res') || n.endsWith('.ins') || n.endsWith('.cif') || n.endsWith('.pdb');
+                return n.endsWith('.res') || n.endsWith('.ins') || n.endsWith('.cif')
+                    || n.endsWith('.mmcif') || n.endsWith('.pdb');
             });
             const rank = f => {
                 const n = f.name.toLowerCase();
                 if (n.endsWith('.res')) return 0;
                 if (n.endsWith('.ins')) return 1;
-                if (n.endsWith('.cif')) return 2;
+                if (n.endsWith('.cif') || n.endsWith('.mmcif')) return 2;
                 return 3; // .pdb
             };
             structureFiles.sort((a, b) => rank(a) - rank(b));
@@ -5966,7 +6068,9 @@ class WMOLApp {
                 this.state.lastStructureTabKey = null;
 
                 const ext = file.name.split('.').pop().toLowerCase();
-                this.state.loadedType = (ext === 'ins' || ext === 'res') ? 'res' : ext;
+                this.state.loadedType = (ext === 'ins' || ext === 'res')
+                    ? 'res'
+                    : (ext === 'mmcif' ? 'cif' : ext);
                 
                 this.renderContent(content, this.state.loadedType);
                 this.resetView();
@@ -5974,8 +6078,9 @@ class WMOLApp {
                 // Populate editor
                 const editor = this.state.editors[this.state.loadedType];
                 if (editor) {
-                    editor.setValue(this.truncateContent(content), -1);
+                    this.setEditorValueProgrammatic(editor, this.truncateContent(content));
                     editor.loadedFile = content;
+                    editor.fileId = this.state.fileId;
                 }
 
                 // Switch to the appropriate tab
@@ -8300,6 +8405,151 @@ class WMOLApp {
         } catch (e) {
             alert(`Transform failed: ${e.message}`);
         }
+    }
+
+    // --- Fetch Structure from COD / PDB ---------------------------------
+
+    openFetchDbModal() {
+        const modalEl = document.getElementById('fetchDbModal');
+        if (!modalEl) return;
+        const status = document.getElementById('fetch-status');
+        if (status) status.textContent = '';
+        const body = document.getElementById('fetch-results-body');
+        if (body) body.innerHTML = '<tr><td colspan="7" class="text-muted small">Enter a unit cell and search.</td></tr>';
+        // Default the ID field to the current project name when it looks like an entry id.
+        const idInput = document.getElementById('fetch-id-input');
+        if (idInput && !idInput.value && this.state.currentProject) {
+            const m = String(this.state.currentProject).match(/^(?:COD|PDB)[_-](.+)$/i);
+            if (m) idInput.value = m[1];
+        }
+        new bootstrap.Modal(modalEl).show();
+    }
+
+    // Copy the unit cell of the currently loaded structure into the search box.
+    useCurrentCellForFetch() {
+        const input = document.getElementById('fetch-cell-input');
+        if (!input) return;
+        const cell = this.state.parsedData && this.state.parsedData.cell;
+        if (cell && [cell.a, cell.b, cell.c, cell.alpha, cell.beta, cell.gamma].every(Number.isFinite)) {
+            input.value = [cell.a, cell.b, cell.c, cell.alpha, cell.beta, cell.gamma]
+                .map(v => (+v).toFixed(4)).join(' ');
+        } else {
+            alert('No unit cell available from the loaded structure. Enter a b c alpha beta gamma manually.');
+        }
+    }
+
+    async runDbCellSearch() {
+        const raw = (document.getElementById('fetch-cell-input') || {}).value || '';
+        const vals = raw.trim().split(/\s+/).map(Number);
+        if (vals.length !== 6 || !vals.every(Number.isFinite)) {
+            alert('Enter a unit cell as six numbers: a b c alpha beta gamma.');
+            return;
+        }
+        const databases = [];
+        if ((document.getElementById('fetch-db-cod') || {}).checked) databases.push('COD');
+        if ((document.getElementById('fetch-db-pdb') || {}).checked) databases.push('PDB');
+        if (!databases.length) { alert('Select at least one database.'); return; }
+
+        const tolPct = parseFloat((document.getElementById('fetch-tol') || {}).value) || 1.0;
+        const tolAng = parseFloat((document.getElementById('fetch-tol-ang') || {}).value) || 1.5;
+        const btn = document.getElementById('btn-fetch-search');
+        const status = document.getElementById('fetch-search-status');
+        if (btn) btn.disabled = true;
+        if (status) status.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Searching… (may take a moment)';
+        try {
+            const r = await this.apiDbSearch({
+                cell: raw,
+                databases,
+                tolLen: tolPct / 100,
+                tolAng,
+                limit: 50,
+            });
+            this.renderDbSearchResults(r);
+            if (status) status.textContent = `${r.results.length} match(es) shown of ${r.total} total.`;
+        } catch (e) {
+            if (status) status.textContent = '';
+            alert('Search failed: ' + e.message);
+        } finally {
+            if (btn) btn.disabled = false;
+        }
+    }
+
+    renderDbSearchResults(result) {
+        const body = document.getElementById('fetch-results-body');
+        if (!body) return;
+        const rows = result && result.results ? result.results : [];
+        if (!rows.length) {
+            body.innerHTML = '<tr><td colspan="7" class="text-muted small">No matching structures found. Widen the tolerances.</td></tr>';
+            return;
+        }
+        const esc = (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+        body.innerHTML = rows.map(e => {
+            const c = e.cell;
+            const cell = c ? `${(+c.a).toFixed(3)} ${(+c.b).toFixed(3)} ${(+c.c).toFixed(3)} ${(+c.alpha).toFixed(1)} ${(+c.beta).toFixed(1)} ${(+c.gamma).toFixed(1)}` : '?';
+            const sg = e.spaceGroup ? (e.spaceGroup.hm || ('No. ' + (e.spaceGroup.number || '?'))) : '?';
+            const details = e.database === 'COD'
+                ? (e.chemname || e.formula || e.title || '')
+                : (e.title || '');
+            const match = e.match !== undefined && e.match !== null ? (+e.match).toFixed(1) : '';
+            const badge = e.database === 'COD' ? 'primary' : 'success';
+            return `<tr>
+                <td><span class="badge bg-${badge}">${esc(e.database)}</span></td>
+                <td class="fw-semibold">${esc(e.id)}</td>
+                <td class="small text-nowrap">${cell}</td>
+                <td class="small">${esc(sg)}</td>
+                <td class="small">${match}</td>
+                <td class="small text-truncate" style="max-width:220px;" title="${esc(details)}">${esc(details)}</td>
+                <td><button class="btn btn-sm btn-outline-success" data-db="${esc(e.database)}" data-id="${esc(e.id)}"><i class="fa-solid fa-download me-1"></i>Fetch</button></td>
+            </tr>`;
+        }).join('');
+        body.querySelectorAll('button[data-db]').forEach(b => {
+            b.onclick = () => this.fetchDbEntry(b.dataset.db, b.dataset.id, b);
+        });
+    }
+
+    // Download an entry (search result or direct id), save it as a project and
+    // load the structure into the viewer.
+    async fetchDbEntry(database, id, btn) {
+        const status = document.getElementById('fetch-status');
+        const opts = {};
+        if (database === 'PDB') {
+            const fmt = (document.getElementById('fetch-id-format') || {}).value;
+            if (fmt) opts.format = fmt;
+        }
+        const original = btn ? btn.innerHTML : null;
+        if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span>'; }
+        if (status) {
+            status.innerHTML = `<span class="spinner-border spinner-border-sm me-1"></span>Downloading ${database} ${id} and saving project…`;
+        }
+        try {
+            const r = await this.apiDbFetch(database, id, opts);
+            if (status) {
+                status.innerHTML = `<span class="text-success"><i class="fa-solid fa-check me-1"></i>Saved project <strong>${r.project}</strong> (${(r.files || []).join(', ')}).</span>`;
+            }
+            const modalEl = document.getElementById('fetchDbModal');
+            const modal = modalEl ? bootstrap.Modal.getInstance(modalEl) : null;
+            if (modal) modal.hide();
+            if (r.structureFile) {
+                await this.loadSpecificFileFromServer(r.project, r.structureFile, false, true);
+                const statusBar = document.getElementById('status-bar-content');
+                if (statusBar) statusBar.textContent = `Fetched ${database} ${id} → project ${r.project}`;
+            }
+            return r;
+        } catch (e) {
+            if (status) status.textContent = '';
+            alert(`Fetch failed: ${e.message}`);
+        } finally {
+            if (btn && original !== null) { btn.disabled = false; btn.innerHTML = original; }
+        }
+    }
+
+    async fetchDbById() {
+        const database = (document.getElementById('fetch-id-db') || {}).value || 'COD';
+        const id = ((document.getElementById('fetch-id-input') || {}).value || '').trim();
+        if (!id) { alert('Enter a COD number or PDB id.'); return; }
+        const btn = document.getElementById('btn-fetch-by-id');
+        await this.fetchDbEntry(database, id, btn);
     }
 
     // Run the built-in xrdspace space-group determination on the current HKL

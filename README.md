@@ -22,10 +22,12 @@ WebXTL is a powerful, modern web application designed for crystallographers. It 
     -   **Resizable Panes**: Adjustable split-grid layout for customized workflows.
 -   **High-Performance 3D Viewer**:
     -   **Rendering**: Atoms, bonds, unit cell, and ADPs (Anisotropic Displacement Parameters) rendered using Three.js.
+    -   **Formats**: SHELX `.res`/`.ins`, legacy `.pdb`, and **CIF / PDBx-mmCIF**. The CIF engine understands both CIF1 (COD, `_atom_site_fract_x`) and PDBx/mmCIF (RCSB, `_atom_site.Cartn_x`, dotted tags, model/alt-conf filtering); mmCIF Cartesian coordinates are converted to fractional using the cell, and the space group's symmetry operators expand the unit cell when the unit-cell view is enabled.
     
     ![ADP Rendering](./images/3D_res-view-ADP.png)
 
     -   **View Controls**: Toggle Unit Cell, Labels, Perspective/Orthographic projection.
+    -   **Performance**: the *Quality (Resolution)* setting (Lowest / Low / Medium / High) controls the polygon detail of atoms and bonds. **Lowest** uses coarse (4-segment) spheres and 3-sided bond prisms. Automatic level-of-detail keeps huge assemblies usable: bonds are skipped above ~20k atoms, structures above ~150k atoms are drawn as a single GPU **points cloud** (typed arrays, fixed screen size) instead of per-atom instanced meshes, and symmetry expansion is disabled for them. A **Max atoms to load** preference (default 4,000,000) caps parsing so a pathological file cannot exhaust the browser heap; the status bar reports when a structure was truncated. Multi-million-atom files are parsed with a streaming, string-interning reader (~0.75 GB for 2.4M atoms).
     -   **Interaction**: Click atoms to select them in the editor.
 
 ### 📝 Advanced Editor
@@ -126,7 +128,8 @@ WebXTL is powered by a robust Node.js/Express backend that handles heavy lifting
     ```
     Bare keywords (`hklin`, `hklout`, `spacegroup`, `cell`, ...) are also accepted. Default outputs: `<input>_merged.hkl` (SHELX) and `<input>_XDS.HKL` (XDS_ASCII).
 -   **UI**: *Calculate → Space Group (xrdspace)* runs the analysis on the loaded HKL; *Calculate → Force Space Group (xrdspace)* prompts for a space group and pins it. Both show the full report with a *Download Merged HKL (SHELX)* button.
--   **API**: `POST /xrdspace/analyze` (multipart `hkl`, optional `cell`, optional `spaceGroup`) returns the analysis, merge statistics, and the generated `shelxHkl` / `xdsAscii` text.
+-   **Fetch from COD / PDB**: *File → Fetch from COD / PDB…* pulls structures straight into the workspace. Search the **Crystallography Open Database** and/or the **RCSB Protein Data Bank** by unit cell (Niggli-reduced, tolerance-aware, ranked by match), or fetch a known **COD number / PDB id** directly. PDB entries can be fetched as legacy `.pdb` or as PDBx/mmCIF (rendered by the CIF engine). The result is saved as a new project (`projects/COD_<id>/` or `projects/PDB_<id>/`) containing the structure file (`.cif`/`.mmcif`/`.pdb`), the published COD reflection data (`.hkl`, when available) and a `metadata.json` with cell, space group, title/formula and provenance. Use *Use current cell* to seed the search from the loaded structure, then fetch a hit and it opens in the viewer like any other project.
+-   **API**: `POST /xrdspace/analyze` (multipart `hkl`, optional `cell`, optional `spaceGroup`) returns the analysis, merge statistics, and the generated `shelxHkl` / `xdsAscii` text. `POST /xrdspace/db-search` (`{ cell, databases, tolLen, tolAng, limit }`) searches COD/PDB by unit cell; `POST /xrdspace/db-fetch` (`{ database, id, format, overwrite }`) downloads an entry and writes it to a new project.
 
 **Project Management System**
 -   **Workspace Organization**: Automatically creates isolated project directories for each structure.
@@ -138,7 +141,7 @@ WebXTL is powered by a robust Node.js/Express backend that handles heavy lifting
 
 **Backend API Endpoints**
 -   `/projects`: List all available projects.
--   `/projects/:name`: Load the latest state (`.res` or `.ins`) of a specific project.
+-   `/projects/:name`: Load the latest state of a specific project (`.res`/`.ins`, falling back to `.cif`/`.pdb`).
 -   `/projects/:name/files`: List all files in a project workspace.
 -   `/projects/:name/files/:filename`: Download a specific project file.
 -   `/projects/:name/save`: Save current editor content to the project file.
@@ -151,6 +154,8 @@ WebXTL is powered by a robust Node.js/Express backend that handles heavy lifting
 -   `/programs`: List the external crystallography programs available on the server.
 -   `/run/:program`: Run an external program (e.g. `shelxl`, `shelxt`, `shelxd`) on uploaded files.
 -   `/xrdspace/analyze`: Built-in xrdspace space-group determination on an uploaded HKL file (XDS_ASCII or SHELX format).
+-   `/xrdspace/db-search`: Search the COD and/or PDB for structures whose unit cell matches a query cell (`POST { cell, databases, tolLen, tolAng, limit }`).
+-   `/xrdspace/db-fetch`: Download a COD/PDB entry and save it as a new project (`POST { database, id, format, overwrite }`).
 -   `/solve-structure`: Full pipeline — structure solution (SHELXT/SHELXS) if no model, SHELXL refinement and a disorder/twinning + CheckCIF-style validation report (optional PLATON).
 -   `/validate-structure`: Validation report (disorder/twinning/CheckCIF-style) for an uploaded `.res` model + optional `.lst`.
 -   `/solve-info`: Reports which solution programs / PLATON are available on the server.

@@ -27,6 +27,7 @@
                                 <li><a class="dropdown-item" href="#" id="menu-open">Open...</a></li>
                                 <li><a class="dropdown-item" href="#" id="menu-load-hkl">Load HKL...</a></li>
                                 <li><a class="dropdown-item" href="#" id="menu-load-fcf">Load FCF Map...</a></li>
+                                <li><a class="dropdown-item" href="#" id="menu-fetch-db">Fetch from COD / PDB...</a></li>
                                 <li><a class="dropdown-item" href="#" id="menu-save">Save</a></li>
                                 <li>
                                     <hr class="dropdown-divider">
@@ -526,10 +527,22 @@
                                         <div class="col-12">
                                             <label for="pref-quality" class="form-label small">Quality (Resolution)</label>
                                             <select class="form-select" id="pref-quality">
+                                                <option value="lowest">Lowest (very large structures)</option>
                                                 <option value="low">Low</option>
                                                 <option value="medium" selected>Medium</option>
                                                 <option value="high">High</option>
                                             </select>
+                                            <div class="form-text">Polygon detail per atom/bond. Use <strong>Lowest</strong>
+                                                for very large structures (10<sup>4</sup>+ atoms).</div>
+                                        </div>
+                                        <div class="col-12">
+                                            <label for="pref-max-atoms" class="form-label small">Max atoms to
+                                                load</label>
+                                            <input type="number" class="form-control" id="pref-max-atoms" value="4000000"
+                                                step="100000" min="1000">
+                                            <div class="form-text">Safety ceiling so a huge assembly cannot exhaust the
+                                                browser heap. Structures above ~150k atoms render as a fast points cloud
+                                                without bonds.</div>
                                         </div>
                                     </div>
                                 </div>
@@ -743,6 +756,121 @@
                     <button type="button" class="btn btn-primary d-none" id="btn-load-merged-hkl">Load Merged HKL for SHELXT</button>
                     <button type="button" class="btn btn-success d-none" id="btn-download-merged-hkl">Download Merged HKL (SHELX)</button>
                     <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Fetch Structure from COD / PDB Modal -->
+    <div class="modal fade" id="fetchDbModal" tabindex="-1" aria-hidden="true">
+        <div class="modal-dialog modal-xl modal-dialog-scrollable" style="max-width: 1000px;">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title"><i class="fa-solid fa-database me-2"></i>Fetch Structure from COD / PDB
+                    </h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                    <ul class="nav nav-tabs mb-3" role="tablist">
+                        <li class="nav-item" role="presentation">
+                            <button class="nav-link active" id="fetch-cell-tab" data-bs-toggle="tab"
+                                data-bs-target="#fetch-cell-pane" type="button" role="tab">By unit cell</button>
+                        </li>
+                        <li class="nav-item" role="presentation">
+                            <button class="nav-link" id="fetch-id-tab" data-bs-toggle="tab"
+                                data-bs-target="#fetch-id-pane" type="button" role="tab">By ID</button>
+                        </li>
+                    </ul>
+                    <div class="tab-content">
+                        <div class="tab-pane fade show active" id="fetch-cell-pane" role="tabpanel">
+                            <div class="row g-2 align-items-end mb-2">
+                                <div class="col-md-6">
+                                    <label class="form-label small mb-0" for="fetch-cell-input">Unit cell (a b c
+                                        alpha beta gamma)</label>
+                                    <input type="text" class="form-control form-control-sm" id="fetch-cell-input"
+                                        placeholder="10.5 10.5 14.0 90 90 90">
+                                </div>
+                                <div class="col-md-2">
+                                    <label class="form-label small mb-0" for="fetch-tol">Length tol %</label>
+                                    <input type="number" class="form-control form-control-sm" id="fetch-tol"
+                                        value="1.0" step="0.1" min="0.01">
+                                </div>
+                                <div class="col-md-1">
+                                    <label class="form-label small mb-0" for="fetch-tol-ang">Angle °</label>
+                                    <input type="number" class="form-control form-control-sm" id="fetch-tol-ang"
+                                        value="1.5" step="0.1" min="0.01">
+                                </div>
+                                <div class="col-md-3">
+                                    <button class="btn btn-sm btn-outline-secondary w-100" id="btn-fetch-use-cell">
+                                        <i class="fa-solid fa-crosshairs me-1"></i>Use current cell</button>
+                                </div>
+                            </div>
+                            <div class="d-flex align-items-center gap-3 mb-2">
+                                <div class="form-check form-check-inline mb-0">
+                                    <input class="form-check-input" type="checkbox" id="fetch-db-cod" checked>
+                                    <label class="form-check-label small" for="fetch-db-cod">COD</label>
+                                </div>
+                                <div class="form-check form-check-inline mb-0">
+                                    <input class="form-check-input" type="checkbox" id="fetch-db-pdb" checked>
+                                    <label class="form-check-label small" for="fetch-db-pdb">PDB</label>
+                                </div>
+                                <button class="btn btn-sm btn-primary ms-auto" id="btn-fetch-search">
+                                    <i class="fa-solid fa-magnifying-glass me-1"></i>Search</button>
+                            </div>
+                            <div id="fetch-search-status" class="small text-muted mb-2"></div>
+                            <div class="table-responsive" style="max-height: 320px; overflow-y: auto;">
+                                <table class="table table-sm table-hover align-middle mb-0">
+                                    <thead class="table-light sticky-top">
+                                        <tr>
+                                            <th>DB</th>
+                                            <th>ID</th>
+                                            <th>Cell (a b c / angles)</th>
+                                            <th>SG</th>
+                                            <th>Match</th>
+                                            <th>Details</th>
+                                            <th></th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="fetch-results-body">
+                                        <tr>
+                                            <td colspan="7" class="text-muted small">Enter a unit cell and search.</td>
+                                        </tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                        <div class="tab-pane fade" id="fetch-id-pane" role="tabpanel">
+                            <div class="row g-2 align-items-end">
+                                <div class="col-md-2">
+                                    <label class="form-label small mb-0" for="fetch-id-db">Database</label>
+                                    <select class="form-select form-select-sm" id="fetch-id-db">
+                                        <option value="COD">COD</option>
+                                        <option value="PDB">PDB</option>
+                                    </select>
+                                </div>
+                                <div class="col-md-3">
+                                    <label class="form-label small mb-0" for="fetch-id-input">ID</label>
+                                    <input type="text" class="form-control form-control-sm" id="fetch-id-input"
+                                        placeholder="e.g. 1000000 or 1CRN">
+                                </div>
+                                <div class="col-md-3" id="fetch-id-format-wrap">
+                                    <label class="form-label small mb-0" for="fetch-id-format">PDB format</label>
+                                    <select class="form-select form-select-sm" id="fetch-id-format">
+                                        <option value="pdb">PDB</option>
+                                        <option value="cif">mmCIF</option>
+                                    </select>
+                                </div>
+                                <div class="col-md-4">
+                                    <button class="btn btn-sm btn-success w-100" id="btn-fetch-by-id">
+                                        <i class="fa-solid fa-download me-1"></i>Fetch &amp; save project</button>
+                                </div>
+                            </div>
+                            <p class="text-muted small mt-2 mb-0">The structure is saved as a new project
+                                (<code>projects/COD_&lt;id&gt;</code> or <code>projects/PDB_&lt;id&gt;</code>).
+                                COD reflection data (<code>.hkl</code>) is downloaded when published.</p>
+                        </div>
+                    </div>
+                    <div id="fetch-status" class="small mt-2"></div>
                 </div>
             </div>
         </div>

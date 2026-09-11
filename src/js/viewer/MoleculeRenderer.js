@@ -163,14 +163,18 @@ export class MoleculeRenderer {
             );
         };
 
+        // Structures this large cannot be symmetry-expanded or bond-detected
+        // without exhausting memory; treat them as a points cloud.
+        const HUGE_INPUT = data.atoms.length > 150000;
+
         // 2. Draw Unit Cell
-        if (showUnitCell) {
+        if (showUnitCell && !HUGE_INPUT) {
             this.drawUnitCell(fracToCart, settings);
         }
 
         // 3. Expand Symmetry
-        let expandedAtoms = [];
-        if (showUnitCell) {
+        let expandedAtoms;
+        if (showUnitCell && !HUGE_INPUT) {
             let ops = ["x,y,z"];
             if (data.symmetry && data.symmetry.length > 0) {
                 ops = data.symmetry;
@@ -184,32 +188,47 @@ export class MoleculeRenderer {
             // Use new packing logic (pack=true is default)
             expandedAtoms = Symmetry.generateEquivalentPositions(data.atoms, ops, true);
         } else {
-            expandedAtoms = data.atoms.map(a => ({ ...a }));
+            // No symmetry expansion: reuse the parsed array directly. Cloning
+            // millions of atoms here is a major memory spike.
+            expandedAtoms = data.atoms;
         }
         
         this.expandedAtoms = expandedAtoms; // Expose for MapCalculator
+
+        const atomScale = settings.preferences ? settings.preferences.viewer.atoms.scale : 0.3;
+        let atomRes = settings.preferences ? settings.preferences.viewer.atoms.resolution : 'medium';
+
+        // Level-of-detail thresholds. Above POINTS_THRESHOLD atoms we stop
+        // building per-atom instance matrices and draw a single Points cloud
+        // with typed arrays (no bonds) - this is what lets 10^5-10^6 atom
+        // assemblies (e.g. a whole virus capsid) load instead of crashing.
+        const POINTS_THRESHOLD = 150000;
+        const BOND_LIMIT = 20000;
+        if (expandedAtoms.length > POINTS_THRESHOLD) {
+            this._renderAtomsAsPoints(expandedAtoms, { m11, m12, m13, m22, m23, m33 }, atomScale, settings);
+            return;
+        }
+        // Skip bond generation for large structures: the spatial grid and the
+        // per-bond objects dominate memory/time for 10^4+ atoms.
+        const skipBonds = expandedAtoms.length > BOND_LIMIT;
+        // Force coarse tessellation on large structures regardless of the pref.
+        if (expandedAtoms.length > 60000 && (atomRes === 'high' || atomRes === 'medium')) atomRes = 'lowest';
 
         // 4. Draw Atoms
         const atomsByElement = {};
         
         expandedAtoms.forEach(atom => {
-            // Do NOT wrap coords manually if packing is enabled.
-            // Symmetry.js now handles packing whole molecules into the cell.
-            
-            let x = atom.x;
-            let y = atom.y;
-            let z = atom.z;
-
-            const pos = fracToCart(x, y, z);
+            const pos = fracToCart(atom.x, atom.y, atom.z);
             const el = atom.element || 'X';
-            
             if (!atomsByElement[el]) atomsByElement[el] = [];
             atomsByElement[el].push({ pos, atom }); 
         });
 
-        const atomScale = settings.preferences ? settings.preferences.viewer.atoms.scale : 0.3;
-        const atomRes = settings.preferences ? settings.preferences.viewer.atoms.resolution : 'medium';
-        const segments = atomRes === 'high' ? 32 : (atomRes === 'low' ? 8 : 16);
+        // Geometry tessellation by quality. "lowest" uses a coarse tetrahedral
+        // sphere/cylinder so structures with 10^4-10^6 atoms stay interactive.
+        const ATOM_SEGMENTS = { lowest: 4, low: 8, medium: 16, high: 32 };
+        const BOND_SEGMENTS = { lowest: 3, low: 6, medium: 8, high: 16 };
+        const segments = ATOM_SEGMENTS[atomRes] || ATOM_SEGMENTS.medium;
         
         const sphereGeo = new THREE.SphereGeometry(atomScale, segments, segments);
 
@@ -245,18 +264,20 @@ export class MoleculeRenderer {
         // 5. Draw Bonds
         const bondColor = settings.preferences ? settings.preferences.viewer.bondColor : 0x888888;
         const bondRadius = settings.preferences ? settings.preferences.viewer.bonds.radius : 0.05;
-        // Reuse segments from atomRes for simplicity, or separate if needed
-        const bondGeo = new THREE.CylinderGeometry(bondRadius, bondRadius, 1, segments === 32 ? 16 : 8);
+        // Bonds follow the same quality setting but with their own (lower)
+        // radial tessellation; "lowest" draws a 3-sided prism.
+        const bondSegments = BOND_SEGMENTS[atomRes] || BOND_SEGMENTS.medium;
+        const bondGeo = new THREE.CylinderGeometry(bondRadius, bondRadius, 1, bondSegments);
         const bondMaterial = new THREE.MeshStandardMaterial({ color: bondColor });
         
-        let allPositions = [];
+        const allPositions = [];
         for (const items of Object.values(atomsByElement)) {
-            // Avoid spread operator for large arrays
-            allPositions = allPositions.concat(items);
+            for (let k = 0; k < items.length; k++) allPositions.push(items[k]);
         }
 
         const bonds = [];
         const qBonds = []; // Separate list for Q-bonds
+        if (!skipBonds) {
         const cellSize = 2.0;
         const grid = {};
 
@@ -339,6 +360,7 @@ export class MoleculeRenderer {
                 }
             });
         });
+        } // end if (!skipBonds)
 
         if (bonds.length > 0) {
             const bondMesh = new THREE.InstancedMesh(bondGeo, bondMaterial, bonds.length);
@@ -418,6 +440,95 @@ export class MoleculeRenderer {
         if (settings.showADPs) {
             this.drawThermalEllipsoids(expandedAtoms, fracToCart, settings);
         }
+    }
+
+    // Level-of-detail renderer for very large structures: a single THREE.Points
+    // object backed by typed position/color arrays (no bonds, no per-atom
+    // instanced matrices). Keeps millions of atoms within a reasonable memory
+    // and draw-call budget.
+    _renderAtomsAsPoints(atoms, m, atomScale, settings) {
+        const n = atoms.length;
+        const positions = new Float32Array(n * 3);
+        const colors = new Float32Array(n * 3);
+        const atomMap = new Array(n);
+        const color = new THREE.Color();
+        const { m11, m12, m13, m22, m23, m33 } = m;
+
+        let minX = Infinity, minY = Infinity, minZ = Infinity;
+        let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+
+        for (let i = 0; i < n; i++) {
+            const a = atoms[i];
+            const x = m11 * a.x + m12 * a.y + m13 * a.z;
+            const y = m22 * a.y + m23 * a.z;
+            const z = m33 * a.z;
+            const i3 = i * 3;
+            positions[i3] = x;
+            positions[i3 + 1] = y;
+            positions[i3 + 2] = z;
+            if (x < minX) minX = x; if (x > maxX) maxX = x;
+            if (y < minY) minY = y; if (y > maxY) maxY = y;
+            if (z < minZ) minZ = z; if (z > maxZ) maxZ = z;
+            const hex = this.atomColors[a.element] !== undefined ? this.atomColors[a.element] : this.defaultColor;
+            color.setHex(hex);
+            colors[i3] = color.r; colors[i3 + 1] = color.g; colors[i3 + 2] = color.b;
+            atomMap[i] = a;
+        }
+
+        const geo = new THREE.BufferGeometry();
+        geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+        geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+        geo.computeBoundingSphere();
+
+        const mat = new THREE.PointsMaterial({
+            // Fixed screen size so the cloud stays visible when zoomed out to
+            // fit a whole assembly, regardless of the enormous world extent.
+            size: 3,
+            sizeAttenuation: false,
+            vertexColors: true,
+            map: this._pointTexture(),
+            alphaTest: 0.1,
+            transparent: true,
+        });
+
+        const points = new THREE.Points(geo, mat);
+        points.userData.atomMap = atomMap;
+        points.userData.isLargeStructure = true;
+        this.group.add(points);
+
+        const cx = (minX + maxX) / 2, cy = (minY + maxY) / 2, cz = (minZ + maxZ) / 2;
+        this.group.position.set(-cx, -cy, -cz);
+
+        let maxDistSq = 0;
+        for (let i = 0; i < n; i++) {
+            const i3 = i * 3;
+            const dx = positions[i3] - cx;
+            const dy = positions[i3 + 1] - cy;
+            const dz = positions[i3 + 2] - cz;
+            const d = dx * dx + dy * dy + dz * dz;
+            if (d > maxDistSq) maxDistSq = d;
+        }
+        this.boundingRadius = Math.sqrt(maxDistSq) + 1.5;
+    }
+
+    // Small round sprite used by the large-structure points cloud.
+    _pointTexture() {
+        if (this._pointTex) return this._pointTex;
+        const size = 64;
+        const canvas = document.createElement('canvas');
+        canvas.width = size;
+        canvas.height = size;
+        const ctx = canvas.getContext('2d');
+        const g = ctx.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
+        g.addColorStop(0.0, 'rgba(255,255,255,1)');
+        g.addColorStop(0.5, 'rgba(255,255,255,1)');
+        g.addColorStop(1.0, 'rgba(255,255,255,0)');
+        ctx.fillStyle = g;
+        ctx.beginPath();
+        ctx.arc(size / 2, size / 2, size / 2, 0, Math.PI * 2);
+        ctx.fill();
+        this._pointTex = new THREE.CanvasTexture(canvas);
+        return this._pointTex;
     }
 
     drawThermalEllipsoids(atoms, fracToCart, settings) {

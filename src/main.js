@@ -6809,28 +6809,38 @@ class WMOLApp {
         const neededElements = [...new Set(fragment.atoms.map(a => a.element.toUpperCase()))];
         neededElements.forEach(el => { if (!sfacElements.includes(el)) sfacElements.push(el); });
 
-        // Generate unique labels
+        // Generate unique labels: the first atom of an element continues from
+        // the highest existing number (e.g. C18 -> C18, C19, ... within one
+        // group), so a placed ring gets C18-C23 rather than six times C18.
+        const nextLabelNum = {};
+        const allAtomLabels = [];
+        for (let i = 0; i < allLines.length; i++) {
+            const m = allLines[i].trim().match(/^(\S+)/);
+            if (m) allAtomLabels.push(m[1]);
+        }
+        if (this.state.parsedData && this.state.parsedData.atoms) {
+            this.state.parsedData.atoms.forEach(a => allAtomLabels.push(a.label));
+        }
         const getNextLabel = (element) => {
-            let maxNum = 0;
-            const re = new RegExp(`^${element}(\\d+)`, 'i');
-            const allLabels = [];
-            for (let i = 0; i < allLines.length; i++) {
-                const m = allLines[i].trim().match(/^(\S+)/);
-                if (m) allLabels.push(m[1]);
+            const el = element.toUpperCase();
+            if (nextLabelNum[el] === undefined) {
+                let maxNum = 0;
+                const re = new RegExp(`^${el}(\\d+)`, 'i');
+                allAtomLabels.forEach(l => {
+                    const m = l.match(re);
+                    if (m) { const n = parseInt(m[1]); if (n > maxNum) maxNum = n; }
+                });
+                nextLabelNum[el] = maxNum + 1;
             }
-            if (this.state.parsedData && this.state.parsedData.atoms) {
-                this.state.parsedData.atoms.forEach(a => allLabels.push(a.label));
-            }
-            allLabels.forEach(l => {
-                const m = l.match(re);
-                if (m) { const n = parseInt(m[1]); if (n > maxNum) maxNum = n; }
-            });
-            return element + (maxNum + 1);
+            return el + nextLabelNum[el]++;
         };
 
-        // Determine if we placed on an existing atom
-        const usesExistingAtom = clickedAtom !== null;
-        const existingAtomLabel = clickedAtom ? clickedAtom.label : null;
+        // Determine if we placed on an existing atom. A Q-peak is not a real
+        // atom: it is replaced by the group's first atom (given the proper
+        // element), and the whole group is appended before HKLF.
+        const clickedQLabel = (clickedAtom && (clickedAtom.element === 'Q' || /^Q\d*$/i.test(clickedAtom.label || ''))) ? clickedAtom.label : null;
+        const usesExistingAtom = clickedAtom !== null && !clickedQLabel;
+        const existingAtomLabel = usesExistingAtom ? clickedAtom.label : null;
 
         const newAtomObjects = [];
         const baseCartAtoms = [];
@@ -6859,10 +6869,21 @@ class WMOLApp {
             const ry = lx * sinA + ly * cosA;
             const rz = lz;
 
+            // A sub-milliangstrom jitter keeps an AFIX rigid group from being
+            // mathematically perfect (a degenerate case for SHELX's group fit);
+            // the deviation is removed when SHELX idealises the group.
+            let jx = 0, jy = 0, jz = 0;
+            if (fragment.afix) {
+                const jit = 0.005;
+                jx = jit * (((idx * 37) % 7) - 3) / 3;
+                jy = jit * (((idx * 53) % 5) - 2) / 2;
+                jz = jit * (((idx * 29) % 3) - 1);
+            }
+
             // World Cartesian: anchor at click position
-            const wx = posCart.x + rx;
-            const wy = posCart.y + ry;
-            const wz = posCart.z + rz;
+            const wx = posCart.x + rx + jx;
+            const wy = posCart.y + ry + jy;
+            const wz = posCart.z + rz + jz;
 
             baseCartAtoms.push({ label, element: el, x: wx, y: wy, z: wz });
 
@@ -6895,6 +6916,7 @@ class WMOLApp {
         this.state.preview.cartAtoms = baseCartAtoms.map(a => ({ ...a }));
         this.state.preview.usesExistingAtom = usesExistingAtom;
         this.state.preview.existingAtomLabel = existingAtomLabel;
+        this.state.preview.removedQPeakLabel = clickedQLabel;
 
         // Render green preview
         this.updatePreviewDisplay();
@@ -7136,13 +7158,37 @@ class WMOLApp {
                 for (let j = 1; j < parts.length; j++) {
                     if (isNaN(parseFloat(parts[j]))) currentEls.push(parts[j].toUpperCase());
                 }
-                let updated = false;
+                const origCount = currentEls.length;
                 sfacElements.forEach(el => {
-                    if (!currentEls.includes(el)) { currentEls.push(el); updated = true; }
+                    if (!currentEls.includes(el)) currentEls.push(el);
                 });
-                if (updated) {
+                const added = currentEls.length - origCount;
+                if (added > 0) {
                     doc.removeInLine(sfacLineIndex, 0, existing.length);
                     doc.insertInLine({ row: sfacLineIndex, column: 0 }, 'SFAC ' + currentEls.join(' '));
+                    // UNIT must have one numeric entry per SFAC element; append
+                    // zeros for the newly added elements so SHELX does not abort.
+                    for (let i = 0; i < doc.getLength(); i++) {
+                        const uParts = doc.getLine(i).trim().split(/\s+/);
+                        if (uParts[0] && uParts[0].toUpperCase() === 'UNIT') {
+                            const pad = ' ' + new Array(added).fill('0').join(' ');
+                            doc.insertInLine({ row: i, column: doc.getLine(i).length }, pad);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        // A group placed on a Q-peak replaces that peak: delete the Q line so
+        // the fragment's atom (with the proper element) appears only once.
+        const removedQLabel = this.state.preview.removedQPeakLabel;
+        if (removedQLabel) {
+            for (let i = 0; i < doc.getLength(); i++) {
+                const first = doc.getLine(i).trim().match(/^(\S+)/);
+                if (first && first[1] === removedQLabel) {
+                    doc.removeLines(i, i);
+                    break;
                 }
             }
         }
@@ -7155,9 +7201,12 @@ class WMOLApp {
 
         const usesExisting = this.state.preview.usesExistingAtom;
         const existingLabel = this.state.preview.existingAtomLabel;
+        const fragmentDef = this.state.preview.fragmentDef || {};
+        const afix = fragmentDef.afix || null;
 
         const shexLines = [];
         const currentLines = doc.getAllLines();
+        let existingRow = -1;
 
         cartAtoms.forEach((a, idx) => {
             const fx = inv.i11 * a.x + inv.i12 * a.y + inv.i13 * a.z;
@@ -7179,6 +7228,7 @@ class WMOLApp {
                             // Update SFAC index if needed
                             parts[1] = String(sfacIdx);
                             currentLines[li] = leadingWS + parts.join(' ');
+                            existingRow = li;
                         }
                         break;
                     }
@@ -7193,19 +7243,115 @@ class WMOLApp {
             editor.setValue(currentLines.join('\n'), -1);
         }
 
-        // Insert new lines before END
-        const textToInsert = shexLines.join('\n') + '\n';
-        if (shexLines.length > 0) {
+        // Append atom lines at the end of the atom list (before HKLF, else END).
+        const insertAtoms = (text) => {
+            const lines = doc.getAllLines();
             let insertPos = -1;
-            const allLines = doc.getAllLines();
-            for (let i = allLines.length - 1; i >= 0; i--) {
-                if (allLines[i].trim().toUpperCase() === 'END') { insertPos = i; break; }
+            for (let i = 0; i < lines.length; i++) {
+                if (/^\s*HKLF\b/i.test(lines[i])) { insertPos = i; break; }
+            }
+            if (insertPos === -1) {
+                for (let i = lines.length - 1; i >= 0; i--) {
+                    if (lines[i].trim().toUpperCase() === 'END') { insertPos = i; break; }
+                }
             }
             if (insertPos === -1) {
                 insertPos = doc.getLength();
-                editor.session.insert({ row: insertPos, column: 0 }, '\n' + textToInsert + 'END\n');
+                editor.session.insert({ row: insertPos, column: 0 }, '\n' + text + 'END\n');
             } else {
-                editor.session.insert({ row: insertPos, column: 0 }, textToInsert);
+                editor.session.insert({ row: insertPos, column: 0 }, text);
+            }
+        };
+
+        // Groups without a built-in SHELX idealised AFIX group are restrained
+        // with SADI on their 1,2- (bonded) and 1,3- (angle) distances. Bonds are
+        // detected from the fragment geometry, so rings, chains, branched groups
+        // and solvent molecules are all handled.
+        const sadiLines = [];
+        if (!afix && cartAtoms.length >= 2) {
+            const radii = {
+                H: 0.31, C: 0.76, N: 0.71, O: 0.66, F: 0.57, P: 1.07, S: 1.05,
+                CL: 1.02, BR: 1.20, I: 1.39, B: 0.84, SI: 1.11
+            };
+            const n = cartAtoms.length;
+            const bonded = Array.from({ length: n }, () => new Set());
+            const bondPairs = [];
+            for (let i = 0; i < n; i++) {
+                for (let j = i + 1; j < n; j++) {
+                    const ri = radii[cartAtoms[i].element.toUpperCase()] || 1.5;
+                    const rj = radii[cartAtoms[j].element.toUpperCase()] || 1.5;
+                    const dx = cartAtoms[i].x - cartAtoms[j].x;
+                    const dy = cartAtoms[i].y - cartAtoms[j].y;
+                    const dz = cartAtoms[i].z - cartAtoms[j].z;
+                    if (Math.sqrt(dx * dx + dy * dy + dz * dz) <= (ri + rj) * 1.3) {
+                        bonded[i].add(j);
+                        bonded[j].add(i);
+                        bondPairs.push([i, j]);
+                    }
+                }
+            }
+            const emit = (head, list) => {
+                if (!list.length) return;
+                let cur = head;
+                for (const [i, j] of list) {
+                    const pair = ` ${cartAtoms[i].label} ${cartAtoms[j].label}`;
+                    if (cur.length + pair.length > 78) { sadiLines.push(cur); cur = head; }
+                    cur += pair;
+                }
+                if (cur !== head) sadiLines.push(cur);
+            };
+            const isCarbon = (k) => cartAtoms[k].element.toUpperCase() === 'C';
+            if (cartAtoms.some(a => a.element.toUpperCase() !== 'C')) {
+                // Mixed-atom solvents (THF, Et2O, DCM, ...): restrain bond lengths
+                // only, with heteroatom bonds and C-C bonds written as separate
+                // SADI instructions.
+                emit('SADI 0.01', bondPairs.filter(([i, j]) => !isCarbon(i) || !isCarbon(j)));
+                emit('SADI 0.01', bondPairs.filter(([i, j]) => isCarbon(i) && isCarbon(j)));
+            } else {
+                const anglePairs = [];
+                for (let i = 0; i < n; i++) {
+                    for (let j = i + 1; j < n; j++) {
+                        if (bonded[i].has(j)) continue;
+                        let shared = false;
+                        for (const k of bonded[i]) { if (bonded[j].has(k)) { shared = true; break; } }
+                        if (!shared) continue;
+                        // iPr has two non-equivalent methyls, so its methyl...methyl
+                        // distance is not restrained (tBu's are equivalent and kept).
+                        if (fragmentDef.skipMethylMethyl &&
+                            bonded[i].size === 1 && bonded[j].size === 1 &&
+                            cartAtoms[i].element.toUpperCase() === 'C' &&
+                            cartAtoms[j].element.toUpperCase() === 'C') {
+                            continue;
+                        }
+                        anglePairs.push([i, j]);
+                    }
+                }
+                emit('SADI 0.02', bondPairs);
+                emit('SADI 0.02', anglePairs);
+            }
+        }
+
+        // A SHELX rigid group (AFIX) must be a contiguous run of atoms terminated
+        // by AFIX 0. When the pivot reuses an existing atom, bracket that atom
+        // with the AFIX instructions so the whole group stays together.
+        if (shexLines.length > 0) {
+            if (afix && usesExisting && existingLabel && existingRow !== -1) {
+                // An anisotropic atom record may continue over several lines
+                // (each continued line ends with '='), so find the true end of
+                // the pivot's record before inserting the rest of the group.
+                let recordEnd = existingRow;
+                while (recordEnd + 1 < currentLines.length && /=\s*$/.test(currentLines[recordEnd])) {
+                    recordEnd++;
+                }
+                editor.session.insert({ row: existingRow, column: 0 }, `AFIX ${afix}\n`);
+                editor.session.insert({ row: recordEnd + 2, column: 0 },
+                    shexLines.join('\n') + '\nAFIX 0\n');
+            } else if (afix) {
+                insertAtoms(`AFIX ${afix}\n` + shexLines.join('\n') + '\nAFIX 0\n');
+            } else {
+                // SADI restraints sit immediately before the inserted atoms.
+                const pre = sadiLines.length ? sadiLines.join('\n') + '\n' : '';
+                insertAtoms(pre + shexLines.join('\n') + '\n');
             }
         }
 
@@ -7243,6 +7389,7 @@ class WMOLApp {
         this.state.preview.baseCartAtoms = null;
         this.state.preview.usesExistingAtom = false;
         this.state.preview.existingAtomLabel = null;
+        this.state.preview.removedQPeakLabel = null;
         if (this.state.rsr.active) {
             this.state.rsr.active = false;
             this.state.rsr.from = null;

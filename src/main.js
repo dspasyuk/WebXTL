@@ -3610,42 +3610,28 @@ class WMOLApp {
             exec: (editor) => {
                 const doc = editor.getSession().getDocument();
                 const lines = doc.getAllLines();
+                const sfac = this.parseSfacElements(lines);
                 const counts = {};
-                
                 lines.forEach(line => {
-                    const parts = line.trim().split(/\s+/);
-                    if (parts.length > 0) {
-                        const label = parts[0];
-                        // Check if it's an atom (starts with letter, not a keyword)
-                        // Keywords to exclude
-                        const keywords = ['TITL', 'CELL', 'ZERR', 'LATT', 'SYMM', 'SFAC', 'UNIT', 'HFIX', 'BOND', 'CONF', 'MPLA', 'HTAB', 'EQIV', 'CONN', 'PART', 'AFIX', 'RESI', 'MOLE', 'PLAN', 'SIZE', 'TEMP', 'WGHT', 'FVAR', 'HKLF', 'END', 'REM', 'Q', 'OMIT', 'DISP'];
-                        // Also check if it looks like an atom (has coordinates?)
-                        // Or just exclude known keywords.
-                        if (/^[A-Z]/i.test(label) && !keywords.includes(label.toUpperCase())) {
-                            // Extract element type
-                            // Usually first 1-2 chars, but depends on SFAC.
-                            // Simple heuristic: First 1-2 letters.
-                            const elementMatch = label.match(/^[A-Za-z]+/);
-                            if (elementMatch) {
-                                let element = elementMatch[0];
-                                // Normalize element (e.g. C1 -> C)
-                                // Remove numbers
-                                element = element.replace(/\d+$/, '');
-                                // Capitalize first letter
-                                element = element.charAt(0).toUpperCase() + element.slice(1).toLowerCase();
-                                counts[element] = (counts[element] || 0) + 1;
-                            }
-                        }
-                    }
+                    if (!this.isShelxAtomLine(line)) return;
+                    if (/^Q\d+$/i.test(line.trim().split(/\s+/)[0])) return;
+                    const el = this.elementOfAtomLine(line, sfac);
+                    if (!el) return;
+                    counts[el] = (counts[el] || 0) + 1;
                 });
-                
-                let formula = "";
-                // Sort elements? Hill system?
-                // Just alphabetical for now
-                Object.keys(counts).sort().forEach(el => {
-                    formula += `${el}${counts[el]} `;
+                const keys = Object.keys(counts);
+                if (!keys.length) { alert('No atom lines found.'); return; }
+                // SFAC order where possible, then alphabetical.
+                keys.sort((a, b) => {
+                    const ia = sfac.indexOf(a);
+                    const ib = sfac.indexOf(b);
+                    if (ia !== -1 && ib !== -1) return ia - ib;
+                    if (ia !== -1) return -1;
+                    if (ib !== -1) return 1;
+                    return a.localeCompare(b);
                 });
-                alert("Estimated Formula (based on atom labels):\n" + formula);
+                const formula = keys.map(el => `${el}${counts[el]}`).join(' ');
+                alert(`Estimated Formula (asymmetric unit):\n${formula}`);
             }
         });
 
@@ -3653,48 +3639,72 @@ class WMOLApp {
         editor.commands.addCommand({
             name: 'correctFormula',
             exec: (editor) => {
-                // Find UNIT instruction and update it? 
-                // Or just calculate and show?
-                // "Correct molecular formula" implies updating the UNIT instruction.
-                // Let's implement a simple version that updates UNIT based on atom counts.
                 const doc = editor.getSession().getDocument();
                 const lines = doc.getAllLines();
-                let unitLine = -1;
-                const counts = {};
-                
-                // Count atoms
-                lines.forEach((line, index) => {
-                    if (line.trim().startsWith('UNIT')) {
-                        unitLine = index;
-                    }
+                const sfac = this.parseSfacElements(lines);
+                if (!sfac.length) { alert('No SFAC instruction found.'); return; }
+
+                let unitRow = -1;
+                let z = 1;
+                lines.forEach((line, i) => {
                     const parts = line.trim().split(/\s+/);
-                    if (parts.length > 0) {
-                        const label = parts[0];
-                        const keywords = ['TITL', 'CELL', 'ZERR', 'LATT', 'SYMM', 'SFAC', 'UNIT', 'HFIX', 'BOND', 'CONF', 'MPLA', 'HTAB', 'EQIV', 'CONN', 'PART', 'AFIX', 'RESI', 'MOLE', 'PLAN', 'SIZE', 'TEMP', 'WGHT', 'FVAR', 'HKLF', 'END'];
-                        if (/^[A-Z]/i.test(label) && !keywords.includes(label.toUpperCase())) {
-                            const element = label.match(/^[A-Za-z]+/)[0].replace(/\d+$/, '');
-                            counts[element] = (counts[element] || 0) + 1;
-                        }
+                    const key = (parts[0] || '').toUpperCase();
+                    if (key === 'UNIT') unitRow = i;
+                    if (key === 'ZERR' && parts.length >= 2) {
+                        const zz = parseFloat(parts[1]);
+                        if (isFinite(zz) && zz > 0) z = zz;
                     }
                 });
 
-                if (unitLine !== -1) {
-                    // We need SFAC to know order.
-                    // This is getting complex. Let's just alert for now as "Correct" might mean "Verify".
-                    // Or maybe just output the counts to console/alert.
-                    let formula = "";
-                    for (const [el, count] of Object.entries(counts)) {
-                        formula += `${el} ${count} `;
+                const counts = {};
+                sfac.forEach(el => { counts[el] = 0; });
+                lines.forEach(line => {
+                    if (!this.isShelxAtomLine(line)) return;
+                    if (/^Q\d+$/i.test(line.trim().split(/\s+/)[0])) return;
+                    const el = this.elementOfAtomLine(line, sfac);
+                    if (!el) return;
+                    counts[el] = (counts[el] || 0) + 1;
+                });
+
+                // Preserve the cell scale already implied by the existing UNIT
+                // (the cell holds Z/Z' asymmetric units), so correcting the
+                // formula does not change Z. Fall back to ZERR Z when there is
+                // no usable UNIT.
+                let scale = null;
+                if (unitRow !== -1) {
+                    const unitVals = doc.getLine(unitRow).trim().split(/\s+/).slice(1).map(Number);
+                    const ratios = [];
+                    sfac.forEach((el, i) => {
+                        if (isFinite(unitVals[i]) && counts[el] > 0) ratios.push(unitVals[i] / counts[el]);
+                    });
+                    if (ratios.length) {
+                        ratios.sort((a, b) => a - b);
+                        scale = Math.round(ratios[Math.floor(ratios.length / 2)]);
                     }
-                    const update = confirm(`Calculated content: ${formula}\nUpdate UNIT instruction? (Requires SFAC order match, which is not guaranteed here. Proceed with caution.)`);
-                    if (update) {
-                        // This is risky without SFAC parsing.
-                        // Let's just insert a comment with the count.
-                         doc.insertInLine({row: unitLine, column: doc.getLine(unitLine).length}, ` ! Calc: ${formula}`);
-                    }
-                } else {
-                    alert("No UNIT instruction found.");
                 }
+                if (!scale || scale < 1) scale = z;
+                const perCell = sfac.map(el => Math.round((counts[el] || 0) * scale));
+                const formula = sfac.filter(el => counts[el] > 0).map(el => `${el}${counts[el]}`).join(' ');
+                const unitText = 'UNIT ' + perCell.join(' ');
+                if (!confirm(`Asymmetric-unit content: ${formula || '(none)'}\ncell scale = ${scale}  ->  ${unitText}\n\nUpdate the UNIT instruction?`)) return;
+
+                if (unitRow !== -1) {
+                    const old = doc.getLine(unitRow);
+                    const lead = old.match(/^\s*/)[0];
+                    doc.removeInLine(unitRow, 0, old.length);
+                    doc.insertInLine({ row: unitRow, column: 0 }, lead + unitText);
+                } else {
+                    let sfacRow = -1;
+                    for (let i = 0; i < doc.getLength(); i++) {
+                        if (/^\s*SFAC\b/i.test(doc.getLine(i))) sfacRow = i;
+                    }
+                    const row = sfacRow === -1 ? 0 : sfacRow + 1;
+                    editor.session.insert({ row, column: 0 }, unitText + '\n');
+                }
+                editor.loadedFile = editor.getValue();
+                this.state.loadedContent = editor.getValue();
+                const status = document.getElementById('status-bar-content');
+                if (status) status.textContent = `UNIT updated: ${perCell.join(' ')} (scale=${scale})`;
             }
         });
 
@@ -4179,6 +4189,33 @@ class WMOLApp {
             && !isNaN(parseFloat(parts[2]))
             && !isNaN(parseFloat(parts[3]))
             && !isNaN(parseFloat(parts[4])));
+    }
+
+    // Element symbols in SFAC order (from the last SFAC instruction).
+    parseSfacElements(lines) {
+        let els = [];
+        lines.forEach(line => {
+            const parts = line.trim().split(/\s+/);
+            if ((parts[0] || '').toUpperCase() === 'SFAC') {
+                els = [];
+                for (let j = 1; j < parts.length; j++) {
+                    if (isNaN(parseFloat(parts[j]))) els.push(parts[j].replace(/^\$/, ''));
+                }
+            }
+        });
+        return els;
+    }
+
+    // Element of a SHELX atom line: SFAC index (2nd token) first, otherwise a
+    // label-based fallback (C1 -> C, Ni1 -> Ni, Cl12 -> Cl).
+    elementOfAtomLine(line, sfac) {
+        const parts = line.trim().split(/\s+/);
+        const idx = parseInt(parts[1], 10);
+        if (!isNaN(idx) && idx >= 1 && idx <= sfac.length) return sfac[idx - 1];
+        const raw = parts[0];
+        if (!/^[A-Za-z]/.test(raw)) return null;
+        const two = raw.length >= 2 && /[a-z]/.test(raw[1]) ? raw.slice(0, 2) : raw[0];
+        return two.charAt(0).toUpperCase() + two.slice(1).toLowerCase();
     }
 
     // -----------------------------------------------------------------------

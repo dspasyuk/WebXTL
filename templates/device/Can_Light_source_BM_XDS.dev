@@ -1,6 +1,6 @@
 _diffrn_radiation_type             synchrotron
 _diffrn_measurement_method       '\k and \w scans'
-_diffrn_measurement_device_type   'Rayonix MX300HE CCD area detector'
+_diffrn_measurement_device_type   'Pilatus 16M'
 _diffrn_source                     synchrotron  
 _diffrn_radiation_source          'bending magnet' 
 _diffrn_radiation_monochromator   'Silicon 111'

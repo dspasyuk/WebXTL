@@ -2757,6 +2757,111 @@ class WMOLApp {
         }
     }
 
+    // Calculate anomalous dispersion (f', f") for every element on SFAC at the
+    // wavelength given on CELL, and insert DISP instructions between the last
+    // SFAC and the UNIT instruction (where SHELXL requires them).
+    async calculateDisp() {
+        const editor = this.state.editors.res;
+        if (!editor) { alert('Open a structure (.res/.ins) first.'); return; }
+        const doc = editor.getSession().getDocument();
+        const lines = doc.getAllLines();
+
+        let wavelength = null;
+        let sfacRow = -1;
+        let unitRow = -1;
+        let elements = [];
+        for (let i = 0; i < lines.length; i++) {
+            const parts = lines[i].trim().split(/\s+/);
+            const key = (parts[0] || '').toUpperCase();
+            if (key === 'CELL' && parts.length >= 2) {
+                const wl = parseFloat(parts[1]);
+                if (isFinite(wl) && wl > 0) wavelength = wl;
+            } else if (key === 'SFAC') {
+                if (i > sfacRow) {
+                    sfacRow = i;
+                    elements = [];
+                    for (let j = 1; j < parts.length; j++) {
+                        if (isNaN(parseFloat(parts[j]))) elements.push(parts[j].replace(/^\$/, ''));
+                    }
+                }
+            } else if (key === 'UNIT' && unitRow === -1) {
+                unitRow = i;
+            }
+        }
+        if (sfacRow === -1) { alert('No SFAC instruction found.'); return; }
+        if (wavelength === null) { alert('No wavelength found on the CELL line.'); return; }
+
+        const energy = 12398.4198 / wavelength;
+
+        if (!this._dispersionTable) {
+            try {
+                const resp = await fetch('data/anomalous.json');
+                if (!resp.ok) throw new Error('HTTP ' + resp.status);
+                this._dispersionTable = await resp.json();
+            } catch (e) {
+                alert('Could not load anomalous-scattering data (data/anomalous.json): ' + e.message);
+                return;
+            }
+        }
+        const table = this._dispersionTable && this._dispersionTable.elements;
+        if (!table) { alert('Anomalous-scattering data is empty.'); return; }
+        if (!this._dispIndex) {
+            this._dispIndex = {};
+            Object.keys(table).forEach(k => { this._dispIndex[k.toUpperCase()] = k; });
+        }
+
+        const dispLines = [];
+        const missing = [];
+        const seen = new Set();
+        elements.forEach(elRaw => {
+            const upper = elRaw.toUpperCase();
+            const lookUpper = upper === 'D' ? 'H' : upper;
+            if (seen.has(lookUpper)) return;
+            seen.add(lookUpper);
+            const key = this._dispIndex[lookUpper];
+            const rows = key ? table[key] : null;
+            if (!rows || !rows.length) { missing.push(elRaw); return; }
+            if (energy < rows[0][0] || energy > rows[rows.length - 1][0]) { missing.push(elRaw + ' (out of range)'); return; }
+            let lo = 0, hi = rows.length - 1;
+            while (hi - lo > 1) {
+                const mid = (lo + hi) >> 1;
+                if (rows[mid][0] <= energy) lo = mid; else hi = mid;
+            }
+            const [E0, a0, b0] = rows[lo];
+            const [E1, a1, b1] = rows[hi];
+            const t = E1 === E0 ? 0 : (energy - E0) / (E1 - E0);
+            const fp = a0 + (a1 - a0) * t;
+            const fpp = b0 + (b1 - b0) * t;
+            dispLines.push(`DISP ${key} ${fp.toFixed(4)} ${fpp.toFixed(4)}`);
+        });
+
+        if (!dispLines.length) {
+            alert(`No dispersion data for: ${missing.join(', ') || elements.join(', ')}`);
+            return;
+        }
+
+        // Replace any existing DISP instructions, then insert the new ones
+        // immediately after the last SFAC line (before UNIT).
+        for (let i = doc.getLength() - 1; i >= 0; i--) {
+            if (/^\s*DISP\b/i.test(doc.getLine(i))) doc.removeLines(i, i);
+        }
+        let newSfacRow = -1;
+        for (let i = 0; i < doc.getLength(); i++) {
+            if (/^\s*SFAC\b/i.test(doc.getLine(i))) newSfacRow = i;
+        }
+        if (newSfacRow === -1) return;
+        editor.session.insert({ row: newSfacRow + 1, column: 0 }, dispLines.join('\n') + '\n');
+
+        editor.loadedFile = editor.getValue();
+        this.state.loadedContent = editor.getValue();
+        const status = document.getElementById('status-bar-content');
+        if (status) {
+            let msg = `Inserted ${dispLines.length} DISP line(s) at λ=${wavelength} Å (${energy.toFixed(0)} eV).`;
+            if (missing.length) msg += ` No data: ${missing.join(', ')}.`;
+            status.textContent = msg;
+        }
+    }
+
     // Resolve the atom behind a raycaster hit, supporting both the normal
     // instanced spheres and the large-structure THREE.Points cloud.
     resolveHitAtom(hit) {
@@ -3655,10 +3760,7 @@ class WMOLApp {
         // Calculate DISP
         editor.commands.addCommand({
             name: 'calcDisp',
-            exec: (editor) => {
-                // Insert DISP instruction
-                 editor.insert("DISP $H\n");
-            }
+            exec: () => { this.calculateDisp(); }
         });
 
         // Assign Q as Carbons

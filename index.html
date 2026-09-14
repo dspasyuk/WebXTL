@@ -171,6 +171,7 @@
                                 <li><a class="dropdown-item" href="#" id="menu-xrdspace-force">Force Space Group (xrdspace)...</a></li>
                                 <li><a class="dropdown-item" href="#" id="menu-sg-transform">Transform Model to Space Group...</a></li>
                                 <li><a class="dropdown-item" href="#" id="menu-rsr">Real Space Refinement</a></li>
+                                <li><a class="dropdown-item" href="#" id="menu-absorb">Spherical Absorption Correction...</a></li>
                                 <li>
                                     <hr class="dropdown-divider">
                                 </li>
@@ -342,7 +343,7 @@
         <!-- Main Content with Vertical Tabs -->
         <div class="flex-grow-1 d-flex flex-row overflow-hidden">
             <!-- Vertical Tabs -->
-            <div class="bg-light border-end border-secondary" style="width: 60px; min-width: 60px;">
+            <div class="bg-light border-end border-secondary" style="width: 38px; min-width: 38px;">
                 <ul class="nav flex-column nav-pills p-0 m-0" id="mainTabs" role="tablist">
                     <li class="nav-item" role="presentation">
                         <button class="nav-link active w-100 text-start fw-bold rounded-0 py-2"
@@ -350,7 +351,7 @@
                             id="tab-split" data-bs-toggle="tab" data-bs-target="#pane-split" type="button"
                             role="tab" aria-selected="true">main</button>
                     </li>
-                    <li class="nav-item" role="presentation">
+                    <li class="nav-item" role="presentation" id="tab-cif-item" style="display:none;">
                         <button class="nav-link w-100 text-start fw-bold rounded-0 py-2"
                             style="padding-left: 2px !important; padding-right: 1px !important; font-size: 0.75rem;"
                             id="tab-cif" data-bs-toggle="tab" data-bs-target="#content-cif" type="button"

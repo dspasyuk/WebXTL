@@ -49,6 +49,12 @@ WebXTL includes a suite of specialized tools for structure refinement:
 -   **PLATON check** (optional): when a `platon` executable is runnable on the server it is invoked best-effort and its output is shown; when it cannot run the built-in report still works.
 -   **PLATON in the Programs menu**: registered like the SHELX suite (`programs → PLATON`). Because PLATON is interactive software, the entry expands into a submenu of single-purpose actions — **CheckCIF**, **ADDSYM**, **SQUEEZE**, **TwinRotMat** (twin-rotation search) — each feeding PLATON the matching instruction on stdin, copying any needed `.fcf` into the project, and returning stdout plus written report files in the results dialog.-   The refined `.res` can be loaded straight back into the editor. Results are persisted under `projects/<name>`. (`POST /solve-structure`, `POST /validate-structure`, `GET /solve-info`).
 
+**Spherical Absorption Correction (Calculate menu)**
+-   **Calculate → Spherical Absorption Correction…** applies an analytic absorption correction for a crystal modelled as an isotropic sphere. The transmission factor `T` depends on `mu·R` **and** the Bragg angle `theta` (a theta-independent factor would only be an overall scale); the routine reports `Tmin`/`Tmax` and scales the reflection data by `1/T`.
+-   `mu` (cm⁻¹) is computed from the unit-cell contents and the experiment wavelength using tabulated anomalous `f"` values (`mu = 2 r_e λ / V · Σ f"`), or taken from the `Mu = … mm⁻¹` value already present in the refinement `.lst`. The crystal size comes from the `SIZE` instruction or is entered in mm; the equal-volume sphere radius is used.
+-   The loaded HKL is corrected in place (`HKLF 4/5`: `F²`/`σ` by `1/T`; `HKLF 3`: `F`/`σ` by `1/√T`) in the standard SHELX fixed-width format, written back to the project with a **server-side backup**, and `Tmin`/`Tmax` are copied into the publish-CIF fields. Because the factor is angle-only it is identical for symmetry-equivalent reflections, so it is consistent within any space group. A warning is shown when `mu·R > 10`, and re-applying the correction to an already-corrected file is discouraged.
+-   Implementation is a self-contained pure-JS module: `src/js/compute/SphericalAbsorption.js` with the precomputed `theta` table in `src/js/compute/SphereAbsorptionTable.js`; checks live in `tests/spherical-absorption.js`.
+
 **Atom Management**
 -   **Kill Q Peaks**: Instantly remove Q-peaks (Ctrl-K).
 -   **Kill H Atoms**: Remove Hydrogen atoms (Ctrl-Shift-K).

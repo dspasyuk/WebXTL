@@ -1598,6 +1598,38 @@ app.post('/projects/:name/savefile', (req, res) => {
     }
 });
 
+// Write a copy of a file into the project's backup/ directory, leaving the
+// original untouched. Used before destructive in-place edits (e.g. spherical
+// absorption correction of the .hkl).
+app.post('/projects/:name/backupfile', (req, res) => {
+    try {
+        const basename = path.basename(req.params.name);
+        const { filename, content } = req.body;
+        if (!filename || content === undefined) {
+            return res.status(400).json({ error: 'filename and content are required' });
+        }
+        const cleanName = path.basename(filename);
+        if (!cleanName || cleanName === '.' || cleanName === '..') {
+            return res.status(400).json({ error: 'Invalid filename' });
+        }
+        const projectDir = path.join(PROJECTS_DIR, basename);
+        if (!fs.existsSync(projectDir)) {
+            fs.mkdirSync(projectDir, { recursive: true });
+        }
+        const backupDir = path.join(projectDir, 'backup');
+        if (!fs.existsSync(backupDir)) {
+            fs.mkdirSync(backupDir, { recursive: true });
+        }
+        const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+        const backupName = `${cleanName}_${timestamp}`;
+        fs.writeFileSync(path.join(backupDir, backupName), content, 'utf8');
+        res.json({ success: true, file: backupName });
+    } catch (error) {
+        console.error("Backup file error:", error);
+        res.status(500).json({ error: 'Failed to back up file', details: error.message });
+    }
+});
+
 // 4b. Upload an arbitrary binary/large file into a project without forcing the
 // client to keep its content in the browser. Files are stored under their
 // original names (a same-basename companion of the project structure is kept

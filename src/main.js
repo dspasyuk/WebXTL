@@ -24,6 +24,7 @@ import { Symmetry } from './js/utils/Symmetry.js';
 import { RealSpaceRefiner } from './js/compute/RealSpaceRefiner.js';
 import { MoleculeCluster } from './js/compute/MoleculeCluster.js';
 import { FRAGMENTS } from './js/compute/FragmentLibrary.js';
+import { SphericalAbsorption } from './js/compute/SphericalAbsorption.js';
 import { AI_PROVIDERS, DEFAULT_AI_SETTINGS, aiSettingsFromProvider, aiChat, aiChatAgent } from './js/ai/client.js';
 import { AI_PROMPTS } from './js/ai/prompts.js';
 import './js/ace/mode-cif.js';
@@ -1751,6 +1752,18 @@ class WMOLApp {
         return res.json();
     }
 
+    // Write a copy of a file into the project's backup/ directory (used to keep
+    // the original reflection data before an in-place absorption correction).
+    async apiBackupProjectFile(name, filename, content) {
+        const res = await fetch(this.getApiUrl(`/projects/${encodeURIComponent(name)}/backupfile`), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ filename, content })
+        });
+        if (!res.ok) throw new Error('Failed to back up file');
+        return res.json();
+    }
+
     // Upload binary/large project companion files (HKL reflection data, SQUEEZE
     // .fab masks, ...) to a server project without holding their content in the
     // browser. Files keep their original names server-side.
@@ -2107,17 +2120,17 @@ class WMOLApp {
         setTimeout(() => URL.revokeObjectURL(url), 1000);
     }
 
-    // Unload everything from the UI: clear editors, file tabs, the 3D scene,
-    // HKL/FCF/map state and the persisted session. Nothing on the server is
-    // touched.
-    clearAllData() {
-        if (!confirm("Clear all loaded data from the UI?\n\nFiles on the server are not deleted.")) return;
-
+    // Reset all loaded, project-specific UI state (editors, file tabs, the 3D
+    // scene, HKL/FCF/map references, status badges) without confirmation.
+    // Nothing on the server is touched. Called when switching projects and by
+    // clearAllData().
+    resetLoadedProject() {
         // Clear the structure/CIF/LST editors.
         ['res', 'cif', 'lst'].forEach(type => {
             const ed = this.state.editors[type];
             if (ed) ed.setValue('', -1);
         });
+        this.setCifTabVisible(false);
 
         // Close and destroy every file tab.
         const tabKeys = Object.keys(this.state.fileTabs);
@@ -2162,6 +2175,7 @@ class WMOLApp {
         this.state.hklName = null;
         this.state.hklServerProject = null;
         this.state.fcfRawContent = null;
+        this.state.pendingCifFile = null;
         this.state.cachedMapData = null;
         this.state.currentMapData = null;
         this.state.currentMapBounds = null;
@@ -2184,6 +2198,14 @@ class WMOLApp {
         }
         const statusBar = document.getElementById('status-bar-content');
         if (statusBar) statusBar.textContent = 'Ready';
+    }
+
+    // Unload everything from the UI: reset the loaded state and forget the
+    // persisted session. Nothing on the server is touched.
+    clearAllData() {
+        if (!confirm("Clear all loaded data from the UI?\n\nFiles on the server are not deleted.")) return;
+
+        this.resetLoadedProject();
 
         // Forget the persisted session so a refresh does not restore anything.
         try {
@@ -2335,6 +2357,18 @@ class WMOLApp {
         const el = document.getElementById(id);
         if (el && !el.classList.contains('active')) {
             new bootstrap.Tab(el).show();
+        }
+    }
+
+    // Show/hide the CIF tab. It is only meaningful when the project actually
+    // has a CIF (primary structure or a companion), never as an empty tab.
+    setCifTabVisible(visible) {
+        const li = document.getElementById('tab-cif-item');
+        if (!li) return;
+        li.style.display = visible ? '' : 'none';
+        if (!visible) {
+            const btn = document.getElementById('tab-cif');
+            if (btn && btn.classList.contains('active')) this.switchToTab('tab-split');
         }
     }
 
@@ -2532,6 +2566,7 @@ class WMOLApp {
                 this.state.loadedType = 'cif';
                 this.state.loadedContent = content;
                 this.state.loadedFilename = filename;
+                this.setCifTabVisible(true);
 
                 // Very large CIF/mmCIF files are rendered in 3D but only a
                 // truncated head is put into the Ace editor (loading 100s of
@@ -2566,13 +2601,31 @@ class WMOLApp {
                 }
             }
         } catch (err) {
+            console.error(`loadSpecificFileFromServer('${projectName}', '${filename}') failed:`, err);
             if (!silent) alert(`Load failed: ${err.message}`);
         }
         this.saveStateToLocalStorage();
     }
-    
+
+    // Fetch a project's companion CIF into the CIF editor on demand (not during
+    // project load, since CIFs can be several MB and Ace is slow with them).
+    async loadCifCompanion(project, filename) {
+        try {
+            const content = await this.apiGetProjectFile(project, filename);
+            if (this.state.editors.cif) {
+                this.setEditorValueProgrammatic(this.state.editors.cif, this.truncateContent(content));
+                this.state.editors.cif.loadedFile = content;
+                this.state.editors.cif.fileId = this.state.fileId;
+            }
+            this.setCifTabVisible(true);
+        } catch (e) {
+            console.warn('Failed to load CIF companion:', e.message);
+        }
+    }
+
     async loadProjectFromServer(name, opts = {}) {
         const silent = !!(opts && opts.silent);
+        console.time(`[project] load ${name}`);
         try {
             // 1. Load Main Structure
             const data = await this.apiLoadProject(name);
@@ -2580,6 +2633,11 @@ class WMOLApp {
                 // Project has no structure file (.res/.ins/.cif/.pdb) - nothing to display.
                 if (!silent) alert(`Project '${name}' has no structure file (.res/.ins/.cif/.pdb) to load.`);
                 return false;
+            }
+            // Switching projects: drop the previous project's loaded state
+            // (editors, tabs, HKL/FCF/map references) so nothing stale leaks in.
+            if (this.state.currentProject && this.state.currentProject !== data.name) {
+                this.resetLoadedProject();
             }
             this.state.currentProject = data.name;
             this.state.loadedType = data.type;
@@ -2610,11 +2668,14 @@ class WMOLApp {
                     editor.setValue(data.content, -1);
                 }
             }
+            console.time(`[project] renderStructure ${name}`);
             this.renderContent(data.content, data.type);
+            console.timeEnd(`[project] renderStructure ${name}`);
             this.resetView();
             // Non-SHELX primaries (database-fetched CIF/PDB projects) get their
             // own view: CIF tab for CIF, a file tab for PDB.
             if (data.type === 'cif') {
+                this.setCifTabVisible(true);
                 this.switchToTab('tab-cif');
             } else if (data.type === 'pdb') {
                 this.openFileTab(data.filename, data.content, 'pdb', name, true);
@@ -2641,27 +2702,32 @@ class WMOLApp {
                 this.state.hklServerProject = null;
             }
             
-            // Look for FCF (any same-basename variant, e.g. name.fcf or name_2.fcf)
+            // FCF map: build it *after* the structure is shown. The map
+            // calculation is synchronous and can take a while, so deferring it
+            // keeps opening a project responsive.
             const fcfFile = files.find(f => f.name.toLowerCase() === `${name.toLowerCase()}.fcf`)
                 || files.find(f => /\.fcf$/i.test(f.name) && f.name.toLowerCase().startsWith(name.toLowerCase() + '_'))
                 || files.find(f => /\.fcf$/i.test(f.name));
             if (fcfFile) {
-                await this.loadSpecificFileFromServer(name, fcfFile.name, true, false);
+                const fcfName = fcfFile.name;
+                setTimeout(() => {
+                    // Guard against a quick project switch before this runs.
+                    if (this.state.currentProject === name) {
+                        this.loadSpecificFileFromServer(name, fcfName, true, false);
+                    }
+                }, 0);
             }
 
-            // Look for CIF (populate the CIF editor without replacing the primary structure)
+            // CIF companion: NEVER fetched automatically (refinement CIFs can be
+            // several MB). Only remember the reference; the content is pulled
+            // when the user explicitly opens the CIF tab (and confirmed for
+            // large files).
             const cifFile = files.find(f => f.name.toLowerCase() === `${name.toLowerCase()}.cif`);
-            if (cifFile) {
-                try {
-                    const content = await this.apiGetProjectFile(name, cifFile.name);
-                    if (this.state.editors.cif) {
-                        this.setEditorValueProgrammatic(this.state.editors.cif, this.truncateContent(content));
-                        this.state.editors.cif.loadedFile = content;
-                    }
-                } catch (e) {
-                    console.warn("Failed to load CIF:", e.message);
-                }
-            }
+            this.state.pendingCifFile = (cifFile && this.state.loadedType !== 'cif')
+                ? { project: name, filename: cifFile.name, size: cifFile.size || 0 }
+                : null;
+            // Only show the CIF tab when a CIF is actually available.
+            this.setCifTabVisible(!!cifFile || this.state.loadedType === 'cif');
             
             this.saveStateToLocalStorage();
 
@@ -2669,8 +2735,10 @@ class WMOLApp {
             const modal = modalEl ? bootstrap.Modal.getInstance(modalEl) : null;
             if (modal && !silent) modal.hide();
 
+            console.timeEnd(`[project] load ${name}`);
             return true;
         } catch (err) {
+            console.timeEnd(`[project] load ${name}`);
             if (!silent) alert(`Error loading project: ${err.message}`);
             return false;
         }
@@ -2860,6 +2928,251 @@ class WMOLApp {
             if (missing.length) msg += ` No data: ${missing.join(', ')}.`;
             status.textContent = msg;
         }
+    }
+
+    // Correct a SHELX .hkl reflection file for spherical absorption.
+    // hklfType 3 stores F/sigma(F) (scale by 1/sqrt(T)); other types store
+    // F^2/sigma(F^2) (scale by 1/T).
+    correctHklText(text, { mu, radiusA, cell, wavelength, hklfType = 4, matrix = null }) {
+        const muR = mu * radiusA * 1e-8;
+        let tmin = Infinity, tmax = -Infinity, count = 0;
+        const out = text.split(/\r?\n/).map(line => {
+            const t = line.trim();
+            if (!t || t.startsWith('!') || t.startsWith('#')) return line;
+            const parts = t.split(/\s+/);
+            if (parts.length < 5) return line;
+            const h = parseInt(parts[0], 10), k = parseInt(parts[1], 10), l = parseInt(parts[2], 10);
+            if (isNaN(h) || isNaN(k) || isNaN(l)) return line;
+            const ht = matrix ? matrix[0] * h + matrix[1] * k + matrix[2] * l : h;
+            const kt = matrix ? matrix[3] * h + matrix[4] * k + matrix[5] * l : k;
+            const lt = matrix ? matrix[6] * h + matrix[7] * k + matrix[8] * l : l;
+            const st = SphericalAbsorption.sinTheta(ht, kt, lt, cell, wavelength);
+            const T = SphericalAbsorption.transmissionTheta(muR, Math.asin(st));
+            if (!(T > 0)) return line;
+            if (T < tmin) tmin = T;
+            if (T > tmax) tmax = T;
+            count++;
+            const scale = hklfType === 3 ? 1 / Math.sqrt(T) : 1 / T;
+            const v3 = parseFloat(parts[3]);
+            const v4 = parseFloat(parts[4]);
+            // Keep the SHELX fixed format FORMAT(3I4,2F8.2,I4); collapsing the
+            // fields to free format makes SHELXL report "WRONG FORMAT".
+            const f8 = (x) => {
+                const s = (isFinite(x) ? x : 0).toFixed(2);
+                return s.length >= 8 ? s : s.padStart(8);
+            };
+            let rebuilt = String(h).padStart(4) + String(k).padStart(4) + String(l).padStart(4)
+                + f8(v3 * scale) + f8(v4 * scale);
+            for (let e = 5; e < parts.length; e++) {
+                const tok = parts[e];
+                rebuilt += /^-?\d+$/.test(tok) ? String(parseInt(tok, 10)).padStart(4) : ' ' + tok;
+            }
+            return rebuilt;
+        });
+        return { text: out.join('\n'), tmin, tmax, count };
+    }
+
+    // Compute and apply a spherical absorption correction to the loaded HKL
+    // (or, if there is no HKL, to the loaded FCF reflections).
+    async applySphericalAbsorption() {
+        const editor = this.state.editors.res;
+        const structure = this.getStructureContent() || (editor && editor.getValue());
+        if (!structure) { alert('Open a structure (.res/.ins) first.'); return; }
+
+        let wavelength = null;
+        const cell = {};
+        let elements = [];
+        let unitCounts = null;
+        let z = 1;
+        let sizeDims = null;
+        let hklfType = 4;
+        let hklMatrix = null;
+        for (const line of structure.split(/\r?\n/)) {
+            const parts = line.trim().split(/\s+/);
+            const key = (parts[0] || '').toUpperCase();
+            if (key === 'CELL') {
+                const wl = parseFloat(parts[1]);
+                if (isFinite(wl) && wl > 0) wavelength = wl;
+                cell.a = parseFloat(parts[2]); cell.b = parseFloat(parts[3]); cell.c = parseFloat(parts[4]);
+                cell.alpha = parseFloat(parts[5]); cell.beta = parseFloat(parts[6]); cell.gamma = parseFloat(parts[7]);
+            } else if (key === 'SFAC') {
+                elements = [];
+                for (let j = 1; j < parts.length; j++) {
+                    if (isNaN(parseFloat(parts[j]))) elements.push(parts[j].replace(/^\$/, ''));
+                }
+            } else if (key === 'UNIT') {
+                unitCounts = parts.slice(1).map(Number);
+            } else if (key === 'ZERR') {
+                const zz = parseFloat(parts[1]);
+                if (isFinite(zz) && zz > 0) z = zz;
+            } else if (key === 'SIZE') {
+                sizeDims = [parseFloat(parts[1]), parseFloat(parts[2]), parseFloat(parts[3])].filter(x => isFinite(x) && x > 0);
+            } else if (key === 'HKLF') {
+                const hh = parseInt(parts[1], 10);
+                if (isFinite(hh)) hklfType = hh;
+                // Optional reorientation matrix r11..r33 (applied to the file
+                // indices before refinement, so T must use the transformed hkl).
+                if (parts.length >= 12) {
+                    const r = parts.slice(3, 12).map(Number);
+                    if (r.length === 9 && r.every(isFinite)) hklMatrix = r;
+                }
+            }
+        }
+        if (!elements.length) { alert('No SFAC instruction found.'); return; }
+        if (wavelength === null) { alert('No wavelength found on the CELL line.'); return; }
+        if (!(cell.a > 0)) { alert('No unit-cell parameters found on the CELL line.'); return; }
+
+        let dims = sizeDims;
+        if (!dims || !dims.length) {
+            const ans = prompt('Crystal dimensions in mm (three numbers, or one for a sphere diameter):', '0.20 0.30 0.40');
+            if (ans === null) return;
+            dims = ans.trim().split(/[\s,]+/).map(Number).filter(x => isFinite(x) && x > 0);
+        }
+        if (!dims.length) { alert('No crystal dimensions given.'); return; }
+        const radiusMm = SphericalAbsorption.equivalentSphereRadius(dims);
+        const radiusA = radiusMm * 1e7; // mm -> A
+
+        // Atoms per unit cell (from UNIT, else asymmetric unit x Z).
+        const counts = {};
+        if (unitCounts && unitCounts.length) {
+            elements.forEach((el, i) => { counts[el] = unitCounts[i] || 0; });
+        } else {
+            const au = {};
+            const atoms = (this.state.parsedData && this.state.parsedData.atoms) || [];
+            atoms.forEach(a => { const el = (a.element || 'C').toUpperCase(); au[el] = (au[el] || 0) + 1; });
+            elements.forEach(el => { counts[el] = Math.round((au[el.toUpperCase()] || 0) * z); });
+        }
+
+        // f" for each element at the experiment energy.
+        let table = null;
+        try {
+            if (!this._dispersionTable) {
+                const resp = await fetch('data/anomalous.json');
+                if (!resp.ok) throw new Error('HTTP ' + resp.status);
+                this._dispersionTable = await resp.json();
+            }
+            table = this._dispersionTable.elements;
+        } catch (e) {
+            alert('Could not load anomalous-scattering data: ' + e.message);
+            return;
+        }
+        if (!this._dispIndex) {
+            this._dispIndex = {};
+            Object.keys(table).forEach(k => { this._dispIndex[k.toUpperCase()] = k; });
+        }
+        const energy = 12398.4198 / wavelength;
+        const fpp = {};
+        elements.forEach(el => {
+            const key = this._dispIndex[el.toUpperCase() === 'D' ? 'H' : el.toUpperCase()];
+            const rows = key ? table[key] : null;
+            if (!rows) return;
+            let lo = 0, hi = rows.length - 1;
+            while (hi - lo > 1) { const m = (lo + hi) >> 1; if (rows[m][0] <= energy) lo = m; else hi = m; }
+            const [E0, , b0] = rows[lo];
+            const [E1, , b1] = rows[hi];
+            fpp[el] = b0 + (b1 - b0) * (energy - E0) / (E1 - E0);
+        });
+
+        const d2r = Math.PI / 180;
+        const ca = Math.cos(cell.alpha * d2r), cb = Math.cos(cell.beta * d2r), cg = Math.cos(cell.gamma * d2r);
+        const volume = cell.a * cell.b * cell.c * Math.sqrt(Math.max(0, 1 - ca * ca - cb * cb - cg * cg + 2 * ca * cb * cg));
+        let muCm = SphericalAbsorption.linearMu({ cellVolume: volume, wavelength, counts, fpp });
+
+        // Prefer the mu SHELXL already reported in the .lst when available.
+        const lstText = this.state.editors.lst ? this.state.editors.lst.getValue() : '';
+        const muMatch = lstText && lstText.match(/Mu\s*=\s*([\d.]+)\s*mm-1/i);
+        const lstMuCm = muMatch ? parseFloat(muMatch[1]) * 10 : null;
+        if (isFinite(lstMuCm) && lstMuCm > 0) muCm = lstMuCm;
+
+        const muR = muCm * radiusA * 1e-8;
+        const aStar = SphericalAbsorption.transmission(muR);
+        const muSource = (muMatch ? 'from .lst' : 'from composition + f"');
+        const sizeText = `${dims.join(' x ')} mm  ->  R = ${radiusMm.toFixed(4)} mm`;
+
+        // Reflection source. Prefer the HKL that belongs to the current project
+        // (server-side) so we never correct/save a stale HKL from another
+        // project; only fall back to browser HKL content when there is no
+        // project HKL at all.
+        const project = this.state.currentProject || this.state.hklServerProject || null;
+        let hklText = null;
+        let hklFromServer = false;
+        let hklSaveName = null;
+        if (project) {
+            try {
+                const files = await this.apiListProjectFiles(project);
+                const lower = project.toLowerCase();
+                const hklFile = files.find(f => f.name.toLowerCase() === `${lower}.hkl`)
+                    || (this.state.hklName && files.find(f => f.name === this.state.hklName))
+                    || files.find(f => /\.hkl$/i.test(f.name));
+                if (hklFile) {
+                    hklText = await this.apiGetProjectFile(project, hklFile.name);
+                    hklFromServer = true;
+                    hklSaveName = hklFile.name;
+                }
+            } catch (e) { /* fall through to browser content */ }
+        }
+        if (!hklText && this.state.hklContent) {
+            hklText = this.state.hklContent;
+            hklFromServer = false;
+        }
+
+        const common = `Spherical absorption correction\n` +
+            `lambda = ${wavelength} A (${energy.toFixed(0)} eV)\n` +
+            `Crystal: ${sizeText}\n` +
+            `mu = ${(muCm / 10).toFixed(4)} mm-1 (${muSource})\n` +
+            `muR = ${muR.toFixed(4)},  A*(muR) = ${aStar.toFixed(4)}` +
+            (muR > 10 ? '\nWARNING: muR > 10 — the spherical approximation is unreliable.' : '');
+
+        if (hklText) {
+            const res = this.correctHklText(hklText, { mu: muCm, radiusA, cell, wavelength, hklfType, matrix: hklMatrix });
+            if (!res.count) { alert(common + '\n\nNo reflections found in the HKL file.'); return; }
+            const target = hklFromServer ? `project file ${hklSaveName}` : 'the loaded HKL';
+            if (!confirm(`${common}\nHKLF ${hklfType}${hklMatrix ? ' (reorientation matrix applied)' : ''}: ${res.count} reflections\nTmin = ${res.tmin.toFixed(4)}  Tmax = ${res.tmax.toFixed(4)}\n\nOverwrite ${target} with the corrected data?`)) return;
+            if (hklFromServer) {
+                // Explicit pre-correction backup into the project's backup/ dir.
+                try {
+                    await this.apiBackupProjectFile(project, hklSaveName, hklText);
+                } catch (e) {
+                    if (!confirm(`Could not write a backup (${e.message}). Continue and overwrite anyway?`)) return;
+                }
+                try {
+                    await this.apiSaveProjectFile(project, hklSaveName, res.text);
+                    this.state.hklName = hklSaveName;
+                } catch (e) {
+                    alert('Failed to save corrected HKL: ' + e.message);
+                    return;
+                }
+            } else {
+                this.state.hklContent = res.text;
+            }
+            this.setPublishAbsorptionFields(res.tmin, res.tmax);
+            const status = document.getElementById('status-bar-content');
+            if (status) status.textContent = `Spherical absorption: mu=${(muCm / 10).toFixed(3)} mm-1, Tmin=${res.tmin.toFixed(4)}, Tmax=${res.tmax.toFixed(4)}`;
+            alert(`Corrected ${res.count} reflections.\nTmin = ${res.tmin.toFixed(4)}  Tmax = ${res.tmax.toFixed(4)}\n\nRe-run the refinement to see the effect. The original file was backed up server-side; do not run this again on the same file (it would correct it twice).`);
+            return;
+        }
+
+        // No HKL: correct the loaded FCF reflections and refresh the map.
+        if (this.state.fcfRawContent) {
+            let fcf = null;
+            try { fcf = this.state.parsers.fcf.parse(this.state.fcfRawContent); } catch (e) { /* ignore */ }
+            if (fcf && fcf.reflections && fcf.reflections.length) {
+                const mapCell = fcf.cell && fcf.cell.a ? fcf.cell : cell;
+                const res = SphericalAbsorption.apply(fcf.reflections, { mu: muCm, radiusA, cell: mapCell, wavelength });
+                this.setPublishAbsorptionFields(res.Tmin, res.Tmax);
+                alert(`${common}\nFCF: ${res.reflections.length} reflections\nTmin = ${res.Tmin.toFixed(4)}  Tmax = ${res.Tmax.toFixed(4)}\n\n(T_min/T_max copied to the publish CIF fields. Load an .hkl to correct the data used for refinement.)`);
+                return;
+            }
+        }
+
+        alert(common + '\n\nNo HKL or FCF reflection data found to correct.');
+    }
+
+    setPublishAbsorptionFields(tmin, tmax) {
+        const tminEl = document.getElementById('pub-abs-min');
+        const tmaxEl = document.getElementById('pub-abs-max');
+        if (tminEl) tminEl.value = tmin.toFixed(4);
+        if (tmaxEl) tmaxEl.value = tmax.toFixed(4);
     }
 
     // Resolve the atom behind a raycaster hit, supporting both the normal
@@ -4771,6 +5084,15 @@ class WMOLApp {
                             this.state.editors.cif.loadedFile = this.state.loadedContent;
                             this.state.editors.cif.fileId = this.state.fileId;
                         }
+                    } else if (this.state.pendingCifFile) {
+                        // Companion CIF for a .res/.ins project: only on explicit
+                        // user action, and confirm first when it is large.
+                        const p = this.state.pendingCifFile;
+                        const big = p.size > 2 * 1024 * 1024;
+                        if (!big || confirm(`Load companion CIF '${p.filename}' (${(p.size / 1048576).toFixed(1)} MB)?`)) {
+                            this.state.pendingCifFile = null;
+                            this.loadCifCompanion(p.project, p.filename);
+                        }
                     }
                 }
             });
@@ -5860,6 +6182,7 @@ class WMOLApp {
         bindMenu('menu-change-occ', 'changeOccupancy');
         bindMenu('menu-omit', 'omitError');
         bindMenu('menu-disp', 'calcDisp');
+        bindMenu('menu-absorb', 'applySphericalAbsorption');
         bindMenu('menu-hfix', 'addHFIX');
         bindMenu('menu-sort', 'sortAtoms');
         bindMenu('tool-sort', 'sortAtoms'); // Toolbar
@@ -6341,10 +6664,18 @@ class WMOLApp {
             // Laue group so the Fourier synthesis spans the full reciprocal
             // lattice (otherwise the map uses ~1/8 of the data and looks
             // dispersed instead of showing compact peaks at the atoms).
-            const allReflections = this.state.mapCalculator.expandReflections(
-                fcfData.reflections, fcfData.symmetry);
+            // Compute the model phases on the UNIQUE reflections only (up to a
+            // symmetry-factor fewer atom*reflection pairs), then expand over the
+            // space group and Friedel mates with the correct phase propagation.
+            console.time('[map] calculateStructureFactors');
+            this.state.mapCalculator.calculateStructureFactors(phaseAtoms, fcfData.reflections, mapCell);
+            console.timeEnd('[map] calculateStructureFactors');
 
-            this.state.mapCalculator.calculateStructureFactors(phaseAtoms, allReflections, mapCell);
+            console.time('[map] expandReflections');
+            const allReflections = this.state.mapCalculator.expandReflectionsWithPhases(
+                fcfData.reflections, symOps);
+            console.timeEnd('[map] expandReflections');
+            console.log(`[map] phaseAtoms=${phaseAtoms.length}, unique=${fcfData.reflections.length}, expanded=${allReflections.length}, symOps=${symOps ? symOps.length : 0}`);
             
             // Calculate Map
             const level = parseFloat(document.getElementById('map-level').value) || 1.0;
@@ -6353,8 +6684,11 @@ class WMOLApp {
             
             this.state.currentMapData = { reflections: allReflections, cell: mapCell }; // Store for updates
             
+            console.time('[map] calculateMap');
             const mapData = this.state.mapCalculator.calculateMap(allReflections, mapCell, this.state.preferences.map.resolution, type); 
             this.state.cachedMapData = mapData; // Cache for RSR
+            console.timeEnd('[map] calculateMap');
+            console.log(`[map] type=${type} grid=${mapData.nx}x${mapData.ny}x${mapData.nz} min=${mapData.min.toFixed(2)} max=${mapData.max.toFixed(2)}`);
         
         // Calculate Center (Cartesian) and Bounds
         const displayAtoms = this.state.moleculeRenderer && this.state.moleculeRenderer.expandedAtoms 

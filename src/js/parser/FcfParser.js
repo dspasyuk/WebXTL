@@ -10,6 +10,14 @@ export class FcfParser {
     }
 
     parse(content) {
+        // Reset: the same parser instance is reused for every file, so without
+        // this the reflections/symmetry of previously parsed files accumulate.
+        this.data = {
+            title: '',
+            cell: { a: 0, b: 0, c: 0, alpha: 90, beta: 90, gamma: 90 },
+            reflections: [],
+            symmetry: []
+        };
         const lines = content.split('\n');
         let inLoop = false;
         let loopFields = [];

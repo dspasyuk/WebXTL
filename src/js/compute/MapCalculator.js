@@ -1,5 +1,6 @@
 
 import * as THREE from 'three';
+import { Symmetry } from '../utils/Symmetry.js';
 
 export class MapCalculator {
     constructor() {
@@ -43,35 +44,64 @@ export class MapCalculator {
         const cos_beta_star = (ca * cc - cb) / (sa * sc);
         const cos_gamma_star = (ca * cb - cc) / (sa * sb);
 
-        for (let refl of reflections) {
-            const h = refl.h;
-            const k = refl.k;
-            const l = refl.l;
+        // Flatten the element scattering coefficients into typed arrays so the
+        // inner loop does not recompute f(s2) for every atom of an element.
+        const els = Object.keys(this.sfCoeffs);
+        const E = els.length;
+        const elIndex = new Map();
+        els.forEach((e, i) => elIndex.set(e, i));
+        const coef = new Float64Array(E * 9);
+        els.forEach((e, i) => {
+            const c = this.sfCoeffs[e];
+            for (let j = 0; j < 9; j++) coef[i * 9 + j] = c[j];
+        });
+        const fallback = elIndex.has('C') ? elIndex.get('C') : 0;
+
+        // Flatten atoms once (avoids repeated property lookups and per-atom
+        // coefficient work in the hot loop).
+        const n = atoms.length;
+        const ax = new Float64Array(n), ay = new Float64Array(n), az = new Float64Array(n);
+        const aocc = new Float64Array(n), ael = new Int32Array(n), atk = new Float64Array(n);
+        for (let i = 0; i < n; i++) {
+            const a = atoms[i];
+            ax[i] = a.x; ay[i] = a.y; az[i] = a.z;
+            aocc[i] = a.occupancy != null ? a.occupancy : 1;
+            ael[i] = elIndex.has(a.element) ? elIndex.get(a.element) : fallback;
+            atk[i] = -8 * Math.PI * Math.PI * (a.uiso || 0);
+        }
+        const fCache = new Float64Array(E);
+        const twoPi = 2 * Math.PI;
+
+        for (let r = 0; r < reflections.length; r++) {
+            const refl = reflections[r];
+            const h = refl.h, k = refl.k, l = refl.l;
 
             const s2 = 0.25 * (
-                h*h*a_star*a_star + 
-                k*k*b_star*b_star + 
-                l*l*c_star*c_star + 
-                2*h*k*a_star*b_star*cos_gamma_star + 
-                2*h*l*a_star*c_star*cos_beta_star + 
+                h*h*a_star*a_star +
+                k*k*b_star*b_star +
+                l*l*c_star*c_star +
+                2*h*k*a_star*b_star*cos_gamma_star +
+                2*h*l*a_star*c_star*cos_beta_star +
                 2*k*l*b_star*c_star*cos_alpha_star
             );
 
+            for (let e = 0; e < E; e++) {
+                const off = e * 9;
+                let f = coef[off + 8];
+                for (let t = 0; t < 4; t++) f += coef[off + 2 * t] * Math.exp(-coef[off + 2 * t + 1] * s2);
+                fCache[e] = f;
+            }
+
             let A = 0;
             let B = 0;
-
-            for (let atom of atoms) {
-                const f = this.getScatteringFactor(atom.element, s2);
-                const T = Math.exp(-8 * Math.PI * Math.PI * atom.uiso * s2);
-                const fT = f * T * atom.occupancy;
-
-                const arg = 2 * Math.PI * (h * atom.x + k * atom.y + l * atom.z);
+            for (let i = 0; i < n; i++) {
+                const fT = fCache[ael[i]] * Math.exp(atk[i] * s2) * aocc[i];
+                if (fT === 0) continue;
+                const arg = twoPi * (h * ax[i] + k * ay[i] + l * az[i]);
                 A += fT * Math.cos(arg);
                 B += fT * Math.sin(arg);
             }
-
-            const phase = Math.atan2(B, A);
-            refl.phase = phase;
+            refl.phase = Math.atan2(B, A);
         }
     }
 
@@ -95,6 +125,44 @@ export class MapCalculator {
             }
         }
         return [...expanded.values()];
+    }
+
+    // Expand unique reflections over the full space group and Friedel mates
+    // while propagating the model phase. For a space-group operation {R|t}
+    //   F(Rh) = exp(2*pi*i (Rh).t) F(h)
+    // and the Friedel mate -h is the complex conjugate (phase -> -phase).
+    // This lets the (expensive) phase calculation run on the unique
+    // reflections only instead of on the whole expanded reciprocal lattice.
+    expandReflectionsWithPhases(reflections, symmetry) {
+        const ops = [];
+        for (const opStr of symmetry || []) {
+            const p = Symmetry.parseOperation(opStr);
+            if (p) ops.push(p);
+        }
+        const map = new Map();
+        const add = (h, k, l, r, phase) => {
+            const key = h + ',' + k + ',' + l;
+            if (!map.has(key)) {
+                map.set(key, { h, k, l, Fo2: r.Fo2, Fc2: r.Fc2, sigma: r.sigma, status: r.status, phase });
+            }
+        };
+        for (const r of reflections) {
+            const phi = r.phase || 0;
+            if (!ops.length) {
+                add(r.h, r.k, r.l, r, phi);
+                add(-r.h, -r.k, -r.l, r, -phi);
+                continue;
+            }
+            for (const op of ops) {
+                const h = op[0].x * r.h + op[0].y * r.k + op[0].z * r.l;
+                const k = op[1].x * r.h + op[1].y * r.k + op[1].z * r.l;
+                const l = op[2].x * r.h + op[2].y * r.k + op[2].z * r.l;
+                const shift = 2 * Math.PI * (h * op[0].c + k * op[1].c + l * op[2].c);
+                add(h, k, l, r, phi + shift);
+                add(-h, -k, -l, r, -(phi + shift));
+            }
+        }
+        return [...map.values()];
     }
 
     // Integer rotation matrices for the Laue group implied by the space-group

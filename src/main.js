@@ -4206,7 +4206,11 @@ class WMOLApp {
     }
 
     getRelabelKeywords() {
-        return ['TITL', 'CELL', 'ZERR', 'LATT', 'SYMM', 'SFAC', 'UNIT', 'HFIX', 'BOND', 'CONF', 'MPLA', 'HTAB', 'EQIV', 'CONN', 'PART', 'AFIX', 'RESI', 'MOLE', 'PLAN', 'SIZE', 'TEMP', 'WGHT', 'FVAR', 'HKLF', 'END', 'REM', 'Q', 'OMIT', 'DISP', 'ISOR', 'RIGI', 'SIMU', 'DELU', 'DANG', 'BUMP', 'TWIN', 'BASF'];
+        // Any SHELX instruction keyword is not an atom label. Reuse the
+        // canonical instruction list so the two never drift apart (a missing
+        // keyword such as L.S., LIST or FMAP made the relabeler treat the
+        // instruction as an atom and rewrite it, e.g. "L.S. 10" -> "L1 10").
+        return this.getShelxKeywords();
     }
 
     // Parse SFAC line(s) from the document into an ordered list of element symbols
@@ -4229,9 +4233,14 @@ class WMOLApp {
     parseRelabelAtomLine(line, sfacElements) {
         if (!line || line.trim().startsWith('=')) return null;
         const parts = line.trim().split(/\s+/);
-        if (parts.length < 2) return null;
+        // A SHELX atom line is "label type x y z [sof U ...]", so it needs the
+        // label, the SFAC type and three coordinates. Requiring five tokens
+        // with numeric x/y/z rejects instruction lines such as "LIST 6",
+        // "FMAP 2" or "L.S. 10" even if the keyword list is incomplete.
+        if (parts.length < 5) return null;
         if (!/^[A-Za-z]+/.test(parts[0])) return null;
         if (this.getRelabelKeywords().includes(parts[0].toUpperCase())) return null;
+        if (isNaN(parseFloat(parts[2])) || isNaN(parseFloat(parts[3])) || isNaN(parseFloat(parts[4]))) return null;
 
         const label = parts[0];
         let element = null;
@@ -4486,9 +4495,10 @@ class WMOLApp {
         }
     }
 
-    // SHELX instruction keywords that are not atoms (used to guard occupancy edits).
+    // SHELX instruction keywords that are not atoms (shared by the occupancy
+    // guards, the atom-line detector and the relabeler).
     getShelxKeywords() {
-        return ['TITL', 'CELL', 'ZERR', 'LATT', 'SYMM', 'SFAC', 'UNIT', 'HFIX', 'BOND', 'CONF', 'MPLA', 'HTAB', 'EQIV', 'CONN', 'PART', 'AFIX', 'RESI', 'MOLE', 'PLAN', 'SIZE', 'TEMP', 'WGHT', 'FVAR', 'HKLF', 'END', 'REM', 'Q', 'OMIT', 'DISP', 'ISOR', 'RIGI', 'SIMU', 'DELU', 'DANG', 'BUMP', 'TWIN', 'BASF', 'MERG', 'SPEC', 'HOPE', 'SWAT', 'SADI', 'SAME', 'NCSY', 'L.S.', 'CGLS', 'BLOC', 'DAMP', 'STIR', 'ACTA', 'LIST', 'SHEL', 'ANIS', 'MOVE', 'RTAB', 'EXYZ', 'EADP', 'RIGU', 'RESC', 'GRID', 'CALC'];
+        return ['TITL', 'CELL', 'ZERR', 'LATT', 'SYMM', 'SFAC', 'UNIT', 'HFIX', 'BOND', 'CONF', 'MPLA', 'HTAB', 'EQIV', 'CONN', 'PART', 'AFIX', 'RESI', 'MOLE', 'PLAN', 'SIZE', 'TEMP', 'WGHT', 'FVAR', 'HKLF', 'END', 'REM', 'Q', 'OMIT', 'DISP', 'ISOR', 'RIGI', 'SIMU', 'DELU', 'DANG', 'BUMP', 'TWIN', 'BASF', 'MERG', 'SPEC', 'HOPE', 'SWAT', 'SADI', 'SAME', 'NCSY', 'L.S.', 'CGLS', 'BLOC', 'DAMP', 'STIR', 'ACTA', 'LIST', 'SHEL', 'ANIS', 'MOVE', 'RTAB', 'EXYZ', 'EADP', 'RIGU', 'RESC', 'GRID', 'CALC', 'FMAP', 'TREF', 'MORE', 'DFIX', 'CHIV', 'FLAT', 'FREE', 'SUMP', 'SPAF', 'LAUE', 'OPIA', 'FRAG', 'FEND', 'BIND', 'REST', 'SAVE', 'WPDB', 'DEFS', 'FIX'];
     }
 
     // True when an editor line looks like a SHELX atom line (label, x y z present).

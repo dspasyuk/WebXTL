@@ -2935,41 +2935,119 @@ class WMOLApp {
     // F^2/sigma(F^2) (scale by 1/T).
     correctHklText(text, { mu, radiusA, cell, wavelength, hklfType = 4, matrix = null }) {
         const muR = mu * radiusA * 1e-8;
-        let tmin = Infinity, tmax = -Infinity, count = 0;
-        const out = text.split(/\r?\n/).map(line => {
+        const lines = text.split(/\r?\n/);
+        const items = [];
+        let tmin = Infinity, tmax = -Infinity, count = 0, maxAbs = 0;
+        lines.forEach((line, idx) => {
             const t = line.trim();
-            if (!t || t.startsWith('!') || t.startsWith('#')) return line;
+            if (!t || t.startsWith('!') || t.startsWith('#')) return;
             const parts = t.split(/\s+/);
-            if (parts.length < 5) return line;
+            if (parts.length < 5) return;
             const h = parseInt(parts[0], 10), k = parseInt(parts[1], 10), l = parseInt(parts[2], 10);
-            if (isNaN(h) || isNaN(k) || isNaN(l)) return line;
+            if (isNaN(h) || isNaN(k) || isNaN(l)) return;
             const ht = matrix ? matrix[0] * h + matrix[1] * k + matrix[2] * l : h;
             const kt = matrix ? matrix[3] * h + matrix[4] * k + matrix[5] * l : k;
             const lt = matrix ? matrix[6] * h + matrix[7] * k + matrix[8] * l : l;
             const st = SphericalAbsorption.sinTheta(ht, kt, lt, cell, wavelength);
             const T = SphericalAbsorption.transmissionTheta(muR, Math.asin(st));
-            if (!(T > 0)) return line;
+            if (!(T > 0)) return;
+            const scale = hklfType === 3 ? 1 / Math.sqrt(T) : 1 / T;
+            const v3 = parseFloat(parts[3]) * scale;
+            const v4 = parseFloat(parts[4]) * scale;
+            if (!isFinite(v3) || !isFinite(v4)) return;
             if (T < tmin) tmin = T;
             if (T > tmax) tmax = T;
+            maxAbs = Math.max(maxAbs, Math.abs(v3), Math.abs(v4));
             count++;
-            const scale = hklfType === 3 ? 1 / Math.sqrt(T) : 1 / T;
-            const v3 = parseFloat(parts[3]);
-            const v4 = parseFloat(parts[4]);
+            items.push({ idx, h, k, l, v3, v4, extra: parts.slice(5) });
+        });
+        // Dividing by T can multiply the values many-fold, so the corrected
+        // numbers would overflow the fixed 8-column SHELX fields and run the
+        // F^2 and sigma columns together (corrupting the file). Rescale the
+        // whole dataset by a power of ten first: the absolute scale is
+        // arbitrary because the refinement scale factor absorbs it.
+        let outScale = 1;
+        while (maxAbs * outScale >= 10000) outScale /= 10;
+        const byIdx = new Map();
+        for (const it of items) {
+            const f8 = (x) => {
+                const s = (outScale * x).toFixed(2);
+                return s.length > 8 ? s.slice(0, 8) : s.padStart(8);
+            };
             // Keep the SHELX fixed format FORMAT(3I4,2F8.2,I4); collapsing the
             // fields to free format makes SHELXL report "WRONG FORMAT".
-            const f8 = (x) => {
-                const s = (isFinite(x) ? x : 0).toFixed(2);
-                return s.length >= 8 ? s : s.padStart(8);
-            };
-            let rebuilt = String(h).padStart(4) + String(k).padStart(4) + String(l).padStart(4)
-                + f8(v3 * scale) + f8(v4 * scale);
-            for (let e = 5; e < parts.length; e++) {
-                const tok = parts[e];
-                rebuilt += /^-?\d+$/.test(tok) ? String(parseInt(tok, 10)).padStart(4) : ' ' + tok;
+            let rebuilt = String(it.h).padStart(4) + String(it.k).padStart(4) + String(it.l).padStart(4)
+                + f8(it.v3) + f8(it.v4);
+            if (it.extra.length) rebuilt += ' ' + it.extra.join(' ');
+            byIdx.set(it.idx, rebuilt);
+        }
+        const out = lines.map((line, idx) => (byIdx.has(idx) ? byIdx.get(idx) : line));
+        return { text: out.join('\n'), tmin, tmax, count, scale: outScale };
+    }
+
+    // Fit the spherical absorption parameter muR to the current model by
+    // minimising R1 = sum|Fo* - k Fc| / sum|Fo*| over a range of muR, using the
+    // Fo^2 / Fc values in the last SHELXL .fcf. This determines the crystal
+    // size / absorption empirically instead of asking the user to guess it.
+    // Returns { muR, R1, table } or null when no usable model data is present.
+    fitMuRFromFcf(fcfReflections, cell, wavelength, { min = 0, max = 6, steps = 25 } = {}) {
+        if (!Array.isArray(fcfReflections) || !fcfReflections.length) return null;
+        const refl = fcfReflections.filter(r =>
+            r && Number.isFinite(r.Fo2) && r.Fo2 > 0 && Number.isFinite(r.Fc) && r.Fc > 0);
+        if (refl.length < 20) return null;
+        const r1For = (muR) => {
+            let sfo = 0, sfofc = 0, sfc2 = 0;
+            const fo = refl.map(r => {
+                const st = SphericalAbsorption.sinTheta(r.h, r.k, r.l, cell, wavelength);
+                const T = SphericalAbsorption.transmissionTheta(muR, Math.asin(st));
+                const f = Math.sqrt(r.Fo2 / (T > 0 ? T : 1));
+                sfo += f; sfofc += f * r.Fc; sfc2 += r.Fc * r.Fc;
+                return f;
+            });
+            const k = sfc2 > 0 ? sfofc / sfc2 : 1;
+            let num = 0;
+            for (let i = 0; i < refl.length; i++) num += Math.abs(fo[i] - k * refl[i].Fc);
+            return sfo > 0 ? num / sfo : Infinity;
+        };
+        let best = { muR: 0, R1: r1For(0) };
+        const table = [];
+        for (let i = 0; i <= steps; i++) {
+            const muR = min + (max - min) * i / steps;
+            const R1 = r1For(muR);
+            table.push({ muR, R1 });
+            if (R1 < best.R1) best = { muR, R1 };
+        }
+        return { muR: best.muR, R1: best.R1, table };
+    }
+
+    // Build {h,k,l,Fo2,Fc} pairs for the muR fit: Fo^2 from the (original) HKL,
+    // Fc from the last SHELXL .fcf. Using the original, uncorrected Fo^2 keeps
+    // the fit meaningful even after a previous absorption correction.
+    buildAbsorptionFitData(hklText) {
+        const foMap = new Map();
+        for (const line of (hklText || '').split(/\r?\n/)) {
+            const t = line.trim();
+            if (!t || t.startsWith('!') || t.startsWith('#')) continue;
+            const p = t.split(/\s+/);
+            if (p.length < 5) continue;
+            const h = parseInt(p[0], 10), k = parseInt(p[1], 10), l = parseInt(p[2], 10), v = parseFloat(p[3]);
+            if ([h, k, l, v].some(x => !Number.isFinite(x))) continue;
+            foMap.set(`${h},${k},${l}`, v);
+        }
+        const out = [];
+        let fcf = null;
+        try { fcf = this.state.fcfRawContent ? this.state.parsers.fcf.parse(this.state.fcfRawContent) : null; } catch (e) { /* ignore */ }
+        if (fcf && fcf.reflections) {
+            for (const r of fcf.reflections) {
+                const fc = (r.Fc != null && r.Fc > 0) ? r.Fc
+                    : (r.Fc2 != null && r.Fc2 > 0 ? Math.sqrt(r.Fc2) : null);
+                if (!(fc > 0)) continue;
+                let fo2 = foMap.get(`${r.h},${r.k},${r.l}`);
+                if (fo2 == null) fo2 = foMap.get(`${-r.h},${-r.k},${-r.l}`);
+                if (fo2 > 0) out.push({ h: r.h, k: r.k, l: r.l, Fo2: fo2, Fc: fc });
             }
-            return rebuilt;
-        });
-        return { text: out.join('\n'), tmin, tmax, count };
+        }
+        return out;
     }
 
     // Compute and apply a spherical absorption correction to the loaded HKL
@@ -3022,15 +3100,9 @@ class WMOLApp {
         if (wavelength === null) { alert('No wavelength found on the CELL line.'); return; }
         if (!(cell.a > 0)) { alert('No unit-cell parameters found on the CELL line.'); return; }
 
-        let dims = sizeDims;
-        if (!dims || !dims.length) {
-            const ans = prompt('Crystal dimensions in mm (three numbers, or one for a sphere diameter):', '0.20 0.30 0.40');
-            if (ans === null) return;
-            dims = ans.trim().split(/[\s,]+/).map(Number).filter(x => isFinite(x) && x > 0);
-        }
-        if (!dims.length) { alert('No crystal dimensions given.'); return; }
-        const radiusMm = SphericalAbsorption.equivalentSphereRadius(dims);
-        const radiusA = radiusMm * 1e7; // mm -> A
+        // muR (and hence the sphere radius R) is resolved below, once the
+        // reflection source is known, so it can be fitted to the model when no
+        // SIZE instruction is present instead of asking the user to guess it.
 
         // Atoms per unit cell (from UNIT, else asymmetric unit x Z).
         const counts = {};
@@ -3078,16 +3150,16 @@ class WMOLApp {
         const volume = cell.a * cell.b * cell.c * Math.sqrt(Math.max(0, 1 - ca * ca - cb * cb - cg * cg + 2 * ca * cb * cg));
         let muCm = SphericalAbsorption.linearMu({ cellVolume: volume, wavelength, counts, fpp });
 
-        // Prefer the mu SHELXL already reported in the .lst when available.
+        // Prefer the mu SHELXL reported in the .lst, but only when it agrees
+        // with the composition value to within a factor of four: SHELXL derives
+        // it from the model's UNIT, which is occasionally wrong, and then the
+        // whole correction would be wildly off.
         const lstText = this.state.editors.lst ? this.state.editors.lst.getValue() : '';
         const muMatch = lstText && lstText.match(/Mu\s*=\s*([\d.]+)\s*mm-1/i);
         const lstMuCm = muMatch ? parseFloat(muMatch[1]) * 10 : null;
-        if (isFinite(lstMuCm) && lstMuCm > 0) muCm = lstMuCm;
-
-        const muR = muCm * radiusA * 1e-8;
-        const aStar = SphericalAbsorption.transmission(muR);
-        const muSource = (muMatch ? 'from .lst' : 'from composition + f"');
-        const sizeText = `${dims.join(' x ')} mm  ->  R = ${radiusMm.toFixed(4)} mm`;
+        const muSource = (isFinite(lstMuCm) && lstMuCm > 0 && muCm > 0 &&
+            lstMuCm > 0.25 * muCm && lstMuCm < 4 * muCm) ? 'from .lst' : 'from composition + f"';
+        if (muSource === 'from .lst') muCm = lstMuCm;
 
         // Reflection source. Prefer the HKL that belongs to the current project
         // (server-side) so we never correct/save a stale HKL from another
@@ -3116,6 +3188,51 @@ class WMOLApp {
             hklFromServer = false;
         }
 
+        // Always correct from the ORIGINAL, uncorrected reflections. Re-applying
+        // the correction to an already-corrected file multiplies 1/T in again
+        // and again, driving the intensities to enormous values (which then
+        // overflow the fixed SHELX columns) - that is what used to blow up the
+        // structure. Keep one pristine copy and always start from it.
+        let sourceText = hklText;
+        let originalName = null;
+        if (hklFromServer && hklSaveName && project) {
+            originalName = hklSaveName.replace(/\.[^.]+$/, '') + '.hkl.original';
+            try {
+                const orig = await this.apiGetProjectFile(project, originalName);
+                if (orig && orig.trim()) sourceText = orig;
+            } catch (e) {
+                try { await this.apiSaveProjectFile(project, originalName, hklText); } catch (e2) { /* ignore */ }
+            }
+        }
+
+        // Resolve muR. Use the measured crystal size when SIZE is present;
+        // otherwise fit muR to the current model so the user does not have to
+        // guess it, and only fall back to prompting when there is no model data.
+        let muR, radiusA, sizeText;
+        if (sizeDims && sizeDims.length) {
+            const radiusMm = SphericalAbsorption.equivalentSphereRadius(sizeDims);
+            radiusA = radiusMm * 1e7;
+            muR = muCm * radiusA * 1e-8;
+            sizeText = `${sizeDims.join(' x ')} mm  ->  R = ${radiusMm.toFixed(4)} mm`;
+        } else {
+            const fit = this.fitMuRFromFcf(this.buildAbsorptionFitData(sourceText), cell, wavelength);
+            if (fit && isFinite(fit.muR) && fit.muR > 0) {
+                muR = fit.muR;
+                radiusA = muCm > 0 ? muR / (muCm * 1e-8) : 0;
+                sizeText = `fitted to the model (best muR = ${muR.toFixed(3)}, R1 = ${fit.R1.toFixed(4)})`;
+            } else {
+                const ans = prompt('Could not fit muR from the model. Crystal dimensions in mm (three numbers, or one for a sphere diameter):', '0.20 0.30 0.40');
+                if (ans === null) return;
+                const dims = ans.trim().split(/[\s,]+/).map(Number).filter(x => isFinite(x) && x > 0);
+                if (!dims.length) { alert('No crystal dimensions given.'); return; }
+                const radiusMm = SphericalAbsorption.equivalentSphereRadius(dims);
+                radiusA = radiusMm * 1e7;
+                muR = muCm * radiusA * 1e-8;
+                sizeText = `${dims.join(' x ')} mm  ->  R = ${radiusMm.toFixed(4)} mm`;
+            }
+        }
+        const aStar = SphericalAbsorption.transmission(muR);
+
         const common = `Spherical absorption correction\n` +
             `lambda = ${wavelength} A (${energy.toFixed(0)} eV)\n` +
             `Crystal: ${sizeText}\n` +
@@ -3123,11 +3240,12 @@ class WMOLApp {
             `muR = ${muR.toFixed(4)},  A*(muR) = ${aStar.toFixed(4)}` +
             (muR > 10 ? '\nWARNING: muR > 10 — the spherical approximation is unreliable.' : '');
 
-        if (hklText) {
-            const res = this.correctHklText(hklText, { mu: muCm, radiusA, cell, wavelength, hklfType, matrix: hklMatrix });
+        if (sourceText) {
+            const res = this.correctHklText(sourceText, { mu: muCm, radiusA, cell, wavelength, hklfType, matrix: hklMatrix });
             if (!res.count) { alert(common + '\n\nNo reflections found in the HKL file.'); return; }
             const target = hklFromServer ? `project file ${hklSaveName}` : 'the loaded HKL';
-            if (!confirm(`${common}\nHKLF ${hklfType}${hklMatrix ? ' (reorientation matrix applied)' : ''}: ${res.count} reflections\nTmin = ${res.tmin.toFixed(4)}  Tmax = ${res.tmax.toFixed(4)}\n\nOverwrite ${target} with the corrected data?`)) return;
+            const origNote = originalName ? `\nAlways re-applied to the original (${originalName}); repeated corrections cannot compound.` : '';
+            if (!confirm(`${common}\nHKLF ${hklfType}${hklMatrix ? ' (reorientation matrix applied)' : ''}: ${res.count} reflections\nTmin = ${res.tmin.toFixed(4)}  Tmax = ${res.tmax.toFixed(4)}${origNote}\n\nOverwrite ${target} with the corrected data?`)) return;
             if (hklFromServer) {
                 // Explicit pre-correction backup into the project's backup/ dir.
                 try {
@@ -3148,7 +3266,7 @@ class WMOLApp {
             this.setPublishAbsorptionFields(res.tmin, res.tmax);
             const status = document.getElementById('status-bar-content');
             if (status) status.textContent = `Spherical absorption: mu=${(muCm / 10).toFixed(3)} mm-1, Tmin=${res.tmin.toFixed(4)}, Tmax=${res.tmax.toFixed(4)}`;
-            alert(`Corrected ${res.count} reflections.\nTmin = ${res.tmin.toFixed(4)}  Tmax = ${res.tmax.toFixed(4)}\n\nRe-run the refinement to see the effect. The original file was backed up server-side; do not run this again on the same file (it would correct it twice).`);
+            alert(`Corrected ${res.count} reflections.\nmuR = ${muR.toFixed(4)}   Tmin = ${res.tmin.toFixed(4)}  Tmax = ${res.tmax.toFixed(4)}\n\nRe-run the refinement. Re-applying always starts from the original reflection file, so it cannot be corrected twice.`);
             return;
         }
 

@@ -3050,9 +3050,10 @@ class WMOLApp {
         return out;
     }
 
-    // Compute and apply a spherical absorption correction to the loaded HKL
-    // (or, if there is no HKL, to the loaded FCF reflections).
-    async applySphericalAbsorption() {
+    // Parse the structure and reflection source, compute mu and locate the
+    // pristine (uncorrected) HKL. Shared by the manual and automatic absorption
+    // workflows. Returns a context object, or null after alerting.
+    async prepareAbsorptionContext() {
         const editor = this.state.editors.res;
         const structure = this.getStructureContent() || (editor && editor.getValue());
         if (!structure) { alert('Open a structure (.res/.ins) first.'); return; }
@@ -3205,78 +3206,127 @@ class WMOLApp {
             }
         }
 
-        // Resolve muR. Use the measured crystal size when SIZE is present;
-        // otherwise fit muR to the current model so the user does not have to
-        // guess it, and only fall back to prompting when there is no model data.
-        let muR, radiusA, sizeText;
-        if (sizeDims && sizeDims.length) {
-            const radiusMm = SphericalAbsorption.equivalentSphereRadius(sizeDims);
-            radiusA = radiusMm * 1e7;
-            muR = muCm * radiusA * 1e-8;
-            sizeText = `${sizeDims.join(' x ')} mm  ->  R = ${radiusMm.toFixed(4)} mm`;
+        return {
+            cell, wavelength, energy, muCm, muSource, project, hklSaveName, hklFromServer,
+            sourceText, originalName, hklfType, hklMatrix, sizeDims,
+        };
+    }
+
+    // Menu entry: open the spherical absorption dialog, offering BOTH a manual
+    // muR and an automatic fit to the current model.
+    async openAbsorptionDialog() {
+        const ctx = await this.prepareAbsorptionContext();
+        if (!ctx) return;
+        this.state.absorptionContext = ctx;
+
+        const murInput = document.getElementById('abs-mur-input');
+        const info = document.getElementById('abs-info');
+        const dims = ctx.sizeDims || [];
+        ['abs-dim-a', 'abs-dim-b', 'abs-dim-c'].forEach((id, i) => {
+            const el = document.getElementById(id);
+            if (el) el.value = dims[i] != null ? dims[i] : '';
+        });
+
+        // Default muR: from SIZE when present, otherwise fit to the model.
+        let muR = null, note = '';
+        if (dims.length) {
+            const R = SphericalAbsorption.equivalentSphereRadius(dims);
+            muR = ctx.muCm * R * 1e7 * 1e-8;
+            note = `from SIZE (R = ${R.toFixed(4)} mm)`;
         } else {
-            const fit = this.fitMuRFromFcf(this.buildAbsorptionFitData(sourceText), cell, wavelength);
-            if (fit && isFinite(fit.muR) && fit.muR > 0) {
-                muR = fit.muR;
-                radiusA = muCm > 0 ? muR / (muCm * 1e-8) : 0;
-                sizeText = `fitted to the model (best muR = ${muR.toFixed(3)}, R1 = ${fit.R1.toFixed(4)})`;
-            } else {
-                const ans = prompt('Could not fit muR from the model. Crystal dimensions in mm (three numbers, or one for a sphere diameter):', '0.20 0.30 0.40');
-                if (ans === null) return;
-                const dims = ans.trim().split(/[\s,]+/).map(Number).filter(x => isFinite(x) && x > 0);
-                if (!dims.length) { alert('No crystal dimensions given.'); return; }
-                const radiusMm = SphericalAbsorption.equivalentSphereRadius(dims);
-                radiusA = radiusMm * 1e7;
-                muR = muCm * radiusA * 1e-8;
-                sizeText = `${dims.join(' x ')} mm  ->  R = ${radiusMm.toFixed(4)} mm`;
-            }
+            const fit = this.fitMuRFromFcf(this.buildAbsorptionFitData(ctx.sourceText), ctx.cell, ctx.wavelength);
+            if (fit && isFinite(fit.muR)) { muR = fit.muR; note = `fitted to model (R1 = ${fit.R1.toFixed(4)})`; }
         }
+        if (murInput) murInput.value = muR != null ? muR.toFixed(3) : '';
+        if (info) {
+            info.textContent = `mu = ${(ctx.muCm / 10).toFixed(4)} mm-1 (${ctx.muSource})` +
+                (muR != null ? `;  A*(muR) = ${SphericalAbsorption.transmission(muR).toFixed(4)}` : '') +
+                (note ? `  -  ${note}` : '');
+        }
+
+        const modalEl = document.getElementById('absorptionModal');
+        if (modalEl) new bootstrap.Modal(modalEl).show();
+    }
+
+    // Fit muR to the current model and show the result in the dialog.
+    fitAbsorptionMuR() {
+        const ctx = this.state.absorptionContext;
+        if (!ctx) { alert('Open the absorption dialog first.'); return; }
+        const fit = this.fitMuRFromFcf(this.buildAbsorptionFitData(ctx.sourceText), ctx.cell, ctx.wavelength);
+        if (!fit || !isFinite(fit.muR)) {
+            alert('Could not fit muR: no Fc data in the loaded .fcf (refine the structure first).');
+            return;
+        }
+        const murInput = document.getElementById('abs-mur-input');
+        const info = document.getElementById('abs-info');
+        if (murInput) murInput.value = fit.muR.toFixed(3);
+        if (info) info.textContent = `mu = ${(ctx.muCm / 10).toFixed(4)} mm-1 (${ctx.muSource});  fitted muR = ${fit.muR.toFixed(3)}, R1 = ${fit.R1.toFixed(4)}`;
+    }
+
+    // Convert the dialog's crystal-size inputs into muR (manual route).
+    absorptionMuRFromSize() {
+        const ctx = this.state.absorptionContext;
+        if (!ctx) { alert('Open the absorption dialog first.'); return; }
+        const dims = ['abs-dim-a', 'abs-dim-b', 'abs-dim-c']
+            .map(id => parseFloat((document.getElementById(id) || {}).value))
+            .filter(x => isFinite(x) && x > 0);
+        if (!dims.length) { alert('Enter at least one crystal dimension (mm).'); return; }
+        const R = SphericalAbsorption.equivalentSphereRadius(dims);
+        const muR = ctx.muCm * R * 1e7 * 1e-8;
+        const murInput = document.getElementById('abs-mur-input');
+        const info = document.getElementById('abs-info');
+        if (murInput) murInput.value = muR.toFixed(3);
+        if (info) info.textContent = `mu = ${(ctx.muCm / 10).toFixed(4)} mm-1 (${ctx.muSource});  R = ${R.toFixed(4)} mm  ->  muR = ${muR.toFixed(3)}, A*(muR) = ${SphericalAbsorption.transmission(muR).toFixed(4)}`;
+    }
+
+    // Apply the correction with the muR currently shown in the dialog.
+    async performSphericalAbsorption() {
+        const ctx = this.state.absorptionContext;
+        if (!ctx) { alert('Open the absorption dialog first.'); return; }
+        const murInput = document.getElementById('abs-mur-input');
+        const muR = parseFloat(murInput && murInput.value);
+        if (!(muR >= 0) || !isFinite(muR)) { alert('Enter a valid muR (>= 0), or use "Fit from model".'); return; }
+        const radiusA = ctx.muCm > 0 ? muR / (ctx.muCm * 1e-8) : 0;
         const aStar = SphericalAbsorption.transmission(muR);
-
         const common = `Spherical absorption correction\n` +
-            `lambda = ${wavelength} A (${energy.toFixed(0)} eV)\n` +
-            `Crystal: ${sizeText}\n` +
-            `mu = ${(muCm / 10).toFixed(4)} mm-1 (${muSource})\n` +
+            `lambda = ${ctx.wavelength} A (${ctx.energy.toFixed(0)} eV)\n` +
+            `mu = ${(ctx.muCm / 10).toFixed(4)} mm-1 (${ctx.muSource})\n` +
             `muR = ${muR.toFixed(4)},  A*(muR) = ${aStar.toFixed(4)}` +
-            (muR > 10 ? '\nWARNING: muR > 10 — the spherical approximation is unreliable.' : '');
+            (muR > 10 ? '\nWARNING: muR > 10 - the spherical approximation is unreliable.' : '');
 
-        if (sourceText) {
-            const res = this.correctHklText(sourceText, { mu: muCm, radiusA, cell, wavelength, hklfType, matrix: hklMatrix });
+        const modalEl = document.getElementById('absorptionModal');
+        if (modalEl) { const m = bootstrap.Modal.getInstance(modalEl); if (m) m.hide(); }
+
+        if (ctx.sourceText) {
+            const res = this.correctHklText(ctx.sourceText, { mu: ctx.muCm, radiusA, cell: ctx.cell, wavelength: ctx.wavelength, hklfType: ctx.hklfType, matrix: ctx.hklMatrix });
             if (!res.count) { alert(common + '\n\nNo reflections found in the HKL file.'); return; }
-            const target = hklFromServer ? `project file ${hklSaveName}` : 'the loaded HKL';
-            const origNote = originalName ? `\nAlways re-applied to the original (${originalName}); repeated corrections cannot compound.` : '';
-            if (!confirm(`${common}\nHKLF ${hklfType}${hklMatrix ? ' (reorientation matrix applied)' : ''}: ${res.count} reflections\nTmin = ${res.tmin.toFixed(4)}  Tmax = ${res.tmax.toFixed(4)}${origNote}\n\nOverwrite ${target} with the corrected data?`)) return;
-            if (hklFromServer) {
-                // Explicit pre-correction backup into the project's backup/ dir.
+            const target = ctx.hklFromServer ? `project file ${ctx.hklSaveName}` : 'the loaded HKL';
+            const origNote = ctx.originalName ? `\nAlways re-applied to the original (${ctx.originalName}); repeated corrections cannot compound.` : '';
+            if (!confirm(`${common}\nHKLF ${ctx.hklfType}${ctx.hklMatrix ? ' (reorientation matrix applied)' : ''}: ${res.count} reflections\nTmin = ${res.tmin.toFixed(4)}  Tmax = ${res.tmax.toFixed(4)}${origNote}\n\nOverwrite ${target} with the corrected data?`)) return;
+            if (ctx.hklFromServer) {
+                // Pre-correction backup (the pristine original is kept separately).
+                try { await this.apiBackupProjectFile(ctx.project, ctx.hklSaveName, ctx.sourceText); } catch (e) { /* non-fatal */ }
                 try {
-                    await this.apiBackupProjectFile(project, hklSaveName, hklText);
-                } catch (e) {
-                    if (!confirm(`Could not write a backup (${e.message}). Continue and overwrite anyway?`)) return;
-                }
-                try {
-                    await this.apiSaveProjectFile(project, hklSaveName, res.text);
-                    this.state.hklName = hklSaveName;
-                } catch (e) {
-                    alert('Failed to save corrected HKL: ' + e.message);
-                    return;
-                }
+                    await this.apiSaveProjectFile(ctx.project, ctx.hklSaveName, res.text);
+                    this.state.hklName = ctx.hklSaveName;
+                } catch (e) { alert('Failed to save corrected HKL: ' + e.message); return; }
             } else {
                 this.state.hklContent = res.text;
             }
             this.setPublishAbsorptionFields(res.tmin, res.tmax);
             const status = document.getElementById('status-bar-content');
-            if (status) status.textContent = `Spherical absorption: mu=${(muCm / 10).toFixed(3)} mm-1, Tmin=${res.tmin.toFixed(4)}, Tmax=${res.tmax.toFixed(4)}`;
+            if (status) status.textContent = `Spherical absorption: mu=${(ctx.muCm / 10).toFixed(3)} mm-1, muR=${muR.toFixed(3)}, Tmin=${res.tmin.toFixed(4)}, Tmax=${res.tmax.toFixed(4)}`;
             alert(`Corrected ${res.count} reflections.\nmuR = ${muR.toFixed(4)}   Tmin = ${res.tmin.toFixed(4)}  Tmax = ${res.tmax.toFixed(4)}\n\nRe-run the refinement. Re-applying always starts from the original reflection file, so it cannot be corrected twice.`);
             return;
         }
 
-        // No HKL: correct the loaded FCF reflections and refresh the map.
+        // No HKL: correct the loaded FCF reflections (for the CIF Tmin/Tmax).
         if (this.state.fcfRawContent) {
             let fcf = null;
             try { fcf = this.state.parsers.fcf.parse(this.state.fcfRawContent); } catch (e) { /* ignore */ }
             if (fcf && fcf.reflections && fcf.reflections.length) {
-                const mapCell = fcf.cell && fcf.cell.a ? fcf.cell : cell;
-                const res = SphericalAbsorption.apply(fcf.reflections, { mu: muCm, radiusA, cell: mapCell, wavelength });
+                const mapCell = fcf.cell && fcf.cell.a ? fcf.cell : ctx.cell;
+                const res = SphericalAbsorption.apply(fcf.reflections, { mu: ctx.muCm, radiusA, cell: mapCell, wavelength: ctx.wavelength });
                 this.setPublishAbsorptionFields(res.Tmin, res.Tmax);
                 alert(`${common}\nFCF: ${res.reflections.length} reflections\nTmin = ${res.Tmin.toFixed(4)}  Tmax = ${res.Tmax.toFixed(4)}\n\n(T_min/T_max copied to the publish CIF fields. Load an .hkl to correct the data used for refinement.)`);
                 return;
@@ -5601,6 +5651,20 @@ class WMOLApp {
             });
         }
 
+        // Spherical Absorption Modal Logic (manual muR + automatic fit).
+        const btnAbsFit = document.getElementById('btn-abs-fit');
+        const btnAbsSize = document.getElementById('btn-abs-size');
+        const btnAbsApply = document.getElementById('btn-abs-apply');
+        const absMurInput = document.getElementById('abs-mur-input');
+        if (btnAbsFit) btnAbsFit.addEventListener('click', () => this.fitAbsorptionMuR());
+        if (btnAbsSize) btnAbsSize.addEventListener('click', () => this.absorptionMuRFromSize());
+        if (btnAbsApply) btnAbsApply.addEventListener('click', () => this.performSphericalAbsorption());
+        if (absMurInput) {
+            absMurInput.addEventListener('keypress', (e) => {
+                if (e.key === 'Enter') { e.preventDefault(); this.performSphericalAbsorption(); }
+            });
+        }
+
         // Cluster Molecules Modal Logic
         const btnClusterAnalyze = document.getElementById('btn-cluster-analyze');
         const btnClusterApply = document.getElementById('btn-cluster-apply');
@@ -6310,7 +6374,7 @@ class WMOLApp {
         bindMenu('menu-change-occ', 'changeOccupancy');
         bindMenu('menu-omit', 'omitError');
         bindMenu('menu-disp', 'calcDisp');
-        bindMenu('menu-absorb', 'applySphericalAbsorption');
+        bindMenu('menu-absorb', 'openAbsorptionDialog');
         bindMenu('menu-hfix', 'addHFIX');
         bindMenu('menu-sort', 'sortAtoms');
         bindMenu('tool-sort', 'sortAtoms'); // Toolbar

@@ -221,7 +221,10 @@ function runProgram(program, args, cwd, stdin, signal) {
 }
 
 // Run SHELXL once on <basename> in <projectDir>. Resolves with { code, stdout, stderr }.
-function runShelxl(projectDir, basename, signal) {
+// Every run is guaranteed an L.S. instruction: SHELXL does no refinement at all
+// without one, and its own .res output (fed back as the next .ins) has none.
+function runShelxl(projectDir, basename, signal, cycles) {
+    ensureLsInstruction(path.join(projectDir, `${basename}.ins`), cycles);
     return runProgram(PROGRAMS.shelxl, [basename], projectDir, undefined, signal);
 }
 
@@ -348,6 +351,30 @@ function updateWghtInstruction(filePath, a, b) {
     }
     if (done) fs.writeFileSync(filePath, lines.join('\n'), 'utf8');
     return done;
+}
+
+// Ensure the .ins contains an L.S. (least-squares) instruction. SHELXL only
+// refines when L.S. is present -- without it, it performs a single structure-
+// factor calculation and leaves the model untouched. SHELXL's own .res output
+// has no L.S. line, and the client feeds that .res back as the next .ins, so
+// every later "refine" silently did zero cycles and the structure never
+// changed. Returns true when an L.S. line was inserted.
+function ensureLsInstruction(filePath, cycles) {
+    if (!fs.existsSync(filePath)) return false;
+    const text = fs.readFileSync(filePath, 'utf8');
+    // Leave an L.S. instruction provided by the user / SHELXT / a .res alone.
+    if (/^[ \t]*L\.?S\.?[ \t]+\d+/im.test(text)) return false;
+    // Insert before HKLF (SHELX reads instructions before the atom list / data);
+    // fall back to before END, else append.
+    const lines = text.split(/\r?\n/);
+    let idx = lines.findIndex(l => /^[ \t]*HKLF\b/i.test(l));
+    if (idx === -1) idx = lines.findIndex(l => /^[ \t]*END\b/i.test(l));
+    const n = Math.max(10, parseInt(cycles, 10) || 10);
+    const lsLine = `L.S. ${n}`;
+    if (idx === -1) lines.push(lsLine);
+    else lines.splice(idx, 0, lsLine);
+    fs.writeFileSync(filePath, lines.join('\n'), 'utf8');
+    return true;
 }
 
 // Detect a fatal SHELXL error in its combined stdout/.lst output. Returns a
@@ -478,7 +505,7 @@ app.post('/refine', upload.fields([{ name: 'ins', maxCount: 1 }, { name: 'hkl', 
             let lastRec = null;
             for (let c = 1; c <= cycles; c++) {
                 console.log(`[${jobId}] WGHT cycle ${c}/${cycles}...`);
-                const r = await runShelxl(projectDir, basename);
+                const r = await runShelxl(projectDir, basename, undefined, cycles);
                 lastCode = r.code;
                 combinedStdout += (c > 1 ? '\n' : '') + `===== SHELXL WGHT cycle ${c} =====\n` + r.stdout;
                 combinedStderr += r.stderr;
@@ -503,7 +530,7 @@ app.post('/refine', upload.fields([{ name: 'ins', maxCount: 1 }, { name: 'hkl', 
         } else {
             // Regular refinement: a single SHELXL run on the uploaded .ins.
             console.log(`[${jobId}] Starting refinement for project '${basename}'...`);
-            const r = await runShelxl(projectDir, basename);
+            const r = await runShelxl(projectDir, basename, undefined, cycles);
             lastCode = r.code;
             combinedStdout = r.stdout;
             combinedStderr = r.stderr;
@@ -741,6 +768,11 @@ app.post('/run/:program', upload.any(), async (req, res) => {
                 promoteCompanionOutputs(projectDir, basename, ['.fab', '.fcf']);
             }
         } else {
+            // A manual SHELXL run also needs an L.S. instruction; models loaded
+            // from a SHELXL .res carry none.
+            if (programId === 'shelxl') {
+                ensureLsInstruction(path.join(projectDir, `${basename}.ins`), undefined);
+            }
             r = await runProgram(program, [basename], projectDir, program.stdin, controller.signal);
             // Promote any companion outputs the program wrote under suffixed
             // names (e.g. _sq.fab) to the canonical project files so the next
@@ -885,7 +917,7 @@ async function refineModel(projectDir, basename, weightCycles) {
     let r = null;
     let stdout = '', stderr = '';
     for (let c = 1; c <= cycles; c++) {
-        r = await runShelxl(projectDir, basename);
+        r = await runShelxl(projectDir, basename, undefined, cycles);
         stdout += (c > 1 ? '\n' : '') + `===== SHELXL cycle ${c} =====\n` + r.stdout;
         stderr += r.stderr;
         if (fs.existsSync(lstPath)) {

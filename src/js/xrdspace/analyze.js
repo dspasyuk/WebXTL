@@ -8,6 +8,7 @@
 
 import { canonicalRep, isInvariant, phase, parseOperation, directToReciprocal, opsToReciprocalMatrices, det3 } from './op-math.js';
 import { LAUE_BY_SYSTEM, LAUE_CRYSTAL_SYSTEM } from './laue.js';
+import { dSpacing, mergeReflections } from './merge.js';
 
 // --- crystal system from unit cell ---
 
@@ -222,22 +223,92 @@ export function detectCentering(reflections, sigThreshold = 5) {
 
 // --- systematic absences ---
 
+function isIdentityRotation(R) {
+    for (let i = 0; i < 3; i++) {
+        for (let j = 0; j < 3; j++) {
+            if (Math.abs(R[i][j] - (i === j ? 1 : 0)) > 1e-9) return false;
+        }
+    }
+    return true;
+}
+
+// Centering (Bravais) translations of a space group, read from its pure
+// translation operations (R = identity with a fractional translation). The
+// identity (0,0,0) is always included.
+function centeringVectors(sg) {
+    const vecs = [[0, 0, 0]];
+    for (const op of sg.s) {
+        const parsed = parseOperation(op);
+        if (!parsed || !isIdentityRotation(parsed.R)) continue;
+        if (parsed.t.some(v => Math.abs(v - Math.round(v)) > 1e-9)) vecs.push(parsed.t);
+    }
+    return vecs;
+}
+
+// Wrap a fractional coordinate into (-0.5, 0.5].
+function wrapFrac(x) {
+    let y = x - Math.floor(x);
+    if (y > 0.5) y -= 1;
+    return y;
+}
+
+// Denominator (order) of a fractional translation along an axis, e.g. 1/3 and
+// 2/3 both give 3. Returns 0 when no small denominator fits.
+function axisDenominator(x, max = 12, tol = 1e-6) {
+    for (let q = 1; q <= max; q++) {
+        if (Math.abs(x * q - Math.round(x * q)) < tol) return q;
+    }
+    return 0;
+}
+
 // Build the list of "conditional" ops for a space group: ops (R|t) with a
 // non-lattice translation, which impose reflection conditions.
+//
+// The translation is first reduced modulo the centering lattice, so that
+// centering-composed operations (e.g. R-centred groups in the hexagonal
+// setting) do not masquerade as screw axes / glides. Equivalent screw-axis
+// conditions that share an invariant axis and order are then deduplicated,
+// otherwise a 6-fold group would be credited twice for the same condition
+// carried by its 3- and 6-fold components.
 function conditionalOps(sg) {
+    const cvecs = centeringVectors(sg);
     const out = [];
     for (const op of sg.s) {
         const parsed = parseOperation(op);
         if (!parsed) continue;
-        const isLattice = parsed.t.every(v => Math.abs(v - Math.round(v)) < 1e-9);
-        if (isLattice) continue; // centering translations handled separately
+        let best = null;
+        let bestNorm = Infinity;
+        for (const c of cvecs) {
+            const r = parsed.t.map((v, i) => wrapFrac(v - c[i]));
+            const norm = r.reduce((s, v) => s + Math.abs(v), 0);
+            if (norm < bestNorm) { bestNorm = norm; best = r; }
+        }
+        if (!best) continue;
+        if (best.every(v => Math.abs(v) < 1e-6)) continue; // pure rotation/reflection
         out.push({
             M: directToReciprocal(parsed.R),
-            t: parsed.t,
+            t: best,
             opString: op,
         });
     }
-    return out;
+
+    // Deduplicate identical axial (screw) conditions.
+    const seen = new Set();
+    const deduped = [];
+    for (const o of out) {
+        const axes = invariantAxes(o.M);
+        let key = null;
+        if (axes.length === 1) {
+            const a = axes[0];
+            key = `ax${a}q${axisDenominator(o.t[a])}`;
+        }
+        if (key !== null) {
+            if (seen.has(key)) continue;
+            seen.add(key);
+        }
+        deduped.push(o);
+    }
+    return deduped;
 }
 
 // Which coordinate axes (0=h,1=k,2=l) are invariant under reciprocal matrix M
@@ -263,9 +334,18 @@ export function scoreSpaceGroup(sg, reflections, sigThreshold = 5, maxReflection
         return { violations: 0, confirmedOps: 0, confirmedAbsences: 0, nStrong: 0 };
     }
     const weakThreshold = 3;
+    // A systematic-absence condition is genuinely violated only when the
+    // forbidden reflections are, on average, as strong as the allowed ones.
+    // Comparing the mean intensity of the two sets (rather than counting
+    // individual strong forbidden reflections) makes the test robust to a
+    // single strong outlier among otherwise-absent forbidden reflections,
+    // which is common in real data and would otherwise reject the correct
+    // space group. A true violation has many strong forbidden reflections
+    // (ratio ~ 1); a true absence has them at background level (ratio ~ 0.01).
+    const ratioThreshold = 0.02;
     let nStrong = 0;
     const opResults = [];
-    for (let i = 0; i < conds.length; i++) opResults.push({ violations: 0, weakAbsent: 0, allowed: 0, checked: 0 });
+    for (let i = 0; i < conds.length; i++) opResults.push({ allowedI: 0, allowedN: 0, forbiddenI: 0, forbiddenN: 0, weakAbsent: 0, checked: 0 });
 
     const max = maxReflections ? Math.min(reflections.length, maxReflections) : reflections.length;
     // Index bounds of the data (for detecting reflections missing from it).
@@ -288,19 +368,31 @@ export function scoreSpaceGroup(sg, reflections, sigThreshold = 5, maxReflection
             opResults[c].checked++;
             if (Math.abs(phase(h, conds[c].t)) > 0.05) {
                 // Forbidden reflection (should be systematically absent).
-                if (sig > sigThreshold) opResults[c].violations++;
-                else if (sig > 0 && sig <= weakThreshold) opResults[c].weakAbsent++;
+                opResults[c].forbiddenI += Math.abs(r.I);
+                opResults[c].forbiddenN++;
+                if (sig > 0 && sig <= weakThreshold) opResults[c].weakAbsent++;
             } else {
-                opResults[c].allowed++;
+                opResults[c].allowedI += Math.abs(r.I);
+                opResults[c].allowedN++;
             }
         }
+    }
+
+    // Decide, per condition, whether it is violated: the forbidden reflections
+    // must be collectively as strong as the allowed ones (mean-intensity ratio
+    // above the threshold). A lone strong outlier keeps the ratio tiny.
+    for (const o of opResults) {
+        const meanA = o.allowedN ? o.allowedI / o.allowedN : 0;
+        const meanF = o.forbiddenN ? o.forbiddenI / o.forbiddenN : 0;
+        const ratio = meanA > 0 ? meanF / meanA : 0;
+        o.violated = o.forbiddenN > 0 && ratio >= ratioThreshold;
     }
 
     // Count forbidden reflections that are absent from the dataset entirely.
     // This is typical of pre-merged data (e.g. COD), where systematically
     // absent reflections are simply not listed.
     for (let c = 0; c < conds.length; c++) {
-        if (opResults[c].violations > 0) continue;
+        if (opResults[c].violated) continue;
         const axes = invariantAxes(conds[c].M);
         let missing = 0;
         if (axes.length === 1) {
@@ -317,6 +409,10 @@ export function scoreSpaceGroup(sg, reflections, sigThreshold = 5, maxReflection
             const a1 = axes[0], a2 = axes[1];
             const b1 = [[hmin, hmax], [kmin, kmax], [lmin, lmax]][a1];
             const b2 = [[hmin, hmax], [kmin, kmax], [lmin, lmax]][a2];
+            const span = (b1[1] - b1[0] + 1) * (b2[1] - b2[0] + 1);
+            // Guard against pathological index ranges (e.g. a powder pattern
+            // parsed as reflections) turning this into an O(N^2) blow-up.
+            if (span > 2000000) continue;
             for (let v1 = b1[0]; v1 <= b1[1]; v1++) {
                 for (let v2 = b2[0]; v2 <= b2[1]; v2++) {
                     if (v1 === 0 && v2 === 0) continue;
@@ -335,12 +431,12 @@ export function scoreSpaceGroup(sg, reflections, sigThreshold = 5, maxReflection
     let confirmedOps = 0;
     let confirmedAbsences = 0;
     for (const o of opResults) {
-        violations += o.violations;
-        // An op is confirmed when the data shows no significant violations, the
-        // axial/planar series is actually measured (allowed reflections present),
-        // and the forbidden reflections are either weak or absent from the data.
+        if (o.violated) { violations++; continue; }
+        // An op is confirmed when the condition holds, the axial/planar series
+        // is actually measured (allowed reflections present), and the forbidden
+        // reflections are either weak or absent from the data.
         const evidence = o.weakAbsent + (o.missing || 0);
-        if (o.violations === 0 && o.allowed >= 1 && evidence >= 2) {
+        if (o.allowedN >= 1 && evidence >= 2) {
             confirmedOps++;
             confirmedAbsences += evidence;
         }
@@ -414,25 +510,77 @@ export function laueClassOfSg(sg, laueGroups) {
 
 // --- intensity statistics (centrosymmetry) ---
 
+// Thresholds for the <|E^2 - 1|> score. The theoretical values are ~0.736
+// (acentric) and ~0.968 (centric); the gap keeps mediocre/poorly scaled data
+// indeterminate rather than forcing a wrong call.
+function classifyCentricity(score, n) {
+    return {
+        centric: score >= 0.90,
+        acentric: score <= 0.80,
+        score,
+        n,
+    };
+}
+
 // Wilson-style test using the mean of |E^2 - 1|, where E^2 = I / <I>.
 // Centrosymmetric crystals give <|E^2 - 1|> ~ 0.968, acentric ~ 0.736.
-// Returns { centric, acentric, score }.
-export function estimateCentricity(reflections) {
-    let sum = 0;
-    for (const r of reflections) sum += Math.abs(r.I);
-    const mean = sum / Math.max(1, reflections.length);
-    if (mean <= 0) return { centric: false, acentric: false, score: 0 };
-    let s = 0;
-    for (const r of reflections) {
-        const e2 = Math.abs(r.I) / mean;
-        s += Math.abs(e2 - 1);
+//
+// Intensities are normalized per resolution shell (a Wilson correction). Using
+// a single global mean instead is dominated by the strong low-angle reflections
+// and by the noise-dominated outer shells, and can give unphysical values (> 1).
+// Only positive intensities enter the statistic: negative measurements are
+// unphysical here and would otherwise blow up in the noise shells.
+// Returns { centric, acentric, score, n }.
+export function estimateCentricity(reflections, cell) {
+    const positive = reflections.filter(r => r.I > 0);
+    const data = positive.length ? positive : reflections;
+    if (!data.length) return { centric: false, acentric: false, score: 0, n: 0 };
+
+    // Wilson normalization: bin by 1/d^2 and divide each shell by its mean.
+    if (cell) {
+        const qs = new Array(data.length);
+        let qmin = Infinity, qmax = 0;
+        for (let i = 0; i < data.length; i++) {
+            const d = dSpacing(data[i].h, data[i].k, data[i].l, cell);
+            const q = d > 0 ? 1 / (d * d) : NaN;
+            qs[i] = q;
+            if (Number.isFinite(q)) {
+                if (q < qmin) qmin = q;
+                if (q > qmax) qmax = q;
+            }
+        }
+        if (qmax > qmin) {
+            const NB = 20;
+            const bins = Array.from({ length: NB }, () => []);
+            for (let i = 0; i < data.length; i++) {
+                const q = qs[i];
+                if (!Number.isFinite(q)) continue;
+                let b = Math.floor((q - qmin) / (qmax - qmin) * NB);
+                if (b < 0) b = 0;
+                if (b >= NB) b = NB - 1;
+                bins[b].push(data[i]);
+            }
+            let sum = 0, n = 0;
+            for (const arr of bins) {
+                if (arr.length < 5) continue;
+                let mean = 0;
+                for (const r of arr) mean += r.I;
+                mean /= arr.length;
+                if (mean <= 0) continue;
+                for (const r of arr) { sum += Math.abs(r.I / mean - 1); n++; }
+            }
+            if (n >= 100) return classifyCentricity(sum / n, n);
+        }
     }
-    const score = s / reflections.length;
-    return {
-        centric: score > 0.85,
-        acentric: score < 0.78,
-        score,
-    };
+
+    // Fallback: a single global mean (no cell, or a degenerate cell metric).
+    let s = 0;
+    for (const r of data) s += r.I;
+    const mean = s / data.length;
+    if (mean <= 0) return { centric: false, acentric: false, score: 0, n: data.length };
+    let dev = 0;
+    for (const r of data) dev += Math.abs(r.I / mean - 1);
+    return classifyCentricity(dev / data.length, data.length);
 }
 
 // A space group is chiral (Sohncke) when it contains no operation with a
@@ -511,16 +659,34 @@ export function analyzeSpaceGroup(sgData, reflections, cell, options = {}) {
     // Score candidates by systematic absences. Prefer fewest violations, then
     // the most confirmed absences (most restrictive compatible space group),
     // then the space group whose centrosymmetry matches the intensity data.
-    const centricity = estimateCentricity(reflections);
+    //
+    // The absence test is run on reflections MERGED under the selected Laue
+    // class, not on the raw (redundant) observations. With N-fold redundancy a
+    // single forbidden reflection contributes N independent measurements, so
+    // the chance that at least one exceeds the I/sigma threshold grows with N
+    // and the correct space group is wrongly rejected (its genuine absences
+    // look like violations). Merging collapses each orbit to one reflection
+    // with a combined sigma, so each unique reflection is counted once.
+    const scoreReflections = laue.ops
+        ? mergeReflections(reflections, laue.ops, cell).merged
+        : reflections;
+    const centricity = estimateCentricity(reflections, cell);
     const useCentricity = centricity.centric || centricity.acentric;
     for (const c of candidates) {
-        // Score every setting of this space group number (e.g. P 1 21/c 1 vs
-        // P 1 21/n 1 vs P 1 21/a 1 are all No. 14) and keep the best.
+        // Score every setting of this space group number that uses the detected
+        // Bravais centering (e.g. P 1 21/c 1 vs P 1 21/n 1) and keep the best.
+        // Settings with a different centering (e.g. I 1 2/a 1 for C 1 2/c 1)
+        // describe a different lattice and must not be allowed to rescue a
+        // candidate by fitting a centering the data does not have.
         const settings = [];
-        for (const g of sgData) if (g.id === c.id) settings.push(g);
+        for (const g of sgData) {
+            if (g.id !== c.id) continue;
+            if ((g.hm || ' ')[0].toUpperCase() !== centering) continue;
+            settings.push(g);
+        }
         let bestSc = null;
         for (const s of settings.length ? settings : [c]) {
-            const sc = scoreSpaceGroup(s, reflections, options.sigThreshold || 5);
+            const sc = scoreSpaceGroup(s, scoreReflections, options.sigThreshold || 5);
             if (!bestSc || sc.violations < bestSc.violations ||
                 (sc.violations === bestSc.violations && sc.confirmedOps > bestSc.confirmedOps)) {
                 bestSc = sc;

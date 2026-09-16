@@ -39,6 +39,15 @@ function parseXdsHeader(lines) {
         const key = line.slice(1, eq).trim();
         const val = line.slice(eq + 1).trim();
         header[key] = val;
+        // The FORMAT line packs the flags after the first key, e.g.
+        // "!FORMAT=XDS_ASCII    MERGE=FALSE    FRIEDEL'S_LAW=TRUE", so extract
+        // them explicitly or they would be swallowed into the FORMAT value.
+        if (key === 'FORMAT') {
+            const m = val.match(/\bMERGE\s*=\s*(\w+)/i);
+            if (m) header.MERGE = m[1];
+            const f = val.match(/FRIEDEL'?S_LAW\s*=\s*(\w+)/i);
+            if (f) header["FRIEDEL'S_LAW"] = f[1];
+        }
     }
     return header;
 }
@@ -54,7 +63,7 @@ function parseShelxLine(tokens) {
     const I = parseFloat(tokens[3]);
     const sig = parseFloat(tokens[4]);
     if (isNaN(I)) return null;
-    return { h, k, l, I, sig: isNaN(sig) ? 0 : sig };
+    return { h, k, l, I, sig: isNaN(sig) ? 0 : Math.abs(sig) };
 }
 
 // Parse an XDS_ASCII data line. Format (unmerged and merged):
@@ -69,7 +78,14 @@ function parseXdsLine(tokens) {
     const I = parseFloat(tokens[3]);
     const sig = parseFloat(tokens[4]);
     if (isNaN(I)) return null;
-    return { h, k, l, I, sig: isNaN(sig) ? 0 : sig };
+    // XDS flags observations that it rejected during scaling (e.g. overloaded
+    // or outlier reflections) with a NEGATIVE sigma. The magnitude is still a
+    // plausible standard deviation, but such observations must not enter the
+    // merge: the old code tested `sig > 0`, so a negative sigma fell into the
+    // "no sigma" branch and was given unit weight, letting a rejected outlier
+    // dominate the weighted mean (and producing absurdly small merged sigmas).
+    const rejected = !isNaN(sig) && sig < 0;
+    return { h, k, l, I, sig: isNaN(sig) ? 0 : Math.abs(sig), rejected };
 }
 
 // Parse a COD .hkl file: a CIF-style file with a `loop_` of `_refln_` keys.
@@ -155,17 +171,22 @@ function parseCodRefln(lines) {
 export function detectFormat(text) {
     const lines = text.split(/\r?\n/);
     let hasCodRefln = false;
+    let hasCifTag = false;
     let hasXds = false;
     let hasShelx = false;
     for (const raw of lines) {
         const line = raw.trim();
         if (!line || line.startsWith('#')) continue;
         if (line.startsWith('!')) hasXds = true;
+        if (line.startsWith('_')) hasCifTag = true;
         if (line.startsWith('_refln_')) hasCodRefln = true;
         const tokens = tokenize(line);
         if (tokens.length >= 5 && /^-?\d/.test(tokens[0])) hasShelx = true;
     }
     if (hasCodRefln) return HKL_FORMAT.COD;
+    // A CIF that has no single-crystal `_refln_` loop (e.g. a powder `_pd_`
+    // pattern whose numeric rows would otherwise look SHELX-like) is unusable.
+    if (hasCifTag) return HKL_FORMAT.UNKNOWN;
     if (hasXds) return HKL_FORMAT.XDS_ASCII;
     if (hasShelx) return HKL_FORMAT.SHELX;
     return HKL_FORMAT.UNKNOWN;
@@ -177,7 +198,7 @@ export function detectFormat(text) {
  *   format, title,
  *   cell: { a, b, c, alpha, beta, gamma } | null,
  *   spaceGroupNumber, spaceGroupName, wavelength, merge: bool, friedelsLaw,
- *   reflections: [{ h, k, l, I, sig }]
+ *   reflections: [{ h, k, l, I, sig, raw? }]  // raw = original XDS_ASCII line
  * }
  */
 export function parseHkl(text) {
@@ -211,14 +232,16 @@ export function parseHkl(text) {
         const wl = header['X-RAY_WAVELENGTH'] ?? header.XRAY_WAVELENGTH;
         if (wl) wavelength = parseFloat(wl);
         merge = (header.MERGE || '').toUpperCase() === 'TRUE';
-        friedelsLaw = (header.FRIEDELS_LAW || '').toUpperCase() === 'TRUE';
+        friedelsLaw = ((header["FRIEDEL'S_LAW"] ?? header.FRIEDELS_LAW) || '').toUpperCase() === 'TRUE';
 
         for (const raw of lines) {
             const line = raw.trim();
             if (!line || line.startsWith('!')) continue;
             const tokens = tokenize(line);
             const r = parseXdsLine(tokens);
-            if (r) reflections.push(r);
+            // Keep the original data record verbatim so an unmerged output can
+            // preserve the auxiliary XDS columns (XD, YD, ZD, RLP, PEAK, CORR, PSI).
+            if (r) { r.raw = line; reflections.push(r); }
         }
     } else if (format === HKL_FORMAT.SHELX) {
         for (const raw of lines) {

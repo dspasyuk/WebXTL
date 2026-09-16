@@ -14,7 +14,7 @@ import { fileURLToPath } from 'node:url';
 import { parseHkl } from './hkl-parser.js';
 import { buildLaueGroups, sgLaueClass } from './laue.js';
 import { analyzeSpaceGroup, crystalSystemFromCell, scoreSpaceGroup, isCentrosymmetric, laueClassOfSg, isSohncke, cellVolume } from './analyze.js';
-import { mergeReflections, computeMergeStatistics, writeShelxHkl, writeXdsAscii, buildMergingReport, dSpacing } from './merge.js';
+import { mergeReflections, computeMergeStatistics, resolutionShellStats, artifactReport, writeShelxHkl, writeXdsAscii, writeXdsAsciiUnmerged, buildMergingReport, dSpacing } from './merge.js';
 import { parseOperation } from './op-math.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -310,9 +310,9 @@ export function analyzeHkl(text, options = {}) {
     // (SHELX format + merged XDS_ASCII) plus a merging report.
     let merge = null;
     if (usedLaueOps) {
-        const m = mergeReflections(reflections, usedLaueOps, cell);
-        const stats = computeMergeStatistics(reflections, usedLaueOps, cell);
         const usedCentering = forcedSG ? centeringOf(forcedSG) : result.centering;
+        const m = mergeReflections(reflections, usedLaueOps, cell);
+        const stats = computeMergeStatistics(reflections, usedLaueOps, cell, { centering: usedCentering, quality: options.quality });
         const sgInfo = {
             hm: usedSG ? usedSG.hm : '?',
             id: usedSG ? usedSG.id : 0,
@@ -322,9 +322,22 @@ export function analyzeHkl(text, options = {}) {
         merge = {
             nUnique: m.nUnique,
             nObs: m.nObs,
+            // All observations, kept unmerged and labelled as such for programs
+            // (e.g. Phenix) that prefer the redundant measurements.
+            unmergedXdsAscii: writeXdsAsciiUnmerged(reflections, {
+                outputFile: options.unmergedOutput || 'structure_unmerged.hkl',
+                cell,
+                spaceGroupNumber: usedSG ? usedSG.id : undefined,
+                spaceGroupName: usedSG ? usedSG.hm : undefined,
+                wavelength: parsed.wavelength,
+                dmin: stats.dmin,
+                dmax: stats.dmax,
+                friedelsLaw: parsed.friedelsLaw,
+            }),
+            inputWasMerged: parsed.merge,
             shelxHkl: writeShelxHkl(m.merged),
             xdsAscii: writeXdsAscii(m.merged, {
-                outputFile: options.xdsOutput || 'structure_XDS.HKL',
+                outputFile: options.xdsOutput || 'structure_xds.hkl',
                 cell,
                 spaceGroupNumber: usedSG ? usedSG.id : undefined,
                 spaceGroupName: usedSG ? usedSG.hm : undefined,
@@ -335,6 +348,13 @@ export function analyzeHkl(text, options = {}) {
             statistics: stats,
             report: buildMergingReport(stats, sgInfo, cell),
         };
+        // Diagnostic quality tables for the report (per-resolution shells and
+        // artifact/twinning flags). Computed on request because they add a few
+        // full passes over the reflections.
+        if (options.quality) {
+            merge.shells = resolutionShellStats(reflections, usedLaueOps, cell, { centering: usedCentering });
+            merge.artifacts = artifactReport(reflections, usedLaueOps, cell);
+        }
         // Consistency of the (possibly forced) space group with the data.
         const fullSG = usedSG && usedSG.id ? sgData.find(g => g.id === usedSG.id) : null;
         if (fullSG) {
@@ -374,6 +394,10 @@ export function analyzeHkl(text, options = {}) {
             nUnique: merge.nUnique,
             nObs: merge.nObs,
             completeness: merge.statistics.completeness,
+            dIsig1: merge.statistics.dIsig1,
+            completenessIsig1: merge.statistics.completenessIsig1,
+            dCC30: merge.statistics.dCC30,
+            completenessCC30: merge.statistics.completenessCC30,
             rMerge: merge.statistics.rMerge,
             rPim: merge.statistics.rPim,
             meanIsig: merge.statistics.meanIsig,

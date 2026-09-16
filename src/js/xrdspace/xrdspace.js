@@ -14,7 +14,7 @@ import path from 'node:path';
 import readline from 'node:readline';
 import { fileURLToPath } from 'node:url';
 
-import { analyzeHkl } from './index.js';
+import { analyzeHkl, cellVolume } from './index.js';
 import { parseHkl } from './hkl-parser.js';
 import { searchByCell } from './cell-search.js';
 import { loadPdbLookup, validateSpaceGroupAgainstPdb } from './pdb-lookup.js';
@@ -33,8 +33,11 @@ Usage:
 Input / output:
   --hklin <file>      Input HKL file (XDS_ASCII or SHELX five-column format)
   --hklout <file>     Output merged HKL file, SHELX format (default: <input>_merged.hkl)
-  --xdsout <file>     Output merged HKL file, XDS_ASCII format (default: <input>_XDS.HKL)
-  --log <file>        Write all console output (the printed logs) to a file
+  --xdsout <file>     Output merged HKL file, XDS_ASCII format (default: <input>_xds.hkl)
+  --unmergedout <file>  Output UNMERGED HKL file, XDS_ASCII format (MERGE=FALSE),
+                        keeping all observations (default: <input>_unmerged.hkl)
+  --log <file>        Write the formatted report to <file>
+                      (default: xrdspace.log next to the input file)
 
 Unit-cell database search (no HKL file needed):
   --search            Search BOTH the Crystallography Open Database (COD) and the
@@ -87,82 +90,215 @@ Misc:
   --version, -v       Show version
 
 Bare POINTLESS-style keywords (hklin, hklout, spacegroup, cell, ...) are also
-accepted. Without --hklout/--xdsout the merged files are written next to the
-input file.
+accepted. Without --hklout/--xdsout/--unmergedout the output files are written
+next to the input file.
 `;
 
-function printAnalysis(result) {
-    if (!result.ok) {
-        console.error(`xrdspace: ${result.error}`);
-        if (result.error === 'NO_CELL') {
-            console.error('  The HKL file does not contain unit-cell parameters.');
-            console.error('  Run again with --cell "a b c alpha beta gamma" or provide them at the prompt.');
-        }
-        process.exit(1);
-    }
+const REPORT_WIDTH = 78;
 
+function fmtFixed(v, d, width) {
+    return (Number.isFinite(v) ? v.toFixed(d) : '?').padStart(width);
+}
+
+function reportSection(title) {
+    const bar = '-'.repeat(REPORT_WIDTH);
+    return [bar, `  ${title}`, bar];
+}
+
+function reportKv(label, value) {
+    return `  ${String(label).padEnd(20)}: ${value}`;
+}
+
+// Fixed-width table of per-resolution-shell statistics.
+function fmtShellTable(shells) {
+    const cols = [
+        ['d range (A)', 13, 'l'], ['#obs', 7, 'r'], ['#uniq', 7, 'r'],
+        ['Compl', 7, 'r'], ['Mult', 6, 'r'], ['Rmerge', 8, 'r'], ['Rmeas', 8, 'r'],
+        ['Rpim', 7, 'r'], ['<I/σ>', 7, 'r'], ['CC(1/2)', 8, 'r'], ['%neg', 6, 'r'],
+    ];
+    const cell = (v, w, a) => (a === 'l' ? String(v).padEnd(w) : String(v).padStart(w));
+    const pct = (v) => (v == null ? '-' : (v * 100).toFixed(1) + '%');
+    const out = ['  ' + cols.map(c => cell(c[0], c[1], c[2])).join(' ')];
+    for (const s of shells) {
+        const vals = [
+            `${s.dHi.toFixed(2)}-${s.dLo.toFixed(2)}`,
+            String(s.nObs), String(s.nUnique), pct(s.completeness),
+            s.multiplicity.toFixed(1), pct(s.rMerge), pct(s.rMeas), pct(s.rPim),
+            s.meanIsig.toFixed(1), s.ccHalf == null ? '-' : s.ccHalf.toFixed(3),
+            (s.negFrac * 100).toFixed(0) + '%',
+        ];
+        out.push('  ' + vals.map((v, i) => cell(v, cols[i][1], cols[i][2])).join(' '));
+    }
+    return out;
+}
+
+// Artifact / quality-flag block (outliers, ice rings, anisotropy).
+function fmtArtifacts(a) {
+    const L = [];
+    const o = a.outliers;
+    L.push(reportKv('Outliers |ΔI|/σ>10', `${o.count} / ${o.checked} (${(o.frac * 100).toFixed(2)}%)`));
+    if (o.top && o.top.length) {
+        L.push('     h    k    l      d(A)         I    sigma   |ΔI|/σ     n');
+        for (const x of o.top) {
+            L.push('   ' + String(x.h).padStart(4) + String(x.k).padStart(5) + String(x.l).padStart(5)
+                + x.d.toFixed(2).padStart(9) + x.I.toFixed(2).padStart(11) + x.sig.toFixed(2).padStart(9)
+                + x.dev.toFixed(1).padStart(8) + String(x.n).padStart(6));
+        }
+    }
+    L.push('');
+    L.push('  Ice-ring scan (mean |I| in a 0.05 A band vs local background):');
+    if (!a.iceRings.some(r => r.flagged)) L.push('    none detected');
+    for (const r of a.iceRings) {
+        L.push(`    ${r.d.toFixed(2)} A   n=${String(r.n).padStart(6)}   ratio ${r.ratio.toFixed(2)}${r.flagged ? '   <-- possible ice ring' : ''}`);
+    }
+    L.push('');
+    L.push('  Anisotropy (resolution at I/σ=2 by reciprocal axis):');
+    for (const ax of a.anisotropy) {
+        L.push(`    ${ax.axis.padEnd(3)}  ${ax.d != null ? ax.d.toFixed(2) + ' A' : '  -   '}   (n=${ax.n})`);
+    }
+    if (a.anisoRatio != null) {
+        L.push(`    max/min = ${a.anisoRatio.toFixed(2)}${a.anisotropic ? '   <-- anisotropic' : '   (isotropic)'}`);
+    }
+    return L;
+}
+
+// Build the consolidated, formatted analysis report. `opts` may provide:
+//   inputPath      - path of the input HKL file
+//   outputFiles    - [{ path, note }] files written by this run
+//   validationText - pre-formatted PDB validation block (--valid)
+//   notes          - extra single-line notes
+export function buildReport(result, opts = {}) {
     const s = result.summary;
-    console.log('');
-    console.log('==============================================');
-    console.log('  xrdspace  —  space-group determination');
-    console.log('==============================================');
-    console.log(`  Format             : ${s.format}`);
-    if (s.title) console.log(`  Title              : ${s.title}`);
-    console.log(`  Unit cell          : ${result.cell.a} ${result.cell.b} ${result.cell.c}  ${result.cell.alpha} ${result.cell.beta} ${result.cell.gamma}`);
-    if (s.wavelength) console.log(`  Wavelength         : ${s.wavelength}`);
-    console.log(`  Reflections        : ${s.nReflections}`);
-    console.log(`  Crystal system     : ${s.crystalSystem}${s.uniqueAxis ? ' (unique ' + s.uniqueAxis + ')' : ''}`);
-    console.log(`  Lattice centering  : ${s.centering}`);
-    console.log(`  Centrosymmetric    : ${s.centricity}  (<|E^2-1|> = ${s.centricityScore.toFixed(3)})`);
-    if (s.chiral) console.log('  Chiral restriction : on (Sohncke space groups only)');
-    console.log(`  Laue class         : ${s.laueClass}   R(sym) = ${(s.laueRSym * 100).toFixed(2)} %`);
-    console.log('----------------------------------------------');
-    console.log('  R(sym) by Laue class:');
-    for (const row of result.laueTable) {
-        const mark = row.chosen ? ' <--' : '';
-        console.log(`    ${row.name.padEnd(7)} order ${String(row.order).padStart(2)}  R(sym) = ${(row.rsym * 100).toFixed(2)} %${mark}`);
-    }
-    console.log('----------------------------------------------');
-    console.log('  Space-group candidates (systematic absences):');
-    if (!result.candidates.length) {
-        console.log('    (no candidates matched)');
-    } else {
-        for (const c of result.candidates.slice(0, 12)) {
-            const mark = c.id === result.best.id ? '  <-- best' : '';
-            console.log(`    ${String(c.id).padStart(3)}  ${c.hm.padEnd(20)} violations ${String(c.violations).padStart(4)}${mark}`);
-        }
-    }
+    const L = [];
+    const bar = '='.repeat(REPORT_WIDTH);
+    L.push(bar);
+    L.push('  xrdspace  —  space-group determination and reflection merging');
+    L.push(bar);
+    L.push('');
+    if (opts.inputPath) L.push(reportKv('Input file', opts.inputPath));
+    L.push(reportKv('Format', s.format));
+    if (s.title) L.push(reportKv('Title', s.title));
+    if (s.wavelength) L.push(reportKv('Wavelength', `${s.wavelength} A`));
+    L.push(reportKv('Reflections', String(s.nReflections)));
+    L.push('');
+
+    L.push(...reportSection('UNIT CELL'));
+    L.push('           a         b         c     alpha      beta     gamma');
+    L.push('  ' + [
+        fmtFixed(result.cell.a, 3, 9),
+        fmtFixed(result.cell.b, 3, 9),
+        fmtFixed(result.cell.c, 3, 9),
+        fmtFixed(result.cell.alpha, 3, 9),
+        fmtFixed(result.cell.beta, 3, 9),
+        fmtFixed(result.cell.gamma, 3, 9),
+    ].join(' '));
+    L.push(reportKv('Volume', `${Math.round(cellVolume(result.cell))} A^3`));
+    L.push(reportKv('Crystal system', `${s.crystalSystem}${s.uniqueAxis ? ' (unique ' + s.uniqueAxis + ')' : ''}`));
+    L.push(reportKv('Lattice centering', s.centering));
+    L.push('');
+
+    L.push(...reportSection('SPACE-GROUP DETERMINATION'));
     if (result.best) {
-        console.log('----------------------------------------------');
-        const forced = result.summary && result.summary.forced ? '  [forced]' : '';
-        console.log(`  Best space group  : ${result.best.hm}  (No. ${result.best.id})${forced}`);
-        if (result.determined && result.summary && result.summary.forced) {
-            console.log(`  (determined       : ${result.determined.hm} (No. ${result.determined.id}))`);
+        L.push(reportKv('Best space group', `${result.best.hm}  (No. ${result.best.id})${s.forced ? '  [forced]' : ''}`));
+        if (s.forced && result.determined && result.determined.id !== result.best.id) {
+            L.push(reportKv('Determined', `${result.determined.hm}  (No. ${result.determined.id})`));
         }
+    } else {
+        L.push(reportKv('Best space group', 'indeterminate'));
     }
+    L.push(reportKv('Laue class', `${s.laueClass}   R(sym) = ${(s.laueRSym * 100).toFixed(2)} %`));
+    L.push(reportKv('Centrosymmetric', `${s.centricity}   (<|E^2-1|> = ${s.centricityScore.toFixed(3)})`));
+    if (s.chiral) L.push(reportKv('Chiral restriction', 'on (Sohncke space groups only)'));
     if (result.merge && result.merge.consistency) {
         const c = result.merge.consistency;
-        const ok = c.violations === 0 ? 'consistent with data' : `INCONSISTENT (${c.violations} violation(s))`;
-        console.log(`  Data consistency  : ${ok}`);
+        L.push(reportKv('Data consistency', c.violations === 0 ? 'consistent with data' : `INCONSISTENT (${c.violations} violation(s))`));
     }
+    L.push('');
+    L.push('  R(sym) by Laue class:');
+    for (const row of result.laueTable) {
+        const mark = row.chosen ? '  <-- chosen' : '';
+        L.push(`    ${row.name.padEnd(7)} order ${String(row.order).padStart(2)}   R(sym) = ${(row.rsym * 100).toFixed(2).padStart(6)} %${mark}`);
+    }
+    L.push('');
+    L.push('  Space-group candidates (systematic absences):');
+    if (!result.candidates.length) {
+        L.push('    (none)');
+    } else {
+        L.push('    No.  HM                          violations');
+        for (const c of result.candidates.slice(0, 12)) {
+            const mark = result.best && c.id === result.best.id ? '  <-- best' : '';
+            L.push(`    ${String(c.id).padStart(3)}  ${c.hm.padEnd(28)} ${String(c.violations).padStart(4)}${mark}`);
+        }
+    }
+    L.push('');
+
     if (result.merge) {
-        console.log('----------------------------------------------');
-        console.log('  Merging statistics:');
         const st = result.merge.statistics;
-        console.log(`    Resolution range : ${st.dmax.toFixed(2)} - ${st.dmin.toFixed(2)} A`);
-        console.log(`    Observations     : ${st.nObs}`);
-        console.log(`    Unique           : ${st.nUnique}`);
-        console.log(`    Multiplicity     : ${st.meanMultiplicity.toFixed(1)}`);
-        console.log(`    Completeness     : ${(st.completeness * 100).toFixed(1)} %`);
-        console.log(`    R(merge)         : ${(st.rMerge * 100).toFixed(2)} %`);
-        console.log(`    R(pim)           : ${(st.rPim * 100).toFixed(2)} %`);
-        console.log(`    Mean I/sigma(I)  : ${st.meanIsig.toFixed(1)}`);
+        L.push(...reportSection('MERGING STATISTICS'));
+        L.push(reportKv('Resolution range', `${st.dmax.toFixed(2)} - ${st.dmin.toFixed(2)} A`));
+        if (st.dIsig1 != null) {
+            L.push(reportKv('Resolution (I/σ=1)', `${st.dIsig1.toFixed(2)} A`));
+        }
+        if (st.dCC30 != null) {
+            L.push(reportKv('Resolution (CC1/2)', `${st.dCC30.toFixed(2)} A   (CC1/2 = 0.30)`));
+        }
+        L.push(reportKv('Observations', String(st.nObs)));
+        L.push(reportKv('Unique reflections', String(st.nUnique)));
+        L.push(reportKv('Mean multiplicity', st.meanMultiplicity.toFixed(1)));
+        L.push(reportKv('Completeness', `${(st.completeness * 100).toFixed(1)} %`));
+        if (st.completenessIsig1 != null) {
+            L.push(reportKv('Completeness (I/σ=1)', `${(st.completenessIsig1 * 100).toFixed(1)} %`));
+        }
+        if (st.completenessCC30 != null) {
+            L.push(reportKv('Completeness (CC1/2)', `${(st.completenessCC30 * 100).toFixed(1)} %`));
+        }
+        L.push(reportKv('R(merge)', `${(st.rMerge * 100).toFixed(2)} %`));
+        L.push(reportKv('R(meas)', `${(st.rMeas * 100).toFixed(2)} %`));
+        L.push(reportKv('R(pim)', `${(st.rPim * 100).toFixed(2)} %`));
+        L.push(reportKv('Mean I/sigma(I)', `${st.meanIsig.toFixed(1)}${st.dCC30 != null ? '   (to CC1/2 = 0.30)' : ''}`));
+        L.push('');
     }
-    console.log('==============================================');
-    if (result.merge) {
-        console.log('');
-        console.log(result.merge.report);
+
+    if (result.merge && result.merge.shells && result.merge.shells.length) {
+        L.push(...reportSection('RESOLUTION SHELLS'));
+        L.push(...fmtShellTable(result.merge.shells));
+        L.push('');
     }
+
+    if (result.merge && result.merge.artifacts) {
+        L.push(...reportSection('QUALITY FLAGS / ARTIFACTS'));
+        L.push(...fmtArtifacts(result.merge.artifacts));
+        L.push('');
+    }
+
+    if (opts.validationText) {
+        L.push(...reportSection('PDB SPACE-GROUP VALIDATION'));
+        L.push(opts.validationText);
+        L.push('');
+    }
+
+    if (opts.outputFiles && opts.outputFiles.length) {
+        L.push(...reportSection('OUTPUT FILES'));
+        for (const f of opts.outputFiles) {
+            L.push(`  ${f.path}${f.note ? '  ' + f.note : ''}`);
+        }
+        if (opts.notes) for (const n of opts.notes) L.push(`  note: ${n}`);
+        L.push('');
+    }
+
+    L.push(bar);
+    return L.join('\n') + '\n';
+}
+
+// Print an analysis failure and stop. Kept separate from the report so the
+// NO_CELL hint is shown before the process exits.
+function abortAnalysis(result) {
+    console.error(`xrdspace: ${result.error}`);
+    if (result.error === 'NO_CELL') {
+        console.error('  The HKL file does not contain unit-cell parameters.');
+        console.error('  Run again with --cell "a b c alpha beta gamma" or provide them at the prompt.');
+    }
+    process.exit(1);
 }
 
 async function promptCell() {
@@ -175,7 +311,7 @@ async function promptCell() {
 
 // Number of values consumed by each bare keyword / option.
     const N_VALUES = {
-        hklin: 1, hklout: 1, xdsout: 1, spacegroup: 1, sg: 1, laue: 1, sigthreshold: 1,
+        hklin: 1, hklout: 1, xdsout: 1, unmergedout: 1, spacegroup: 1, sg: 1, laue: 1, sigthreshold: 1,
         sfac: 1, formula: 1, log: 1, tol: 1, 'tol-angle': 1, limit: 1, 'pdb-table': 1,
         cell: 6, resolution: 2,
         chiral: 0, 'no-chiral': 0, nochiral: 0, valid: 0,
@@ -231,7 +367,7 @@ function parseSfacInput(input) {
 }
 
 function parseArgs(argv) {
-    const args = { hklin: null, hklout: null, xdsout: null, cell: null, spaceGroup: null, laue: null, resolution: null, sigThreshold: 5, sfac: null, log: null, chiral: null, help: false, version: false, search: null, codsearch: false, pdbsearch: false, tol: 1.0, tolAngle: 1.5, limit: 20, valid: false, pdbTable: null };
+    const args = { hklin: null, hklout: null, xdsout: null, unmergedOut: null, cell: null, spaceGroup: null, laue: null, resolution: null, sigThreshold: 5, sfac: null, log: null, chiral: null, help: false, version: false, search: null, codsearch: false, pdbsearch: false, tol: 1.0, tolAngle: 1.5, limit: 20, valid: false, pdbTable: null };
     let i = 0;
     while (i < argv.length) {
         const a = argv[i];
@@ -248,7 +384,7 @@ function parseArgs(argv) {
             if (key === 'tolerance' || key === 'tol') key = 'tol';
             if (key === 'tolerance-angle' || key === 'tolangle' || key === 'tolang') key = 'tol-angle';
             n = N_VALUES[key] !== undefined ? N_VALUES[key] : 1;
-        } else if (a === 'hklin' || a === 'hklout' || a === 'xdsout' || a === 'spacegroup' || a === 'laue'
+        } else if (a === 'hklin' || a === 'hklout' || a === 'xdsout' || a === 'unmergedout' || a === 'spacegroup' || a === 'laue'
             || a === 'cell' || a === 'resolution' || a === 'sigthreshold' || a === 'sfac' || a === 'formula' || a === 'log'
             || a === 'chiral' || a === 'no-chiral' || a === 'nochiral'
             || a === 'search' || a === 'codsearch' || a === 'pdbsearch' || a === 'tol' || a === 'tol-angle' || a === 'limit'
@@ -289,6 +425,7 @@ function parseArgs(argv) {
         if (key === 'hklin') args.hklin = vals[0];
         else if (key === 'hklout') args.hklout = vals[0];
         else if (key === 'xdsout') args.xdsout = vals[0];
+        else if (key === 'unmergedout') args.unmergedOut = vals[0];
         else if (key === 'log') args.log = vals[0];
         else if (key === 'valid') args.valid = true;
         else if (key === 'pdb-table') args.pdbTable = vals[0];
@@ -330,29 +467,6 @@ function parseArgs(argv) {
         i++;
     }
     return args;
-}
-
-// Tee console output into a log file (synchronous writes so it is flushed even
-// on process.exit). The log file is truncated at the start of the run.
-function setupLogFile(logPath) {
-    const resolved = path.resolve(logPath);
-    try { fs.writeFileSync(resolved, ''); } catch (e) { /* ignore */ }
-    const origLog = console.log;
-    const origErr = console.error;
-    const fmt = (args) => {
-        let out = '';
-        for (let i = 0; i < args.length; i++) {
-            if (i) out += ' ';
-            out += typeof args[i] === 'string' ? args[i] : JSON.stringify(args[i]);
-        }
-        return out;
-    };
-    const write = (line) => {
-        try { fs.appendFileSync(resolved, line + '\n', 'utf8'); } catch (e) { /* ignore */ }
-    };
-    console.log = (...args) => { origLog(...args); write(fmt(args)); };
-    console.error = (...args) => { origErr(...args); write(fmt(args)); };
-    return resolved;
 }
 
 function fmtCell(cell, decimals = 2) {
@@ -425,47 +539,42 @@ function printCellSearch(queryCell, args) {
     console.log('==============================================');
 }
 
-function printPdbValidation(v, opts) {
-    console.log('');
-    console.log('==============================================');
-    console.log('  xrdspace  —  PDB space-group validation');
-    console.log('==============================================');
-    console.log(`  Lookup table      : ${opts.tablePath} (${opts.tableCount} entries)`);
-    console.log(`  Query cell        : ${fmtCell(v.queryCell, 3)}`);
-    console.log(`  Tolerances        : ${opts.tol}% lengths, ${opts.tolAngle} deg angles`);
+// Format the offline-PDB space-group validation as report body lines.
+function formatPdbValidation(v, opts) {
+    const L = [];
+    L.push(reportKv('Lookup table', `${opts.tablePath} (${opts.tableCount} entries)`));
+    L.push(reportKv('Query cell', fmtCell(v.queryCell, 3)));
+    L.push(reportKv('Tolerances', `${opts.tol}% lengths, ${opts.tolAngle} deg angles`));
     if (v.total === 0) {
-        console.log('  Matching PDB      : none');
-        console.log('----------------------------------------------');
-        console.log('  Result            : INDETERMINATE');
-        console.log('    No PDB structure matches this cell. (widen --tol / --tol-angle,');
-        console.log('    or rebuild the table with  node scripts/build-pdb-table.js)');
-        console.log('==============================================');
-        return;
+        L.push(reportKv('Matching PDB', 'none'));
+        L.push(reportKv('Result', 'INDETERMINATE'));
+        L.push('    No PDB structure matches this cell. (widen --tol / --tol-angle,');
+        L.push('    or rebuild the table with  node scripts/build-pdb-table.js)');
+        return L.join('\n');
     }
-    console.log(`  Matching PDB      : ${v.total} entr${v.total === 1 ? 'y' : 'ies'}`);
-    console.log(`  PDB space groups  : ${v.sgCounts.map(s => s.hm ? `${s.hm} (No. ${s.sg}) x${s.count}` : `No. ${s.sg} x${s.count}`).join(', ')}`);
+    L.push(reportKv('Matching PDB', `${v.total} entr${v.total === 1 ? 'y' : 'ies'}`));
+    L.push(reportKv('PDB space groups', v.sgCounts.map(s => s.hm ? `${s.hm} (No. ${s.sg}) x${s.count}` : `No. ${s.sg} x${s.count}`).join(', ')));
     const shown = v.matches.slice(0, 5);
     if (shown.length) {
-        console.log(`  Matches           : ${shown.map(m => `${m.id} (No. ${m.sg})`).join(', ')}${v.total > shown.length ? `, +${v.total - shown.length} more` : ''}`);
+        L.push(reportKv('Matches', `${shown.map(m => `${m.id} (No. ${m.sg})`).join(', ')}${v.total > shown.length ? `, +${v.total - shown.length} more` : ''}`));
     }
-    console.log('----------------------------------------------');
     const d = opts.determined;
-    console.log(`  Determined SG     : ${d ? `${d.hm} (No. ${d.id})` : `No. ${v.determinedSg}`}`);
-    if (opts.forcedHm) console.log(`  (forced for output: ${opts.forcedHm})`);
+    L.push(reportKv('Determined SG', d ? `${d.hm} (No. ${d.id})` : `No. ${v.determinedSg}`));
+    if (opts.forcedHm) L.push(`  (forced for output: ${opts.forcedHm})`);
     if (v.verdict === 'verified') {
-        console.log('  Result            : VERIFIED');
-        console.log(`    PDB assigns this cell to space group No. ${v.determinedSg}.`);
+        L.push(reportKv('Result', 'VERIFIED'));
+        L.push(`    PDB assigns this cell to space group No. ${v.determinedSg}.`);
     } else if (v.verdict === 'enantiomorph') {
-        console.log('  Result            : AMBIGUOUS (enantiomorph)');
-        console.log(`    PDB assigns this cell to No. ${v.enantiomorphOf}; Nos. ${v.determinedSg} and ${v.enantiomorphOf} are`);
-        console.log('    an enantiomorphic pair and cannot be told apart from the diffraction');
-        console.log('    pattern alone (only by anomalous scattering).');
+        L.push(reportKv('Result', 'AMBIGUOUS (enantiomorph)'));
+        L.push(`    PDB assigns this cell to No. ${v.enantiomorphOf}; Nos. ${v.determinedSg} and ${v.enantiomorphOf} are`);
+        L.push('    an enantiomorphic pair and cannot be told apart from the diffraction');
+        L.push('    pattern alone (only by anomalous scattering).');
     } else if (v.verdict === 'mismatch') {
-        console.log('  Result            : MISMATCH');
-        console.log(`    PDB structures with this cell are in space group${v.sgNumbers.length === 1 ? '' : 's'} ${v.sgNumbers.join(', ')};`);
-        console.log(`    No. ${v.determinedSg} was determined. Check the indexing / space-group assignment.`);
+        L.push(reportKv('Result', 'MISMATCH'));
+        L.push(`    PDB structures with this cell are in space group${v.sgNumbers.length === 1 ? '' : 's'} ${v.sgNumbers.join(', ')};`);
+        L.push(`    No. ${v.determinedSg} was determined. Check the indexing / space-group assignment.`);
     }
-    console.log('==============================================');
+    return L.join('\n');
 }
 
 async function main() {
@@ -479,10 +588,6 @@ async function main() {
     }
     if (args.help) { console.log(HELP); process.exit(0); }
     if (args.version) { console.log(`xrdspace version ${VERSION}`); process.exit(0); }
-    if (args.log) {
-        const logPath = setupLogFile(args.log);
-        process.stdout.write(`Logging to: ${logPath}\n`);
-    }
 
     // Unit-cell database search mode: --search / --codsearch / --pdbsearch.
     if (args.search || args.codsearch || args.pdbsearch) {
@@ -552,11 +657,18 @@ async function main() {
         sfac: sfacOpts.sfac,
         unit: sfacOpts.unit,
         chiral: args.chiral,
+        quality: true,
     });
-    printAnalysis(result);
+    if (!result.ok) abortAnalysis(result);
+
+    const dir = path.dirname(filePath);
+    const base = path.parse(filePath).name;
+    const outputFiles = [];
+    const notes = [];
 
     // Validate the determined space group against the offline PDB lookup table.
-    if (result.ok && args.valid) {
+    let validationText = null;
+    if (args.valid) {
         const tablePath = path.resolve(args.pdbTable || path.join(__dirname, '..', 'data', 'pdb-cells.json'));
         if (!fs.existsSync(tablePath)) {
             console.error(`xrdspace: PDB lookup table not found: ${tablePath}`);
@@ -573,7 +685,7 @@ async function main() {
             tolLen: args.tol / 100,
             tolAng: args.tolAngle,
         });
-        printPdbValidation(v, {
+        validationText = formatPdbValidation(v, {
             tablePath,
             tableCount: table.entries.length,
             tol: args.tol,
@@ -584,28 +696,44 @@ async function main() {
     }
 
     // Write the corrected/merged HKL files.
-    if (result.ok && result.merge) {
-        const dir = path.dirname(filePath);
-        const base = path.parse(filePath).name;
+    if (result.merge) {
         const shelxPath = path.resolve(args.hklout || path.join(dir, base + '_merged.hkl'));
-        const xdsPath = path.resolve(args.xdsout || path.join(dir, base + '_XDS.HKL'));
+        const xdsPath = path.resolve(args.xdsout || path.join(dir, base + '_xds.hkl'));
+        const unmergedPath = path.resolve(args.unmergedOut || path.join(dir, base + '_unmerged.hkl'));
         const insPath = path.resolve(args.hklout ? args.hklout.replace(/\.hkl$/i, '.ins') : path.join(dir, base + '_merged.ins'));
         // Keep the XDS header OUTPUT_FILE consistent with the written file.
         result.merge.xdsAscii = result.merge.xdsAscii.replace(
             /!OUTPUT_FILE=[^\n]*/,
             '!OUTPUT_FILE=' + path.basename(xdsPath));
+        result.merge.unmergedXdsAscii = result.merge.unmergedXdsAscii.replace(
+            /!OUTPUT_FILE=[^\n]*/,
+            '!OUTPUT_FILE=' + path.basename(unmergedPath));
         fs.writeFileSync(shelxPath, result.merge.shelxHkl, 'utf8');
         fs.writeFileSync(xdsPath, result.merge.xdsAscii, 'utf8');
+        fs.writeFileSync(unmergedPath, result.merge.unmergedXdsAscii, 'utf8');
+        outputFiles.push({ path: shelxPath, note: '(SHELX format, ready for SHELXD/SHELXT)' });
+        outputFiles.push({ path: xdsPath, note: '(merged XDS_ASCII)' });
+        outputFiles.push({ path: unmergedPath, note: '(UNMERGED XDS_ASCII, all observations)' });
+        if (result.merge.inputWasMerged) {
+            notes.push('the input was already merged, so the unmerged file has no redundant observations');
+        }
         if (result.merge.shelxIns) {
             fs.writeFileSync(insPath, result.merge.shelxIns, 'utf8');
-        }
-        console.log(`Merged HKL written to:`);
-        console.log(`  ${shelxPath}  (SHELX format, ready for SHELXD/SHELXT)`);
-        console.log(`  ${xdsPath}  (merged XDS_ASCII)`);
-        if (result.merge.shelxIns) {
-            console.log(`  ${insPath}  (SHELX instructions, matching cell/space group)`);
+            outputFiles.push({ path: insPath, note: '(SHELX instructions, matching cell/space group)' });
         }
     }
+
+    // Consolidated report: printed to the console and saved next to the input.
+    const logPath = path.resolve(args.log || path.join(dir, 'xrdspace.log'));
+    outputFiles.push({ path: logPath, note: '(this report)' });
+    const report = buildReport(result, {
+        inputPath: filePath,
+        outputFiles,
+        validationText,
+        notes,
+    });
+    fs.writeFileSync(logPath, report, 'utf8');
+    process.stdout.write('\n' + report);
 }
 
 main();

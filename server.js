@@ -224,7 +224,9 @@ function runProgram(program, args, cwd, stdin, signal) {
 // Every run is guaranteed an L.S. instruction: SHELXL does no refinement at all
 // without one, and its own .res output (fed back as the next .ins) has none.
 function runShelxl(projectDir, basename, signal, cycles) {
-    ensureLsInstruction(path.join(projectDir, `${basename}.ins`), cycles);
+    const insPath = path.join(projectDir, `${basename}.ins`);
+    ensureLsInstruction(insPath, cycles);
+    ensureMapInstructions(insPath);
     return runProgram(PROGRAMS.shelxl, [basename], projectDir, undefined, signal);
 }
 
@@ -373,6 +375,26 @@ function ensureLsInstruction(filePath, cycles) {
     const lsLine = `L.S. ${n}`;
     if (idx === -1) lines.push(lsLine);
     else lines.splice(idx, 0, lsLine);
+    fs.writeFileSync(filePath, lines.join('\n'), 'utf8');
+    return true;
+}
+
+// Ensure the .ins asks SHELXL for a difference map. SHELXL only searches for
+// and writes the residual-density (Q) peaks to the .res when an FMAP
+// instruction is present; without it the refinement finishes normally but the
+// editor shows no Q peaks. A PLAN count is added too (default 20 peaks).
+function ensureMapInstructions(filePath) {
+    if (!fs.existsSync(filePath)) return false;
+    const lines = fs.readFileSync(filePath, 'utf8').split(/\r?\n/);
+    const has = (re) => lines.some(l => re.test(l));
+    const add = [];
+    if (!has(/^[ \t]*FMAP\b/i)) add.push('FMAP 2');
+    if (!has(/^[ \t]*PLAN\b/i)) add.push('PLAN 20');
+    if (!add.length) return false;
+    let idx = lines.findIndex(l => /^[ \t]*HKLF\b/i.test(l));
+    if (idx === -1) idx = lines.findIndex(l => /^[ \t]*END\b/i.test(l));
+    if (idx === -1) lines.push(...add);
+    else lines.splice(idx, 0, ...add);
     fs.writeFileSync(filePath, lines.join('\n'), 'utf8');
     return true;
 }
@@ -768,10 +790,12 @@ app.post('/run/:program', upload.any(), async (req, res) => {
                 promoteCompanionOutputs(projectDir, basename, ['.fab', '.fcf']);
             }
         } else {
-            // A manual SHELXL run also needs an L.S. instruction; models loaded
-            // from a SHELXL .res carry none.
+            // A manual SHELXL run also needs an L.S. instruction and an FMAP
+            // (for Q peaks); models loaded from a SHELXL .res often lack both.
             if (programId === 'shelxl') {
-                ensureLsInstruction(path.join(projectDir, `${basename}.ins`), undefined);
+                const insPath = path.join(projectDir, `${basename}.ins`);
+                ensureLsInstruction(insPath, undefined);
+                ensureMapInstructions(insPath);
             }
             r = await runProgram(program, [basename], projectDir, program.stdin, controller.signal);
             // Promote any companion outputs the program wrote under suffixed

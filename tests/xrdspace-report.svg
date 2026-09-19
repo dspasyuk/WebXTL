@@ -1,71 +1,54 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="900" height="420" viewBox="0 0 900 420" font-family="sans-serif">
 <rect x="0" y="0" width="900" height="420" fill="#ffffff"/>
-<text x="450" y="24" text-anchor="middle" font-size="18" font-weight="bold" fill="#222">xrdspace space-group determination vs COD (2000 structures)</text>
+<text x="450" y="24" text-anchor="middle" font-size="18" font-weight="bold" fill="#222">xrdspace space-group determination vs COD (3 structures)</text>
 <line x1="90" y1="350" x2="870" y2="350" stroke="#e5e5e5" stroke-width="1"/>
 <text x="82" y="354" text-anchor="end" font-size="11" fill="#666">0</text>
 <line x1="90" y1="272.5" x2="870" y2="272.5" stroke="#e5e5e5" stroke-width="1"/>
-<text x="82" y="276.5" text-anchor="end" font-size="11" fill="#666">156</text>
+<text x="82" y="276.5" text-anchor="end" font-size="11" fill="#666">1</text>
 <line x1="90" y1="195" x2="870" y2="195" stroke="#e5e5e5" stroke-width="1"/>
-<text x="82" y="199" text-anchor="end" font-size="11" fill="#666">313</text>
+<text x="82" y="199" text-anchor="end" font-size="11" fill="#666">1</text>
 <line x1="90" y1="117.5" x2="870" y2="117.5" stroke="#e5e5e5" stroke-width="1"/>
-<text x="82" y="121.5" text-anchor="end" font-size="11" fill="#666">469</text>
+<text x="82" y="121.5" text-anchor="end" font-size="11" fill="#666">2</text>
 <line x1="90" y1="40" x2="870" y2="40" stroke="#e5e5e5" stroke-width="1"/>
-<text x="82" y="44" text-anchor="end" font-size="11" fill="#666">625</text>
-<rect x="108.9" y="339.6" width="24.5" height="10.4" fill="#2e9e4f" rx="2"/>
-<text x="121.2" y="335.6" text-anchor="middle" font-size="11" fill="#333" font-weight="bold">21</text>
-<rect x="135.5" y="340.6" width="24.5" height="9.4" fill="#e0a800" rx="2"/>
-<text x="147.7" y="336.6" text-anchor="middle" font-size="11" fill="#333" font-weight="bold">19</text>
+<text x="82" y="44" text-anchor="end" font-size="11" fill="#666">2</text>
+<rect x="108.9" y="195.0" width="24.5" height="155.0" fill="#2e9e4f" rx="2"/>
+<text x="121.2" y="191.0" text-anchor="middle" font-size="11" fill="#333" font-weight="bold">1</text>
+<rect x="135.5" y="195.0" width="24.5" height="155.0" fill="#e0a800" rx="2"/>
+<text x="147.7" y="191.0" text-anchor="middle" font-size="11" fill="#333" font-weight="bold">1</text>
 <rect x="162.0" y="350.0" width="24.5" height="0.0" fill="#d64545" rx="2"/>
 <text x="164.7" y="366" text-anchor="middle" font-size="12" fill="#333">Triclinic</text>
-<text x="164.7" y="381" text-anchor="middle" font-size="11" fill="#888">n=40</text>
-<rect x="220.4" y="299.4" width="24.5" height="50.6" fill="#2e9e4f" rx="2"/>
-<text x="232.6" y="295.4" text-anchor="middle" font-size="11" fill="#333" font-weight="bold">102</text>
-<rect x="246.9" y="302.4" width="24.5" height="47.6" fill="#e0a800" rx="2"/>
-<text x="259.1" y="298.4" text-anchor="middle" font-size="11" fill="#333" font-weight="bold">96</text>
-<rect x="273.4" y="348.5" width="24.5" height="1.5" fill="#d64545" rx="2"/>
-<text x="285.7" y="344.5" text-anchor="middle" font-size="11" fill="#333" font-weight="bold">3</text>
+<text x="164.7" y="381" text-anchor="middle" font-size="11" fill="#888">n=2</text>
+<rect x="220.4" y="195.0" width="24.5" height="155.0" fill="#2e9e4f" rx="2"/>
+<text x="232.6" y="191.0" text-anchor="middle" font-size="11" fill="#333" font-weight="bold">1</text>
+<rect x="246.9" y="350.0" width="24.5" height="0.0" fill="#e0a800" rx="2"/>
+<rect x="273.4" y="350.0" width="24.5" height="0.0" fill="#d64545" rx="2"/>
 <text x="276.1" y="366" text-anchor="middle" font-size="12" fill="#333">Monoclinic</text>
-<text x="276.1" y="381" text-anchor="middle" font-size="11" fill="#888">n=202</text>
-<rect x="331.8" y="177.9" width="24.5" height="172.1" fill="#2e9e4f" rx="2"/>
-<text x="344.1" y="173.9" text-anchor="middle" font-size="11" fill="#333" font-weight="bold">347</text>
-<rect x="358.3" y="221.0" width="24.5" height="129.0" fill="#e0a800" rx="2"/>
-<text x="370.6" y="217.0" text-anchor="middle" font-size="11" fill="#333" font-weight="bold">260</text>
-<rect x="384.8" y="346.5" width="24.5" height="3.5" fill="#d64545" rx="2"/>
-<text x="397.1" y="342.5" text-anchor="middle" font-size="11" fill="#333" font-weight="bold">7</text>
+<text x="276.1" y="381" text-anchor="middle" font-size="11" fill="#888">n=1</text>
+<rect x="331.8" y="350.0" width="24.5" height="0.0" fill="#2e9e4f" rx="2"/>
+<rect x="358.3" y="350.0" width="24.5" height="0.0" fill="#e0a800" rx="2"/>
+<rect x="384.8" y="350.0" width="24.5" height="0.0" fill="#d64545" rx="2"/>
 <text x="387.5" y="366" text-anchor="middle" font-size="12" fill="#333">Orthorhombic</text>
-<text x="387.5" y="381" text-anchor="middle" font-size="11" fill="#888">n=625</text>
-<rect x="443.2" y="266.7" width="24.5" height="83.3" fill="#2e9e4f" rx="2"/>
-<text x="455.5" y="262.7" text-anchor="middle" font-size="11" fill="#333" font-weight="bold">168</text>
-<rect x="469.7" y="225.0" width="24.5" height="125.0" fill="#e0a800" rx="2"/>
-<text x="482.0" y="221.0" text-anchor="middle" font-size="11" fill="#333" font-weight="bold">252</text>
-<rect x="496.3" y="340.6" width="24.5" height="9.4" fill="#d64545" rx="2"/>
-<text x="508.5" y="336.6" text-anchor="middle" font-size="11" fill="#333" font-weight="bold">19</text>
+<text x="387.5" y="381" text-anchor="middle" font-size="11" fill="#888">n=0</text>
+<rect x="443.2" y="350.0" width="24.5" height="0.0" fill="#2e9e4f" rx="2"/>
+<rect x="469.7" y="350.0" width="24.5" height="0.0" fill="#e0a800" rx="2"/>
+<rect x="496.3" y="350.0" width="24.5" height="0.0" fill="#d64545" rx="2"/>
 <text x="498.9" y="366" text-anchor="middle" font-size="12" fill="#333">Tetragonal</text>
-<text x="498.9" y="381" text-anchor="middle" font-size="11" fill="#888">n=451</text>
-<rect x="554.7" y="328.7" width="24.5" height="21.3" fill="#2e9e4f" rx="2"/>
-<text x="566.9" y="324.7" text-anchor="middle" font-size="11" fill="#333" font-weight="bold">43</text>
-<rect x="581.2" y="227.0" width="24.5" height="123.0" fill="#e0a800" rx="2"/>
-<text x="593.4" y="223.0" text-anchor="middle" font-size="11" fill="#333" font-weight="bold">248</text>
-<rect x="607.7" y="348.0" width="24.5" height="2.0" fill="#d64545" rx="2"/>
-<text x="619.9" y="344.0" text-anchor="middle" font-size="11" fill="#333" font-weight="bold">4</text>
+<text x="498.9" y="381" text-anchor="middle" font-size="11" fill="#888">n=0</text>
+<rect x="554.7" y="350.0" width="24.5" height="0.0" fill="#2e9e4f" rx="2"/>
+<rect x="581.2" y="350.0" width="24.5" height="0.0" fill="#e0a800" rx="2"/>
+<rect x="607.7" y="350.0" width="24.5" height="0.0" fill="#d64545" rx="2"/>
 <text x="610.4" y="366" text-anchor="middle" font-size="12" fill="#333">Trigonal</text>
-<text x="610.4" y="381" text-anchor="middle" font-size="11" fill="#888">n=296</text>
-<rect x="666.1" y="307.8" width="24.5" height="42.2" fill="#2e9e4f" rx="2"/>
-<text x="678.3" y="303.8" text-anchor="middle" font-size="11" fill="#333" font-weight="bold">85</text>
-<rect x="692.6" y="305.9" width="24.5" height="44.1" fill="#e0a800" rx="2"/>
-<text x="704.9" y="301.9" text-anchor="middle" font-size="11" fill="#333" font-weight="bold">89</text>
-<rect x="719.1" y="349.5" width="24.5" height="0.5" fill="#d64545" rx="2"/>
-<text x="731.4" y="345.5" text-anchor="middle" font-size="11" fill="#333" font-weight="bold">1</text>
+<text x="610.4" y="381" text-anchor="middle" font-size="11" fill="#888">n=0</text>
+<rect x="666.1" y="350.0" width="24.5" height="0.0" fill="#2e9e4f" rx="2"/>
+<rect x="692.6" y="350.0" width="24.5" height="0.0" fill="#e0a800" rx="2"/>
+<rect x="719.1" y="350.0" width="24.5" height="0.0" fill="#d64545" rx="2"/>
 <text x="721.8" y="366" text-anchor="middle" font-size="12" fill="#333">Hexagonal</text>
-<text x="721.8" y="381" text-anchor="middle" font-size="11" fill="#888">n=186</text>
-<rect x="777.5" y="294.9" width="24.5" height="55.1" fill="#2e9e4f" rx="2"/>
-<text x="789.8" y="290.9" text-anchor="middle" font-size="11" fill="#333" font-weight="bold">111</text>
-<rect x="804.0" y="311.8" width="24.5" height="38.2" fill="#e0a800" rx="2"/>
-<text x="816.3" y="307.8" text-anchor="middle" font-size="11" fill="#333" font-weight="bold">77</text>
-<rect x="830.5" y="345.0" width="24.5" height="5.0" fill="#d64545" rx="2"/>
-<text x="842.8" y="341.0" text-anchor="middle" font-size="11" fill="#333" font-weight="bold">10</text>
+<text x="721.8" y="381" text-anchor="middle" font-size="11" fill="#888">n=0</text>
+<rect x="777.5" y="350.0" width="24.5" height="0.0" fill="#2e9e4f" rx="2"/>
+<rect x="804.0" y="350.0" width="24.5" height="0.0" fill="#e0a800" rx="2"/>
+<rect x="830.5" y="350.0" width="24.5" height="0.0" fill="#d64545" rx="2"/>
 <text x="833.2" y="366" text-anchor="middle" font-size="12" fill="#333">Cubic</text>
-<text x="833.2" y="381" text-anchor="middle" font-size="11" fill="#888">n=200</text>
+<text x="833.2" y="381" text-anchor="middle" font-size="11" fill="#888">n=0</text>
 <rect x="360" y="388" width="14" height="14" fill="#2e9e4f" rx="2"/>
 <text x="380" y="399" font-size="12" fill="#333">PASS</text>
 <rect x="490" y="388" width="14" height="14" fill="#e0a800" rx="2"/>

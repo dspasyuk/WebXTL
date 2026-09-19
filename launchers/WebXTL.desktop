@@ -1,0 +1,17 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=WebXTL
+GenericName=Crystallography Toolbox
+Comment=Web-Based Shelxl Viewer and Editor
+Exec=__APP_DIR__/launchers/WebXTL.sh
+Icon=__APP_DIR__/images/3d_res-view.png
+Path=__APP_DIR__
+Terminal=false
+Categories=Education;Science;Chemistry;
+StartupNotify=false
+Actions=Stop;
+
+[Desktop Action Stop]
+Name=Stop WebXTL Server
+Exec=__APP_DIR__/launchers/WebXTL-stop.sh

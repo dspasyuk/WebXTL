@@ -49,9 +49,9 @@ export const AI_PROVIDERS = {
         label: 'Ollama (local)',
         kind: 'openai',
         baseUrl: 'http://localhost:11434/v1',
-        model: 'qwen3:8b',
+        model: 'qwen3.8:27b-q8_0',
         needsKey: false,
-        hint: 'Local server. No API key required. Start Ollama with OLLAMA_ORIGINS=* to allow browser requests.'
+        hint: 'Local server. No API key required. Start Ollama with OLLAMA_ORIGINS=* to allow browser requests. Use "Load models" to list installed tags.'
     },
     lmstudio: {
         label: 'LM Studio (local)',
@@ -112,10 +112,13 @@ function parseOpenAISSE(payload, onDelta, onReasoning) {
     }
     if (delta.content) {
         onDelta(delta.content);
-    } else if (delta.reasoning_content && onReasoning) {
-        // DeepSeek (and other reasoning models) stream the chain of thought in
-        // reasoning_content before the final answer.
-        onReasoning(delta.reasoning_content);
+    }
+    // DeepSeek streams the chain of thought in `reasoning_content`; Ollama (and
+    // some other OpenAI-compatible servers) use `reasoning`. Accept both, and
+    // handle them independently of content since a chunk may carry either.
+    const thinking = delta.reasoning_content || delta.reasoning;
+    if (thinking && onReasoning) {
+        onReasoning(thinking);
     }
 }
 
@@ -293,6 +296,42 @@ export async function aiChat(settings, messages, { onDelta = null, onReasoning =
         return anthropicChat(baseUrl, settings, messages, opts);
     }
     return openaiChat(baseUrl, settings, messages, opts);
+}
+
+// List the models an endpoint currently serves. Works for any OpenAI-compatible
+// server (Ollama, LM Studio, OpenAI, DeepSeek, ...) via GET {baseUrl}/models,
+// and also accepts Ollama's native {models:[{name}]} shape as a fallback.
+// Returns a sorted array of model id strings; throws Error with a readable
+// message when the endpoint cannot be reached.
+export async function listModels(settings, baseUrlOverride = null) {
+    const baseUrl = (baseUrlOverride || settings.baseUrl || '').replace(/\/+$/, '');
+    if (!baseUrl) throw new Error('AI endpoint (base URL) is not configured. Open AI Settings.');
+
+    const headers = {};
+    if (settings.apiKey) headers.Authorization = `Bearer ${settings.apiKey}`;
+
+    let res;
+    try {
+        res = await fetch(`${baseUrl}/models`, { headers });
+    } catch (e) {
+        throw new Error(`Could not reach the model list at ${baseUrl}/models. ${e.message}`);
+    }
+    if (!res.ok) {
+        throw new Error(`Could not list models (HTTP ${res.status}). ${res.statusText}`);
+    }
+    let json;
+    try {
+        json = await res.json();
+    } catch (e) {
+        throw new Error('Model list response was not valid JSON.');
+    }
+    const rows = Array.isArray(json.data) ? json.data
+        : Array.isArray(json.models) ? json.models
+        : [];
+    return rows
+        .map(m => (typeof m === 'string' ? m : (m && (m.id || m.name)) || ''))
+        .filter(Boolean)
+        .sort((a, b) => a.localeCompare(b));
 }
 
 // ---------------------------------------------------------------------------

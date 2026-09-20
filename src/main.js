@@ -25,7 +25,7 @@ import { RealSpaceRefiner } from './js/compute/RealSpaceRefiner.js';
 import { MoleculeCluster } from './js/compute/MoleculeCluster.js';
 import { FRAGMENTS } from './js/compute/FragmentLibrary.js';
 import { SphericalAbsorption } from './js/compute/SphericalAbsorption.js';
-import { AI_PROVIDERS, DEFAULT_AI_SETTINGS, aiSettingsFromProvider, aiChat, aiChatAgent } from './js/ai/client.js';
+import { AI_PROVIDERS, DEFAULT_AI_SETTINGS, aiSettingsFromProvider, aiChat, aiChatAgent, listModels } from './js/ai/client.js';
 import { AI_PROMPTS } from './js/ai/prompts.js';
 import './js/ace/mode-cif.js';
 import './js/ace/mode-shelx.js';
@@ -259,6 +259,8 @@ class WMOLApp {
                     hint.textContent = AI_PROVIDERS[providerSel.value]
                         ? AI_PROVIDERS[providerSel.value].hint : '';
                 }
+                const p = AI_PROVIDERS[providerSel.value];
+                if (p && p.needsKey === false) this.loadAIModels();
             });
         }
         const promptSel = document.getElementById('ai-prompt-type');
@@ -294,6 +296,11 @@ class WMOLApp {
                 const modal = bootstrap.Modal.getInstance(modalEl);
                 if (modal) modal.hide();
             });
+        }
+
+        const btnLoadModels = document.getElementById('btn-ai-load-models');
+        if (btnLoadModels) {
+            btnLoadModels.addEventListener('click', () => this.loadAIModels());
         }
 
         // Show/hide the DeepSeek-only options whenever the provider changes.
@@ -350,8 +357,56 @@ class WMOLApp {
         const hint = document.getElementById('ai-provider-hint');
         if (hint) hint.textContent = AI_PROVIDERS[s.provider] ? AI_PROVIDERS[s.provider].hint : '';
         if (typeof this._updateDeepseekOptions === 'function') this._updateDeepseekOptions();
+        const provDef = AI_PROVIDERS[s.provider];
+        if (provDef && provDef.needsKey === false) this.loadAIModels();
         const modal = new bootstrap.Modal(modalEl);
         modal.show();
+    }
+
+    // Fetch the model ids served by the configured endpoint (Ollama, LM Studio,
+    // OpenAI, ...) and offer them in the Model datalist. Safe to call often; the
+    // button lets the user refresh after adding/removing models server-side.
+    async loadAIModels() {
+        const baseEl = document.getElementById('ai-base-url');
+        const listEl = document.getElementById('ai-model-list');
+        const hintEl = document.getElementById('ai-model-hint');
+        const modelEl = document.getElementById('ai-model');
+        const btn = document.getElementById('btn-ai-load-models');
+        if (!baseEl) return;
+
+        const provider = (document.getElementById('ai-provider') || {}).value || 'custom';
+        const settings = {
+            provider,
+            kind: (AI_PROVIDERS[provider] || {}).kind || 'openai',
+            baseUrl: baseEl.value || '',
+            apiKey: (document.getElementById('ai-apikey') || {}).value || ''
+        };
+
+        if (btn) btn.disabled = true;
+        if (hintEl) hintEl.textContent = 'Loading models…';
+        try {
+            const models = await listModels(settings);
+            if (listEl) {
+                listEl.innerHTML = '';
+                for (const m of models) {
+                    const opt = document.createElement('option');
+                    opt.value = m;
+                    listEl.appendChild(opt);
+                }
+            }
+            if (hintEl) {
+                hintEl.textContent = models.length
+                    ? `${models.length} model(s) available. Pick one or type your own.`
+                    : 'No models reported by this endpoint.';
+            }
+            if (modelEl && models.length && !models.includes(modelEl.value)) {
+                modelEl.value = models[0];
+            }
+        } catch (e) {
+            if (hintEl) hintEl.textContent = e.message;
+        } finally {
+            if (btn) btn.disabled = false;
+        }
     }
 
     // Build the text/metadata context sent to the model.
@@ -1924,7 +1979,24 @@ class WMOLApp {
         return res.json();
     }
 
-    openPublishModal(mode) {
+    // Saved "Create Publish CIF" parameters (template choices + form fields).
+    async apiGetPublishSettings(project) {
+        const res = await fetch(this.getApiUrl(`/projects/${project}/publish-settings`));
+        if (!res.ok) throw new Error('Failed to read publish settings');
+        return res.json();
+    }
+
+    async apiSavePublishSettings(project, settings) {
+        const res = await fetch(this.getApiUrl(`/projects/${project}/publish-settings`), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(settings || {}),
+        });
+        if (!res.ok) throw new Error('Failed to save publish settings');
+        return res.json();
+    }
+
+    async openPublishModal(mode) {
         const project = this.state.currentProject;
         if (!project) {
             alert('Please open a server project first (Project > Project Manager).');
@@ -1934,10 +2006,14 @@ class WMOLApp {
         const info = document.getElementById('publish-project-info');
         info.textContent = `Project: ${project}`;
         document.getElementById('publish-status').innerHTML = '';
+        this.state.publishProject = project;
+        this._publishMode = mode;
 
         // Show/hide sections based on mode
         const cifSection = document.getElementById('publish-cif-section');
         const reportSection = document.getElementById('publish-report-section');
+        const checkcifSection = document.getElementById('publish-checkcif-section');
+        const checkcifDivider = document.getElementById('publish-checkcif-divider');
         const btnCif = document.getElementById('btn-generate-cif');
         const btnReport = document.getElementById('btn-generate-report');
         const title = document.getElementById('publishModalTitle');
@@ -1946,19 +2022,32 @@ class WMOLApp {
             title.textContent = 'Create Publish CIF';
             cifSection.style.display = '';
             reportSection.style.display = 'none';
+            checkcifSection.style.display = '';
+            checkcifDivider.style.display = '';
             btnCif.style.display = '';
             btnReport.style.display = 'none';
-            this.loadPublishTemplates();
-            this.loadPublishFormValues(project);
         } else {
             title.textContent = 'Crystallographic Report (DOCX)';
             cifSection.style.display = 'none';
             reportSection.style.display = '';
+            checkcifSection.style.display = 'none';
+            checkcifDivider.style.display = 'none';
             btnCif.style.display = 'none';
             btnReport.style.display = '';
         }
 
         new bootstrap.Modal(modalEl).show();
+
+        if (mode === 'cif') {
+            // Templates first so saved template choices can be applied; then the
+            // CIF defaults overlaid with any server-saved parameter values.
+            try {
+                await this.loadPublishTemplates();
+                await this.loadPublishFormValues(project);
+            } catch (e) {
+                console.error('Failed to pre-fill publish form:', e);
+            }
+        }
     }
 
     async loadPublishTemplates() {
@@ -1980,37 +2069,62 @@ class WMOLApp {
         }
     }
 
-    // Pre-fill the Crystal Setting / Other Settings form from the project CIF.
+    // Pre-fill the Crystal Setting / Other Settings form from the project CIF,
+    // then overlay the parameters previously saved on the server for the project.
     async loadPublishFormValues(project) {
-        try {
-            const v = await this.apiGetCifValues(project);
-            const set = (id, val) => {
-                const el = document.getElementById(id);
-                if (el && val) el.value = val;
-            };
-            // Selects: only set if the option exists.
-            const setSel = (id, val) => {
-                const el = document.getElementById(id);
-                if (!el || !val) return;
-                const match = Array.from(el.options).some(o => o.value === val);
-                if (match) el.value = val;
-            };
-            setSel('pub-colour', v._exptl_crystal_colour);
-            setSel('pub-shape', v._exptl_crystal_description);
-            set('pub-moiety', v._chemical_formula_moiety);
-            set('pub-size-min', v._exptl_crystal_size_min);
-            set('pub-size-mid', v._exptl_crystal_size_mid);
-            set('pub-size-max', v._exptl_crystal_size_max);
-            setSel('pub-cell-setting', v._symmetry_cell_setting);
-            set('pub-space-hm', v._symmetry_space_group_name_Hall);
-            set('pub-z', v._cell_formula_units_Z);
-            set('pub-abs-min', v._exptl_absorpt_correction_T_min);
-            set('pub-abs-max', v._exptl_absorpt_correction_T_max);
-            set('pub-temp', v._diffrn_ambient_temperature);
-            setSel('pub-h-treat', v._refine_ls_hydrogen_treatment);
-        } catch (e) {
-            console.error('Failed to pre-fill publish form:', e);
-        }
+        const v = await this.apiGetCifValues(project).catch(() => ({}));
+        const saved = await this.apiGetPublishSettings(project).catch(() => ({}));
+
+        // CIF-derived defaults first, then server-saved values take precedence.
+        this.applyPublishValues(v, false);
+        if (saved && saved.values) this.applyPublishValues(saved.values, true);
+
+        // Restore saved template choices (the option list is already loaded).
+        // Resetting to '' when nothing is saved avoids leaking a choice made in
+        // another project.
+        const userEl = document.getElementById('pub-user-template');
+        const devEl = document.getElementById('pub-device-template');
+        if (userEl) userEl.value = (saved && saved.userTemplate) || '';
+        if (devEl) devEl.value = (saved && saved.deviceTemplate) || '';
+    }
+
+    // Apply CIF key/values to the publish form. With allowClear=true every key
+    // present in `v` is written (including empty strings, so a saved blank clears
+    // a CIF default); otherwise only non-empty defaults are set.
+    applyPublishValues(v, allowClear) {
+        if (!v) return;
+        const has = (k) => Object.prototype.hasOwnProperty.call(v, k);
+        const set = (id, key) => {
+            if (allowClear && !has(key)) return;
+            const el = document.getElementById(id);
+            if (!el) return;
+            const val = v[key];
+            if (allowClear) el.value = (val == null ? '' : String(val));
+            else if (val) el.value = val;
+        };
+        const setSel = (id, key) => {
+            if (allowClear && !has(key)) return;
+            const el = document.getElementById(id);
+            if (!el) return;
+            const val = v[key];
+            if (!allowClear && !val) return;
+            const s = (val == null ? '' : String(val));
+            const match = Array.from(el.options).some(o => o.value === s);
+            el.value = match ? s : '';
+        };
+        setSel('pub-colour', '_exptl_crystal_colour');
+        setSel('pub-shape', '_exptl_crystal_description');
+        set('pub-moiety', '_chemical_formula_moiety');
+        set('pub-size-min', '_exptl_crystal_size_min');
+        set('pub-size-mid', '_exptl_crystal_size_mid');
+        set('pub-size-max', '_exptl_crystal_size_max');
+        setSel('pub-cell-setting', '_symmetry_cell_setting');
+        set('pub-space-hm', '_symmetry_space_group_name_Hall');
+        set('pub-z', '_cell_formula_units_Z');
+        set('pub-abs-min', '_exptl_absorpt_correction_T_min');
+        set('pub-abs-max', '_exptl_absorpt_correction_T_max');
+        set('pub-temp', '_diffrn_ambient_temperature');
+        setSel('pub-h-treat', '_refine_ls_hydrogen_treatment');
     }
 
     // Collect the form values into a key->value map (empty values omitted).
@@ -2038,12 +2152,61 @@ class WMOLApp {
         return out;
     }
 
+    // Full publish form state including empty values, for server-side persistence.
+    // (collectPublishFormValues omits empty fields so device templates can fill
+    // them during CIF generation; here we want the exact form state.)
+    collectPublishFormState() {
+        const val = (id) => {
+            const el = document.getElementById(id);
+            return el ? String(el.value || '').trim() : '';
+        };
+        return {
+            '_chemical_formula_moiety': val('pub-moiety'),
+            '_exptl_crystal_colour': val('pub-colour'),
+            '_exptl_crystal_description': val('pub-shape'),
+            '_exptl_crystal_size_min': val('pub-size-min'),
+            '_exptl_crystal_size_mid': val('pub-size-mid'),
+            '_exptl_crystal_size_max': val('pub-size-max'),
+            '_symmetry_cell_setting': val('pub-cell-setting'),
+            '_symmetry_space_group_name_Hall': val('pub-space-hm'),
+            '_cell_formula_units_Z': val('pub-z'),
+            '_exptl_absorpt_correction_T_min': val('pub-abs-min'),
+            '_exptl_absorpt_correction_T_max': val('pub-abs-max'),
+            '_diffrn_ambient_temperature': val('pub-temp'),
+            '_refine_ls_hydrogen_treatment': val('pub-h-treat'),
+        };
+    }
+
+    async savePublishSettings(project) {
+        if (!project) return;
+        const settings = {
+            userTemplate: document.getElementById('pub-user-template')?.value || '',
+            deviceTemplate: document.getElementById('pub-device-template')?.value || '',
+            values: this.collectPublishFormState(),
+        };
+        try {
+            await this.apiSavePublishSettings(project, settings);
+        } catch (e) {
+            console.error('Failed to save publish settings:', e);
+        }
+    }
+
     wirePublishModal() {
         const btnCif = document.getElementById('btn-generate-cif');
         if (btnCif) btnCif.addEventListener('click', () => this.generatePublishCif());
 
         const btnReport = document.getElementById('btn-generate-report');
         if (btnReport) btnReport.addEventListener('click', () => this.generateReportDocx());
+
+        // Persist the publish parameters whenever the dialog closes in CIF mode.
+        const modalEl = document.getElementById('publishModal');
+        if (modalEl) {
+            modalEl.addEventListener('hidden.bs.modal', () => {
+                if (this._publishMode === 'cif') {
+                    this.savePublishSettings(this.state.publishProject || this.state.currentProject);
+                }
+            });
+        }
     }
 
     setPublishStatus(html, isError = false) {
@@ -2073,6 +2236,8 @@ class WMOLApp {
             if (!res.ok) throw new Error(data.error || 'Failed to generate publish CIF');
 
             this.downloadText(data.content, 'publish.cif');
+            // Remember the parameters used so the dialog restores them next time.
+            await this.savePublishSettings(project);
             this.setPublishStatus('Publish CIF created and downloaded (also saved to project as publish.cif).');
         } catch (e) {
             this.setPublishStatus('Error: ' + e.message, true);
@@ -2200,6 +2365,21 @@ class WMOLApp {
         if (statusBar) statusBar.textContent = 'Ready';
     }
 
+    // Make `name` the active project. When a *different* project is already
+    // loaded (or a local structure is open), discard the previous project's
+    // loaded state first so its HKL/FCF references and file tabs cannot leak
+    // into the new one and cause its files to be overwritten. Returns true when
+    // the active project actually changed.
+    activateProject(name) {
+        if (!name) return false;
+        const changed = this.state.currentProject !== name;
+        if (changed && (this.state.currentProject || this.state.loadedFilename)) {
+            this.resetLoadedProject();
+        }
+        this.state.currentProject = name;
+        return changed;
+    }
+
     // Unload everything from the UI: reset the loaded state and forget the
     // persisted session. Nothing on the server is touched.
     clearAllData() {
@@ -2214,9 +2394,8 @@ class WMOLApp {
              'webxtl_hkl_name', 'webxtl_hkl_project', 'webxtl_fcf_content', 'webxtl_ai_logs'].forEach(k => localStorage.removeItem(k));
         } catch (e) { /* ignore */ }
 
-        // Stop any running AI analysis / solve pipeline.
+        // Stop any running AI analysis.
         this.stopAIAnalysis();
-        if (this.solveAbort) { try { this.solveAbort.abort(); } catch (e) { /* */ } this.solveAbort = null; }
         this.state.aiLogs = [];
         this.state.aiLog = null;
         this.refreshAILogList && this.refreshAILogList();
@@ -2522,6 +2701,11 @@ class WMOLApp {
         const ext = filename.split('.').pop().toLowerCase();
 
         try {
+            // Opening a file that belongs to a different project starts that
+            // project: discard the previous project's loaded state so its HKL
+            // reference cannot make later runs write over the old project.
+            this.activateProject(projectName);
+
             // HKL files are kept server-side (they can be very large). Opening a
             // project or clicking one of its files should NOT stream the whole
             // reflection list into the browser - only the reference is recorded.
@@ -2636,10 +2820,7 @@ class WMOLApp {
             }
             // Switching projects: drop the previous project's loaded state
             // (editors, tabs, HKL/FCF/map references) so nothing stale leaks in.
-            if (this.state.currentProject && this.state.currentProject !== data.name) {
-                this.resetLoadedProject();
-            }
-            this.state.currentProject = data.name;
+            this.activateProject(data.name);
             this.state.loadedType = data.type;
             this.state.loadedContent = data.content;
 
@@ -2751,7 +2932,7 @@ class WMOLApp {
             const data = await this.apiGetBackup(projectName, filename);
             const type = filename.endsWith('.ins') ? 'ins' : 'res';
             
-            this.state.currentProject = projectName;
+            this.activateProject(projectName);
             this.state.loadedType = type;
             this.state.loadedContent = data.content;
             
@@ -4926,12 +5107,15 @@ class WMOLApp {
         if (!editor) return;
 
         const input = document.getElementById('occ-value-input');
-        const rawVal = input ? input.value : '';
+        const rawVal = (input ? input.value : '').trim();
         const newVal = parseFloat(rawVal);
         if (rawVal === '' || isNaN(newVal) || newVal < 0) {
             alert('Please enter a valid non-negative occupancy value.');
             return;
         }
+        // Preserve the exact text the user typed (e.g. "11.000" must not become
+        // "11"), so trailing zeros and decimal places are kept in the SOF field.
+        const sofText = rawVal;
 
         const { rows } = this.getOccupancyTargetRows(editor);
         if (!rows.length) {
@@ -4957,7 +5141,7 @@ class WMOLApp {
             // a "10*k+n" sof (>=10) means the occupancy is refined via FVAR k,
             // so the numeric value also encodes the free-variable multiplier.
             // Here we simply write the explicit sof the user typed.
-            parts[5] = String(newVal);
+            parts[5] = sofText;
             if (fvarCode >= 10) skipFvar.push(i);
             const newLine = parts.join('  ');
             doc.removeInLine(i, 0, line.length);
@@ -4969,7 +5153,7 @@ class WMOLApp {
 
         const status = document.getElementById('status-bar-content');
         if (status) {
-            status.textContent = `Occupancy set to ${newVal} for ${changed} atom line(s)`;
+            status.textContent = `Occupancy set to ${sofText} for ${changed} atom line(s)`;
             if (skipFvar.length) {
                 console.warn(`Note: ${skipFvar.length} line(s) had FVAR-linked sof (>=10) and were overwritten with an explicit value.`);
             }
@@ -5548,23 +5732,6 @@ class WMOLApp {
             toggleFmt();
         }
 
-        // Solve Structure & Validate / Validate (CheckCIF-style)
-        const menuSolve = document.getElementById('menu-solve');
-        if (menuSolve) menuSolve.addEventListener('click', () => this.openSolveModal('solve'));
-        const menuValidate = document.getElementById('menu-validate');
-        if (menuValidate) menuValidate.addEventListener('click', () => this.openSolveModal('validate'));
-
-        // Solve modal buttons
-        const btnSolveRun = document.getElementById('btn-solve-run');
-        if (btnSolveRun) btnSolveRun.addEventListener('click', () => this.runSolvePipeline());
-        const btnSolveLoadRes = document.getElementById('btn-solve-load-res');
-        if (btnSolveLoadRes) btnSolveLoadRes.addEventListener('click', () => this.loadSolveResultRes());
-        const btnSolveCopyReport = document.getElementById('btn-solve-copy-report');
-        if (btnSolveCopyReport) btnSolveCopyReport.addEventListener('click', () => {
-            const out = document.getElementById('solve-report-text');
-            if (out && navigator.clipboard) navigator.clipboard.writeText(out.textContent);
-        });
-
         // --- Publish Menu ---
         const menuPublishCif = document.getElementById('menu-publish-cif');
         if (menuPublishCif) {
@@ -5673,6 +5840,12 @@ class WMOLApp {
         }
         if (btnClusterApply) {
             btnClusterApply.addEventListener('click', () => this.applyClusterRelabel());
+        }
+
+        // PLATON TwinRotMat parameters
+        const btnRunTwinRotMat = document.getElementById('btn-run-twinrotmat');
+        if (btnRunTwinRotMat) {
+            btnRunTwinRotMat.addEventListener('click', () => this.runTwinRotMatFromDialog());
         }
 
         // Change Occupancy Modal Logic
@@ -6713,7 +6886,32 @@ class WMOLApp {
             if (structureFiles.length > 0) {
                 const file = structureFiles[0];
                 const content = await file.text();
-                
+                const ext = file.name.split('.').pop().toLowerCase();
+
+                // A structure that does not belong to the currently open project
+                // starts a NEW project named after the file. Otherwise the old
+                // project stays active and the next refinement/upload would write
+                // the newly opened structure over the old project's files.
+                const cleanBase = file.name.replace(/\.[^.]+$/, '')
+                    .replace(/[^a-zA-Z0-9_-]/g, '_') || 'structure';
+                const knownBases = [this.state.currentProject, this.state.hklServerProject];
+                if (this.state.loadedFilename) {
+                    knownBases.push(this.state.loadedFilename.replace(/\.[^.]+$/, ''));
+                }
+                const belongs = knownBases.some(b => b
+                    && String(b).toLowerCase() === cleanBase.toLowerCase());
+                if (!belongs) {
+                    this.activateProject(cleanBase);
+                    // Persist the structure so the new project exists server-side
+                    // and Save/Refine/companion uploads have a home.
+                    try {
+                        await this.apiSaveProjectFile(cleanBase, `${cleanBase}.${ext}`, content);
+                        console.log(`Opened '${file.name}' as new project '${cleanBase}'.`);
+                    } catch (e) {
+                        console.warn(`Could not create project '${cleanBase}' for '${file.name}':`, e.message);
+                    }
+                }
+
                 this.state.loadedContent = content;
                 this.state.loadedFilename = file.name;
                 this.state.fileId++;
@@ -6721,7 +6919,6 @@ class WMOLApp {
                 // previously shown file tab for "run program on current file".
                 this.state.lastStructureTabKey = null;
 
-                const ext = file.name.split('.').pop().toLowerCase();
                 this.state.loadedType = (ext === 'ins' || ext === 'res')
                     ? 'res'
                     : (ext === 'mmcif' ? 'cif' : ext);
@@ -8230,9 +8427,61 @@ class WMOLApp {
                     this.runExternalProgram({ ...program }, 'checkcif');
                     return;
                 }
+                if (id === 'platon' && action === 'twinrotmat') {
+                    // TwinRotMat has tunable search parameters - ask first.
+                    this.openTwinRotMatDialog({ ...program });
+                    return;
+                }
                 this.runExternalProgram({ ...program }, action);
             });
         });
+    }
+
+    // Show the TwinRotMat parameter dialog, restoring the last used values.
+    openTwinRotMatDialog(program) {
+        const modalEl = document.getElementById('twinRotMatModal');
+        if (!modalEl) {
+            // No dialog available - run with PLATON's defaults.
+            this.runExternalProgram(program, 'twinrotmat', null);
+            return;
+        }
+        this._twinRotMatProgram = program;
+        const defaults = {
+            indMax: 5, nSelMin: 50, deltaISig: 4.0, deltaTheta: 0.10, critI: 0.1, critT: 0.10
+        };
+        let saved = {};
+        try { saved = JSON.parse(localStorage.getItem('webxtl_twinrotmat') || '{}'); } catch (e) { /* ignore */ }
+        const s = { ...defaults, ...saved };
+        const setVal = (id, v) => { const el = document.getElementById(id); if (el) el.value = v; };
+        setVal('trm-indmax', s.indMax);
+        setVal('trm-nselmin', s.nSelMin);
+        setVal('trm-deltaisig', s.deltaISig);
+        setVal('trm-deltatheta', s.deltaTheta);
+        setVal('trm-criti', s.critI);
+        setVal('trm-critt', s.critT);
+        new bootstrap.Modal(modalEl).show();
+    }
+
+    runTwinRotMatFromDialog() {
+        const program = this._twinRotMatProgram;
+        if (!program) return;
+        const num = (id, def) => {
+            const v = parseFloat((document.getElementById(id) || {}).value);
+            return Number.isFinite(v) ? v : def;
+        };
+        const params = {
+            indMax: num('trm-indmax', 5),
+            nSelMin: num('trm-nselmin', 50),
+            deltaISig: num('trm-deltaisig', 4.0),
+            deltaTheta: num('trm-deltatheta', 0.10),
+            critI: num('trm-criti', 0.1),
+            critT: num('trm-critt', 0.10),
+        };
+        try { localStorage.setItem('webxtl_twinrotmat', JSON.stringify(params)); } catch (e) { /* ignore */ }
+        const modalEl = document.getElementById('twinRotMatModal');
+        const modal = bootstrap.Modal.getInstance(modalEl);
+        if (modal) modal.hide();
+        this.runExternalProgram(program, 'twinrotmat', params);
     }
 
     // Return the structure content (.ins/.res/.cif) the user is currently
@@ -8408,12 +8657,24 @@ class WMOLApp {
     // Run an external crystallography program (shelxl, shelxt, platon, ...) on
     // the currently loaded files and show the results in the results modal.
     // `action` is used for PLATON to choose which single-purpose task to run.
-    async runExternalProgram(program, action = null) {
+    async runExternalProgram(program, action = null, params = null) {
         const inputs = program.inputs || [];
         const formData = new FormData();
         if (program.id === 'platon') {
             // The server maps this to the matching PLATON instruction.
             formData.append('action', action || 'checkcif');
+        }
+        if (program.id === 'platon' && action === 'twinrotmat' && params) {
+            // Optional TwinRotMat search parameters (PLATON SET IPR/PAR values).
+            const fields = {
+                trmIndMax: 'indMax', trmNselMin: 'nSelMin', trmDeltaISig: 'deltaISig',
+                trmDeltaTheta: 'deltaTheta', trmCritI: 'critI', trmCritT: 'critT'
+            };
+            for (const [field, key] of Object.entries(fields)) {
+                if (params[key] !== undefined && params[key] !== null && params[key] !== '') {
+                    formData.append(field, params[key]);
+                }
+            }
         }
 
         // Programs that need reflections: first make sure an HKL is available.
@@ -8605,6 +8866,31 @@ class WMOLApp {
                         resultsSummary.innerHTML = `<div class="alert alert-danger py-2 small mb-2">
                             <i class="fa-solid fa-triangle-exclamation me-1"></i>
                             <strong>Refinement failed:</strong> ${msg}
+                        </div>` + resultsSummary.innerHTML;
+                    }
+                    // Surface the CheckCIF alert summary on its own.
+                    if (program.id === 'platon' && data.checkcif) {
+                        const c = data.checkcif.counts || {};
+                        const has = ['A', 'B', 'C', 'G'].some(k => c[k]);
+                        const esc = (s) => String(s || '').replace(/[&<>]/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[ch]));
+                        const cls = c.A ? 'alert-danger' : (has ? 'alert-warning' : 'alert-success');
+                        resultsSummary.innerHTML = `<div class="alert ${cls} py-2 small mb-2">
+                            <i class="fa-solid fa-clipboard-check me-1"></i>
+                            <strong>CheckCIF:</strong> ${esc(data.checkcif.summary) || 'report generated'}
+                            ${has ? `<div class="mt-1">A: ${c.A || 0} &middot; B: ${c.B || 0} &middot; C: ${c.C || 0} &middot; G: ${c.G || 0}</div>` : ''}
+                        </div>` + resultsSummary.innerHTML;
+                    }
+                    // Surface the TwinRotMat transformation matrix on its own.
+                    if (program.id === 'platon' && data.twinrotmat) {
+                        const trm = data.twinrotmat;
+                        const esc = (s) => String(s).replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+                        const body = trm.found
+                            ? `<pre class="mb-0 small">${esc(trm.matrices.join('\n\n'))}</pre>`
+                            : 'No unaccounted twin law detected (already accounted for, or none present).';
+                        resultsSummary.innerHTML = `<div class="alert ${trm.found ? 'alert-success' : 'alert-warning'} py-2 small mb-2">
+                            <i class="fa-solid fa-clone me-1"></i>
+                            <strong>TwinRotMat ${trm.found ? 'transformation matrix' : 'result'}:</strong>
+                            <div class="mt-1">${body}</div>
                         </div>` + resultsSummary.innerHTML;
                     }
                 }
@@ -8846,188 +9132,6 @@ class WMOLApp {
         if (this._refineAbortTimeout) {
             clearTimeout(this._refineAbortTimeout);
             this._refineAbortTimeout = null;
-        }
-    }
-
-    // -----------------------------------------------------------------------
-    // Solve Structure & Validate (CheckCIF-style)
-    // -----------------------------------------------------------------------
-
-    async apiSolveInfo() {
-        const res = await fetch(this.getApiUrl('/solve-info'));
-        if (!res.ok) throw new Error('Failed to query solve pipeline status');
-        return res.json();
-    }
-
-    openSolveModal(mode = 'solve') {
-        const modalEl = document.getElementById('solveModal');
-        if (!modalEl) return;
-        this.state.solveMode = mode;
-        this.state.solveResult = null;
-        const title = document.getElementById('solve-modal-title');
-        if (title) {
-            title.innerHTML = mode === 'validate'
-                ? '<i class="fa-solid fa-clipboard-check me-2"></i>Validate Structure (CheckCIF-style)'
-                : '<i class="fa-solid fa-wand-magic-sparkles me-2"></i>Solve Structure & Validate';
-        }
-        // Toggle solve-specific options.
-        for (const id of ['solve-program', 'solve-cycles', 'solve-do-refine', 'solve-do-platon']) {
-            const el = document.getElementById(id);
-            if (el) el.closest('.col-md-2,.col-md-3')?.classList.toggle('d-none', mode === 'validate');
-        }
-        const hint = modalEl.querySelector('.small.text-muted.mb-2');
-        if (hint) {
-            hint.textContent = mode === 'validate'
-                ? 'Runs disorder/twinning detection and a CheckCIF-style report on the current model + refinement log. No files are modified.'
-                : 'Automated pipeline: SHELXT/SHELXS solution (if no model) → SHELXL refinement → disorder/twinning detection + CheckCIF-style validation. Files are saved to projects/<name> on the server.';
-        }
-
-        // Context summary.
-        const ctx = document.getElementById('solve-context');
-        const name = this.state.loadedFilename
-            || (this.state.lastStructureTabKey && this.state.fileTabs[this.state.lastStructureTabKey]?.filename)
-            || '(none loaded)';
-        if (ctx) ctx.textContent = name;
-        if (ctx) ctx.title = name;
-
-        // Populate program dropdown from server availability (default auto).
-        this.apiSolveInfo().then(info => {
-            const sel = document.getElementById('solve-program');
-            if (!sel) return;
-            const sols = info.solutions || ['shelxt'];
-            sel.innerHTML = '<option value="auto">auto</option>'
-                + sols.map(p => `<option value="${p}">${p.toUpperCase()}</option>`).join('');
-            sel.value = 'auto';
-            if (mode === 'solve' && !info.solutions.length) {
-                const st = document.getElementById('solve-status');
-                if (st) st.textContent = 'No solution program available on the server.';
-            }
-        }).catch(() => {});
-
-        // Reset output panes.
-        for (const id of ['solve-log-text', 'solve-report-text', 'solve-platon-text', 'solve-res-text']) {
-            const el = document.getElementById(id);
-            if (el) el.textContent = id === 'solve-log-text' ? 'Click Run to start.' : '(waiting for run)';
-        }
-        const st = document.getElementById('solve-status');
-        if (st) st.textContent = '';
-        const modal = new bootstrap.Modal(modalEl);
-        modal.show();
-    }
-
-    // Build multipart body for solve/validate from current editor content.
-    buildSolveForm(mode) {
-        const structure = this.getStructureContent();
-        if (!structure) throw new Error('No structure loaded. Load a .res/.ins/.cif first.');
-        const safeBase = this.hklBaseName().replace(/[^a-zA-Z0-9_-]/g, '_');
-
-        if (mode === 'validate') {
-            const lst = this.state.editors.lst ? this.state.editors.lst.getValue() : '';
-            const form = new FormData();
-            form.append('res', new Blob([structure], { type: 'text/plain' }), safeBase + '.res');
-            if (lst && lst.trim()) {
-                form.append('lst', new Blob([lst], { type: 'text/plain' }), safeBase + '.lst');
-            }
-            form.append('platon', '0');
-            return { form, safeBase };
-        }
-
-        if (!this.hasHkl()) {
-            throw new Error('No HKL file available. Load an .hkl file or open a project that contains one to run the solve pipeline.');
-        }
-        const form = new FormData();
-        form.append('ins', new Blob([structure], { type: 'text/plain' }), safeBase + '.ins');
-        this.appendHklPart(form, safeBase);
-        form.append('program', (document.getElementById('solve-program') || {}).value || 'auto');
-        form.append('cycles', (document.getElementById('solve-cycles') || {}).value || '3');
-        form.append('refine', document.getElementById('solve-do-refine')?.checked ? '1' : '0');
-        form.append('platon', document.getElementById('solve-do-platon')?.checked ? '1' : '0');
-        return { form, safeBase };
-    }
-
-    renderSolveResult(result) {
-        this.state.solveResult = result;
-        const log = document.getElementById('solve-log-text');
-        const report = document.getElementById('solve-report-text');
-        const platon = document.getElementById('solve-platon-text');
-        const res = document.getElementById('solve-res-text');
-        const status = document.getElementById('solve-status');
-        if (log) log.textContent = result.logText || (result.steps || []).map(s => `[${s.status}] ${s.label}${s.message ? ' — ' + s.message : ''}`).join('\n');
-        if (report) report.textContent = result.reportText || '(no report)';
-        if (platon) {
-            if (result.platon) {
-                const p = result.platon;
-                const text = p.ok
-                    ? `PLATON completed.\n\n${p.files ? Object.entries(p.files).map(([f, t]) => `===== ${f} =====\n${t}`).join('\n\n') : ''}${p.stdout || p.stderr ? `\n===== stdout/stderr =====\n${p.stdout || ''}${p.stderr || ''}` : ''}`
-                    : `PLATON: ${p.reason || 'not run'}\n${p.stdout || ''}${p.stderr ? '\n' + p.stderr : ''}`;
-                platon.textContent = text.trim() || 'PLATON returned no output.';
-            } else {
-                platon.textContent = '(PLATON not run)';
-            }
-        }
-        if (res && result.files && result.files.res) res.textContent = result.files.res;
-        if (status) {
-            const c = result.report?.count;
-            status.textContent = result.success
-                ? 'Done — no level-A alerts.'
-                : (c ? `Done — A:${c.A} B:${c.B} C:${c.C}` : 'Done');
-        }
-    }
-
-    async runSolvePipeline() {
-        const mode = this.state.solveMode || 'solve';
-        const btn = document.getElementById('btn-solve-run');
-        if (btn) btn.disabled = true;
-        const status = document.getElementById('solve-status');
-        const endpoint = mode === 'validate' ? '/validate-structure' : '/solve-structure';
-        if (status) status.textContent = 'Running… (SHELX runs can take a while)';
-        try {
-            if (mode !== 'validate' && !(await this.ensureHklForRun())) {
-                throw new Error('No HKL file available. Load an .hkl file or open a project that contains one to run the solve pipeline.');
-            }
-            const { form } = this.buildSolveForm(mode);
-            const controller = new AbortController();
-            this.solveAbort = controller;
-            const timeout = Math.max(this.state.preferences?.general?.refineTimeout || 180000, 600000);
-            const res = await fetch(this.getApiUrl(endpoint), {
-                method: 'POST',
-                body: form,
-                signal: typeof AbortSignal.any === 'function'
-                    ? AbortSignal.any([AbortSignal.timeout(timeout), controller.signal])
-                    : controller.signal
-            });
-            const data = await res.json();
-            if (!res.ok) throw new Error(data.error || data.details || `HTTP ${res.status}`);
-            this.renderSolveResult(data);
-        } catch (e) {
-            if (status) status.textContent = '';
-            const log = document.getElementById('solve-log-text');
-            if (log) log.textContent = (e.name === 'TimeoutError') ? 'Pipeline timed out.' : `Error: ${e.message}`;
-        } finally {
-            this.solveAbort = null;
-            if (btn) btn.disabled = false;
-        }
-    }
-
-    // Load the refined .res produced by a solve run into the structure editor.
-    loadSolveResultRes() {
-        const result = this.state.solveResult;
-        if (!result || !result.files || !result.files.res) {
-            alert('No refined .res result to load yet.');
-            return;
-        }
-        const editor = this.state.editors.res;
-        if (editor) {
-            editor.setValue(result.files.res, -1);
-            this.state.loadedContent = result.files.res;
-            this.state.loadedFilename = `${result.project || 'structure'}.res`;
-            this.state.loadedType = 'res';
-            this.renderContent(result.files.res, 'res');
-            this.tryRender('res');
-        }
-        if (result.files && result.files.lst) {
-            const lstEditor = this.state.editors.lst;
-            if (lstEditor) lstEditor.setValue(result.files.lst, -1);
         }
     }
 

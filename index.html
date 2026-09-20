@@ -125,7 +125,6 @@
                                     <hr class="dropdown-divider">
                                 </li>
                                 <li><a class="dropdown-item" href="#" id="menu-omit">OMIT Error/ESD>9</a></li>
-                                <li><a class="dropdown-item" href="#" id="menu-disp">Calculate DISP</a></li>
                                 <li>
                                     <hr class="dropdown-divider">
                                 </li>
@@ -172,11 +171,7 @@
                                 <li><a class="dropdown-item" href="#" id="menu-sg-transform">Transform Model to Space Group...</a></li>
                                 <li><a class="dropdown-item" href="#" id="menu-rsr">Real Space Refinement</a></li>
                                 <li><a class="dropdown-item" href="#" id="menu-absorb">Spherical Absorption Correction...</a></li>
-                                <li>
-                                    <hr class="dropdown-divider">
-                                </li>
-                                <li><a class="dropdown-item" href="#" id="menu-solve">Solve Structure &amp; Validate...</a></li>
-                                <li><a class="dropdown-item" href="#" id="menu-validate">Validate (CheckCIF-style)...</a></li>
+                                <li><a class="dropdown-item" href="#" id="menu-disp">Calculate DISP</a></li>
                             </ul>
                         </li>
                         <li class="nav-item dropdown">
@@ -1072,6 +1067,19 @@
                             bonds.</p>
                     </div>
 
+                    <hr id="publish-checkcif-divider">
+
+                    <!-- Online validation -->
+                    <div id="publish-checkcif-section">
+                        <h6 class="text-muted mb-2">Validate online (IUCr)</h6>
+                        <p class="small text-muted mb-2">After creating the publish CIF, upload it to the IUCr
+                            checkCIF/PLATON service to obtain the official validation report and alerts.</p>
+                        <a class="btn btn-sm btn-outline-secondary" href="https://checkcif.iucr.org/"
+                            target="_blank" rel="noopener noreferrer">
+                            <i class="fa-solid fa-up-right-from-square me-1"></i>Open IUCr checkCIF/PLATON
+                        </a>
+                    </div>
+
                     <div id="publish-status" class="mt-3 small"></div>
                 </div>
                 <div class="modal-footer">
@@ -1256,8 +1264,14 @@
                         </div>
                         <div class="col-md-6">
                             <label for="ai-model" class="form-label">Model</label>
-                            <input type="text" class="form-control" id="ai-model" placeholder="e.g. gpt-4o-mini">
-                            <div class="form-text">Model id as the provider expects it.</div>
+                            <div class="input-group">
+                                <input type="text" class="form-control" id="ai-model" list="ai-model-list"
+                                    placeholder="e.g. gpt-4o-mini">
+                                <button class="btn btn-outline-secondary" type="button" id="btn-ai-load-models"
+                                    title="Fetch the models available at this endpoint">Load models</button>
+                            </div>
+                            <datalist id="ai-model-list"></datalist>
+                            <div class="form-text" id="ai-model-hint">Model id as the provider expects it.</div>
                         </div>
                         <div class="col-md-8">
                             <label for="ai-base-url" class="form-label">Base URL</label>
@@ -1383,96 +1397,6 @@
         </div>
     </div>
 
-    <!-- Solve & Validate Modal -->
-    <div class="modal fade" id="solveModal" tabindex="-1" aria-hidden="true">
-        <div class="modal-dialog modal-xl">
-            <div class="modal-content">
-                <div class="modal-header">
-                    <h5 class="modal-title" id="solve-modal-title"><i class="fa-solid fa-wand-magic-sparkles me-2"></i>Solve Structure &amp; Validate</h5>
-                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
-                </div>
-                <div class="modal-body">
-                    <div class="row g-2 align-items-end mb-2">
-                        <div class="col-md-3">
-                            <label for="solve-context" class="form-label small">Structure file</label>
-                            <div class="form-control form-control-sm text-truncate" id="solve-context">(none loaded)</div>
-                        </div>
-                        <div class="col-md-2">
-                            <label for="solve-program" class="form-label small">Solution program</label>
-                            <select class="form-select form-select-sm" id="solve-program">
-                                <option value="auto">auto (SHELXT→SHELXS)</option>
-                                <option value="shelxt">SHELXT</option>
-                                <option value="shelxs">SHELXS</option>
-                            </select>
-                        </div>
-                        <div class="col-md-2">
-                            <label for="solve-cycles" class="form-label small">WGHT cycles</label>
-                            <input type="number" class="form-control form-control-sm" id="solve-cycles" value="3" min="1" max="20">
-                        </div>
-                        <div class="col-md-2">
-                            <label class="form-label small d-block">&nbsp;</label>
-                            <div class="form-check form-switch">
-                                <input class="form-check-input" type="checkbox" id="solve-do-refine" checked>
-                                <label class="form-check-label small" for="solve-do-refine">Refine</label>
-                            </div>
-                        </div>
-                        <div class="col-md-2">
-                            <label class="form-label small d-block">&nbsp;</label>
-                            <div class="form-check form-switch">
-                                <input class="form-check-input" type="checkbox" id="solve-do-platon">
-                                <label class="form-check-label small" for="solve-do-platon">PLATON</label>
-                            </div>
-                        </div>
-                        <div class="col-md-1 text-end">
-                            <button class="btn btn-sm btn-primary" id="btn-solve-run">Run</button>
-                        </div>
-                    </div>
-                    <div class="small text-muted mb-2">Automated pipeline: SHELXT/SHELXS solution (if no model) →
-                        SHELXL refinement → disorder/twinning detection + CheckCIF-style validation. Files are saved to
-                        <code>projects/&lt;name&gt;</code> on the server.</div>
-                    <ul class="nav nav-tabs small" id="solveTabs" role="tablist">
-                        <li class="nav-item" role="presentation">
-                            <button class="nav-link active" id="solve-log-tab" data-bs-toggle="tab" data-bs-target="#solve-log"
-                                type="button" role="tab">Log</button>
-                        </li>
-                        <li class="nav-item" role="presentation">
-                            <button class="nav-link" id="solve-report-tab" data-bs-toggle="tab" data-bs-target="#solve-report"
-                                type="button" role="tab">Validation report</button>
-                        </li>
-                        <li class="nav-item" role="presentation">
-                            <button class="nav-link" id="solve-platon-tab" data-bs-toggle="tab" data-bs-target="#solve-platon"
-                                type="button" role="tab">PLATON</button>
-                        </li>
-                        <li class="nav-item" role="presentation">
-                            <button class="nav-link" id="solve-res-tab" data-bs-toggle="tab" data-bs-target="#solve-res"
-                                type="button" role="tab">Refined .res</button>
-                        </li>
-                    </ul>
-                    <div class="tab-content border border-top-0 rounded-bottom" style="height: 420px;">
-                        <div class="tab-pane fade show active h-100 p-2" id="solve-log" role="tabpanel" style="overflow:auto;">
-                            <pre id="solve-log-text" class="mb-0 small" style="white-space: pre-wrap;">Click Run to start the pipeline.</pre>
-                        </div>
-                        <div class="tab-pane fade h-100 p-2" id="solve-report" role="tabpanel" style="overflow:auto;">
-                            <pre id="solve-report-text" class="mb-0 small" style="white-space: pre-wrap;">(no report yet)</pre>
-                        </div>
-                        <div class="tab-pane fade h-100 p-2" id="solve-platon" role="tabpanel" style="overflow:auto;">
-                            <pre id="solve-platon-text" class="mb-0 small" style="white-space: pre-wrap;">(PLATON not run)</pre>
-                        </div>
-                        <div class="tab-pane fade h-100 p-2" id="solve-res" role="tabpanel" style="overflow:auto;">
-                            <pre id="solve-res-text" class="mb-0 small" style="white-space: pre-wrap;">(no .res yet)</pre>
-                        </div>
-                    </div>
-                </div>
-                <div class="modal-footer">
-                    <span class="text-muted small me-auto" id="solve-status"></span>
-                    <button type="button" class="btn btn-outline-secondary" id="btn-solve-copy-report">Copy report</button>
-                    <button type="button" class="btn btn-outline-primary" id="btn-solve-load-res">Load .res in editor</button>
-                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
-                </div>
-            </div>
-        </div>
-    </div>
-
     <!-- Change Occupancy Modal -->
     <div class="modal fade" id="occupancyModal" tabindex="-1" aria-hidden="true">
         <div class="modal-dialog">
@@ -1494,6 +1418,60 @@
                 <div class="modal-footer">
                     <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
                     <button type="button" class="btn btn-primary" id="btn-perform-occupancy">Change</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- PLATON TwinRotMat Parameters Modal -->
+    <div class="modal fade" id="twinRotMatModal" tabindex="-1" aria-hidden="true">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title"><i class="fa-solid fa-clone me-2"></i>PLATON TwinRotMat</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                    <p class="small text-muted">Analyses the Fo/Fc data for unaccounted (non)merohedral
+                        twinning. The search is built from a temporary LIST-4 refinement of the current model.</p>
+                    <div class="row g-3">
+                        <div class="col-6">
+                            <label for="trm-indmax" class="form-label small mb-1">Max axis index (IndMax)</label>
+                            <input type="number" class="form-control form-control-sm" id="trm-indmax" value="5"
+                                min="1" max="20" step="1">
+                        </div>
+                        <div class="col-6">
+                            <label for="trm-nselmin" class="form-label small mb-1">Min selected reflections</label>
+                            <input type="number" class="form-control form-control-sm" id="trm-nselmin" value="50"
+                                min="25" max="2000" step="25">
+                        </div>
+                        <div class="col-6">
+                            <label for="trm-deltaisig" class="form-label small mb-1">DeltaI / sigma(I) cutoff</label>
+                            <input type="number" class="form-control form-control-sm" id="trm-deltaisig" value="4.0"
+                                min="1" max="32" step="0.5">
+                        </div>
+                        <div class="col-6">
+                            <label for="trm-deltatheta" class="form-label small mb-1">Delta theta (deg)</label>
+                            <input type="number" class="form-control form-control-sm" id="trm-deltatheta" value="0.10"
+                                min="0.01" max="1" step="0.01">
+                        </div>
+                        <div class="col-6">
+                            <label for="trm-criti" class="form-label small mb-1">CritI</label>
+                            <input type="number" class="form-control form-control-sm" id="trm-criti" value="0.1"
+                                min="0" max="1" step="0.05">
+                        </div>
+                        <div class="col-6">
+                            <label for="trm-critt" class="form-label small mb-1">CritT</label>
+                            <input type="number" class="form-control form-control-sm" id="trm-critt" value="0.10"
+                                min="0" max="1" step="0.05">
+                        </div>
+                    </div>
+                    <div class="form-text mt-2">Increasing IndMax / lowering the DeltaI/sigma cutoff makes the
+                        search more permissive (useful when no twin law is reported).</div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                    <button type="button" class="btn btn-primary" id="btn-run-twinrotmat">Run TwinRotMat</button>
                 </div>
             </div>
         </div>

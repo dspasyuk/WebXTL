@@ -706,12 +706,18 @@ app.post('/run/:program', upload.any(), async (req, res) => {
         // the GUI. Use the best-effort check runner instead (short timeout,
         // collects any report files PLATON writes, reports missing runtime).
         let r;
+        // TwinRotMat returns its own focused report files; skip the generic
+        // output sweep so the dialog is not flooded with the project CIF/FCF/LST.
+        let skipOutputSweep = false;
         if (programId === 'platon') {
             const action = (() => {
                 let v = req.body && req.body.action;
                 if (Array.isArray(v)) v = v[0];
                 return PLATON_ACTIONS[v] ? v : 'checkcif';
             })();
+            // These actions return their own focused report files, so skip the
+            // generic output sweep that would dump the project CIF/FCF/LST.
+            if (action === 'twinrotmat' || action === 'checkcif') skipOutputSweep = true;
             // SQUEEZE / TWINROTMAT need the companion reflection files named
             // exactly <basename>.fcf (PLATON derives them from the model name).
             // If the client did not upload them, reuse any already stored in
@@ -722,12 +728,28 @@ app.post('/run/:program', upload.any(), async (req, res) => {
                     if (existing) fs.copyFileSync(path.join(projectDir, existing), path.join(projectDir, `${basename}.fcf`));
                 }
             }
-            const p = await runPlatonCheck(projectDir, basename, uploadedNames, controller.signal, { action });
+            let p;
+            if (action === 'twinrotmat') {
+                p = await runTwinRotMat(projectDir, basename, controller.signal, {
+                    indMax: req.body && req.body.trmIndMax,
+                    nSelMin: req.body && req.body.trmNselMin,
+                    deltaISig: req.body && req.body.trmDeltaISig,
+                    deltaTheta: req.body && req.body.trmDeltaTheta,
+                    critI: req.body && req.body.trmCritI,
+                    critT: req.body && req.body.trmCritT,
+                });
+            } else if (action === 'checkcif') {
+                p = await runCheckCif(projectDir, basename, controller.signal);
+            } else {
+                p = await runPlatonCheck(projectDir, basename, uploadedNames, controller.signal, { action });
+            }
             r = {
                 code: p.ok ? 0 : (p.code == null ? 1 : p.code),
                 stdout: p.stdout || '',
                 stderr: (p.stderr || '') + (p.reason ? `\n${p.reason}` : '')
             };
+            if (p.twinrotmat) r.twinrotmat = p.twinrotmat;
+            if (p.checkcif) r.checkcif = p.checkcif;
             if (p.files) {
                 for (const [name, content] of Object.entries(p.files)) {
                     if (!r.filesText) r.filesText = {};
@@ -822,6 +844,8 @@ app.post('/run/:program', upload.any(), async (req, res) => {
         if (programId === 'platon') {
             result.squeezeApplied = r.squeezeApplied === true;
             result.fabReady = r.fabReady === true;
+            if (r.twinrotmat) result.twinrotmat = r.twinrotmat;
+            if (r.checkcif) result.checkcif = r.checkcif;
         }
 
         // Collect the output files defined for this program. Programs may write
@@ -829,7 +853,7 @@ app.post('/run/:program', upload.any(), async (req, res) => {
         // directory rather than only exact <basename><ext> names. Uploaded input
         // files and the backup directory are skipped.
         const outExts = program.outputs;
-        if (fs.existsSync(projectDir)) {
+        if (!skipOutputSweep && fs.existsSync(projectDir)) {
             for (const f of fs.readdirSync(projectDir)) {
                 if (f === 'backup' || f.startsWith('.')) continue;
                 const full = path.join(projectDir, f);
@@ -976,15 +1000,15 @@ async function refineModel(projectDir, basename, weightCycles) {
 }
 
 // PLATON actions selectable from the Programs submenu. Each maps to the text
-// instruction(s) that PLATON executes after loading the model. TwinRotMat has
-// no standalone text command (it is an interactive GUI mouse action); the
-// underlying search it runs is LEPAGE, which lists the candidate twin 2-fold
-// axes and the transformation matrix, so that action runs LEPAGE instead.
+// instruction(s) that PLATON executes after loading the model. TwinRotMat runs
+// the ROTMAT instruction, which analyses the Fo/Fc data for unaccounted
+// (non)merohedral twinning. It is special-cased: it requires a CIF model plus a
+// LIST-4 FCF (see runTwinRotMat), not the .res model the other actions use.
 const PLATON_ACTIONS = {
     checkcif: { label: 'CheckCIF', script: '', needsFcf: false, needsHkl: false },
     addsymm: { label: 'ADDSYM', script: 'CALC ADDSYM', needsFcf: false, needsHkl: false },
     squeeze: { label: 'SQUEEZE', script: 'CALC SQUEEZE', needsFcf: true, needsHkl: false },
-    twinrotmat: { label: 'TwinRotMat', script: 'LEPAGE', needsFcf: false, needsHkl: false },
+    twinrotmat: { label: 'TwinRotMat', script: 'ROTMAT', needsFcf: false, needsHkl: false },
 };
 
 // Attempt a PLATON run on the model with an optional instruction script.
@@ -997,16 +1021,23 @@ function runPlatonCheck(projectDir, basename, uploadedNames, signal, opts = {}) 
         if (!isExecutableAvailable('platon')) {
             return resolve({ ok: false, reason: 'platon executable not found on PATH' });
         }
-        const resPath = path.join(projectDir, `${basename}.res`);
-        if (!fs.existsSync(resPath)) {
-            return resolve({ ok: false, reason: 'No .res model available for PLATON' });
+        // Most actions run on <basename>.res; TwinRotMat passes the throwaway
+        // CIF it generated via opts.inputName.
+        const inputName = path.basename(opts.inputName || `${basename}.res`);
+        if (!fs.existsSync(path.join(projectDir, inputName))) {
+            return resolve({ ok: false, reason: `No ${inputName} model available for PLATON` });
         }
+        // Optional PLATON command-line flags (e.g. '-u' selects CheckCIF mode).
+        const cliArgs = Array.isArray(opts.args) ? opts.args : [];
         const action = opts.action && PLATON_ACTIONS[opts.action] ? opts.action : 'checkcif';
         const def = PLATON_ACTIONS[action];
+        // Callers may override the instruction script (e.g. to prepend SET
+        // parameter lines used to tune a specific PLATON action).
+        const script = (opts.script != null) ? opts.script : def.script;
         const before = new Set(fs.readdirSync(projectDir));
         let child;
         try {
-            child = spawn('platon', [resPath], {
+            child = spawn('platon', [...cliArgs, inputName], {
                 cwd: projectDir, stdio: ['pipe', 'pipe', 'pipe'], detached: true
             });
         } catch (e) {
@@ -1034,7 +1065,7 @@ function runPlatonCheck(projectDir, basename, uploadedNames, signal, opts = {}) 
 
         // Feed the action instructions, then let stdin hit EOF (normal end).
         try {
-            child.stdin.write((def.script ? def.script + '\n' : '') + 'EXIT\n');
+            child.stdin.write((script ? script + '\n' : '') + 'EXIT\n');
             child.stdin.end();
         } catch (e) { /* stdin closed */ }
 
@@ -1060,6 +1091,195 @@ function runPlatonCheck(projectDir, basename, uploadedNames, signal, opts = {}) 
             resolve({ ok: code === 0 || anyText.trim().length > 0, code, stdout, stderr, files: after, action });
         });
     });
+}
+
+// PLATON's TwinRotMat (ROTMAT) needs a CIF model plus an FCF carrying SHELXL
+// LIST-4 (Fo^2/Fc^2) data. A normal SHELXL run writes a LIST-6 FCF, and PLATON
+// rejects the ".res + FCF" combination for this action, so we refine a throwaway
+// copy of the model with LIST 4 (which also produces a CIF), run ROTMAT on that
+// CIF, then delete every temporary file so the project is left untouched.
+async function runTwinRotMat(projectDir, basename, signal, params = {}) {
+    const resPath = path.join(projectDir, `${basename}.res`);
+    if (!fs.existsSync(resPath)) {
+        return { ok: false, reason: 'No .res model available for TwinRotMat' };
+    }
+    const hklPath = path.join(projectDir, `${basename}.hkl`);
+    if (!fs.existsSync(hklPath)) {
+        return { ok: false, reason: 'TwinRotMat needs the reflections: no matching .hkl found for this project' };
+    }
+
+    const tmpBase = `${basename}_trm`;
+
+    try {
+        // Build a LIST-4 .ins from the current model (replace any existing LIST).
+        const resText = fs.readFileSync(resPath, 'utf8');
+        const lines = resText.split(/\r?\n/)
+            .filter(l => !/^\s*LIST\s+\d+/i.test(l));
+        let idx = lines.findIndex(l => /^\s*HKLF\b/i.test(l));
+        if (idx === -1) idx = lines.findIndex(l => /^\s*END\b/i.test(l));
+        if (idx === -1) lines.push('LIST 4');
+        else lines.splice(idx, 0, 'LIST 4');
+        fs.writeFileSync(path.join(projectDir, `${tmpBase}.ins`), lines.join('\n'), 'utf8');
+        fs.copyFileSync(hklPath, path.join(projectDir, `${tmpBase}.hkl`));
+        // A model refined with the SQUEEZE solvent mask (ABIN) needs the matching
+        // .fab beside the .ins, otherwise SHELXL aborts and writes empty output.
+        const fabPath = path.join(projectDir, `${basename}.fab`);
+        if (fs.existsSync(fabPath)) {
+            fs.copyFileSync(fabPath, path.join(projectDir, `${tmpBase}.fab`));
+        }
+
+        // A short SHELXL run writes <base>.fcf (LIST 4) and <base>.cif.
+        const shelxl = await runShelxl(projectDir, tmpBase, signal);
+        const cifPath = path.join(projectDir, `${tmpBase}.cif`);
+        const fcfPath = path.join(projectDir, `${tmpBase}.fcf`);
+        // SHELXL can exit 0 yet leave empty files when it aborts (e.g. a missing
+        // .fab), so require real content - and a LIST-4 FCF - before running PLATON.
+        const cifOk = fs.existsSync(cifPath) && fs.statSync(cifPath).size > 0;
+        const fcfText = fs.existsSync(fcfPath) ? fs.readFileSync(fcfPath, 'utf8') : '';
+        const fcfOk = /_shelx_refln_list_code\s+4\b/.test(fcfText);
+        if (!cifOk || !fcfOk) {
+            const detail = (shelxl.stderr || shelxl.stdout || '').split(/\r?\n/)
+                .filter(Boolean).slice(-3).join(' ');
+            return {
+                ok: false,
+                reason: 'Could not build the LIST-4 CIF/FCF pair required by TwinRotMat.'
+                    + (!fs.existsSync(fabPath) && /^\s*ABIN\b/im.test(resText)
+                        ? ' The model uses ABIN (SQUEEZE) but no matching .fab was found.'
+                        : '')
+                    + (detail ? ` ${detail}` : '')
+            };
+        }
+
+        // Run TwinRotMat on the CIF; PLATON auto-reads the matching FCF. The user
+        // can tune the search with SET lines that mirror PLATON's GUI options:
+        //   IPR 567 = max axis index (IndMax), IPR 550 = N(selected) min,
+        //   PAR 413 = DeltaI/sigma, PAR 414 = DeltaTheta, PAR 415 = CritI,
+        //   PAR 420 = CritT. All are optional; PLATON keeps its defaults without them.
+        const num = (v) => (v == null || v === '' ? null : Number(v));
+        const setLines = [];
+        const ipr = (idx, v, min, max) => {
+            const n = num(v);
+            if (n != null && Number.isFinite(n)) setLines.push(`SET IPR ${idx} ${Math.min(max, Math.max(min, Math.round(n)))}`);
+        };
+        const par = (idx, v, min, max) => {
+            const n = num(v);
+            if (n != null && Number.isFinite(n)) setLines.push(`SET PAR ${idx} ${Math.min(max, Math.max(min, n))}`);
+        };
+        ipr(567, params.indMax, 1, 20);
+        ipr(550, params.nSelMin, 25, 2000);
+        par(413, params.deltaISig, 1.0, 32.0);
+        par(414, params.deltaTheta, 0.01, 1.0);
+        par(415, params.critI, 0.0, 1.0);
+        par(420, params.critT, 0.0, 1.0);
+        const script = setLines.concat(['ROTMAT']).join('\n');
+
+        const p = await runPlatonCheck(projectDir, tmpBase, [], signal, {
+            action: 'twinrotmat',
+            inputName: `${tmpBase}.cif`,
+            script
+        });
+
+        // Drop everything before the TwinRotMat analysis: the first ~20 pages of
+        // PLATON's report are a generic Fo/Fc validation that buries the result.
+        const trimReport = (text, markers) => {
+            if (!text) return text;
+            const m = new RegExp(markers.join('|')).exec(text);
+            return m ? '[... earlier Fo/Fc validation pages omitted ...]\n\n' + text.slice(m.index) : text;
+        };
+
+        // Keep only the TwinRotMat report (.lis); the "_pl.spf" is just a
+        // structure listing and not part of the result.
+        const files = {};
+        for (const [name, content] of Object.entries(p.files || {})) {
+            if (!name.startsWith(tmpBase) || name.startsWith(`${tmpBase}_pl`)) continue;
+            files[`${basename}_twinrotmat${path.extname(name)}`] =
+                trimReport(content, ['TwinRotMat: Analysis', 'Section 8']);
+        }
+        p.stdout = trimReport(p.stdout, ['Sorted List of Twin Overlap', 'Section 8', 'No Applicable']);
+
+        // PLATON prints each detected twin law as a "2-axis ( ... )" line followed
+        // by three matrix rows. Extract them so the UI can show the transformation
+        // matrix on its own instead of the user hunting through the report.
+        const report = [p.stdout || '', ...Object.values(files)].join('\n');
+        const reportLines = report.split(/\r?\n/);
+        const matrices = [];
+        for (let i = 0; i < reportLines.length; i++) {
+            if (!/^\s*2-axis \(/.test(reportLines[i])) continue;
+            const block = [reportLines[i].replace(/\s+$/, '')];
+            for (let j = 1; j <= 3 && i + j < reportLines.length; j++) {
+                if (!/^\s*\(/.test(reportLines[i + j])) break;
+                block.push(reportLines[i + j].replace(/\s+$/, ''));
+            }
+            matrices.push(block.join('\n'));
+            i += 3;
+        }
+        const hasAnalysis = /TwinRotMat: Analysis/.test(report);
+        if (hasAnalysis && !matrices.length) {
+            p.stdout = (p.stdout || '')
+                + '\n\n[TwinRotMat] No unaccounted twin law was detected from the Fo/Fc data'
+                + ' (already accounted for, or none present).';
+        }
+        return { ...p, files, twinrotmat: { found: matrices.length > 0, matrices } };
+    } finally {
+        // Remove every temporary file the copy/run produced (prefix-based so any
+        // PLATON _pl.* companion is covered too).
+        try {
+            for (const f of fs.readdirSync(projectDir)) {
+                if (f.startsWith(tmpBase)) {
+                    try { fs.unlinkSync(path.join(projectDir, f)); } catch (e) { /* ignore */ }
+                }
+            }
+        } catch (e) { /* ignore */ }
+    }
+}
+
+// PLATON's CheckCIF is a command-line mode (`platon -u`), not an instruction:
+// it validates a CIF (preferred; falls back to the .res model) and writes
+// <name>.chk (the full IUCr-style report) and <name>.ckf. Return just those, so
+// the results dialog shows the actual report instead of the project files.
+async function runCheckCif(projectDir, basename, signal) {
+    const cifPath = findCifFile(projectDir, basename);
+    const inputName = cifPath ? path.basename(cifPath) : `${basename}.res`;
+    if (!fs.existsSync(path.join(projectDir, inputName))) {
+        return { ok: false, reason: 'No CIF or .res model available for CheckCIF' };
+    }
+
+    // PLATON writes <inputBase>.chk / <inputBase>.ckf. Read them directly after
+    // the run rather than relying on the "new files" collector: these reports
+    // persist in the project, so on a second run they already exist and the
+    // collector would skip them (leaving only the stdout summary).
+    const stem = inputName.replace(/\.[^.]+$/, '');
+    const startedAt = Date.now();
+    const p = await runPlatonCheck(projectDir, basename, [], signal, {
+        action: 'checkcif',
+        inputName,
+        args: ['-u']
+    });
+
+    const files = {};
+    for (const ext of ['.chk', '.ckf']) {
+        const fp = path.join(projectDir, `${stem}${ext}`);
+        try {
+            if (fs.existsSync(fp) && fs.statSync(fp).mtimeMs >= startedAt - 2000) {
+                files[`${basename}_checkcif${ext}`] = fs.readFileSync(fp, 'utf8');
+            }
+        } catch (e) { /* ignore */ }
+    }
+
+    // Console summary looks like:
+    //   Entry #  1 -   8A,  5B, 17C, 40G-Alerts, BP   C-C = 0.0063
+    const summary = (p.stdout || '').split(/\r?\n/)
+        .find(l => /-Alert/i.test(l)) || '';
+    const counts = {};
+    const mm = summary.match(/(\d+)A,\s*(\d+)B,\s*(\d+)C,\s*(\d+)G/i);
+    if (mm) {
+        counts.A = Number(mm[1]); counts.B = Number(mm[2]);
+        counts.C = Number(mm[3]); counts.G = Number(mm[4]);
+    }
+    if (!Object.keys(files).length && !p.ok) {
+        return { ...p, reason: p.reason || 'CheckCIF produced no report.' };
+    }
+    return { ...p, files, checkcif: { summary: summary.trim(), counts } };
 }
 
 // Run one full "solve -> refine -> validate" round for a project. Returns the
@@ -1847,6 +2067,48 @@ app.get('/projects/:name/cif-values', (req, res) => {
     } catch (error) {
         console.error('cif-values error:', error);
         res.status(500).json({ error: 'Failed to read CIF values', details: error.message });
+    }
+});
+
+// GET /projects/:name/publish-settings
+// Returns the saved "Create Publish CIF" form parameters for a project so the
+// dialog can restore them when it opens.
+app.get('/projects/:name/publish-settings', (req, res) => {
+    try {
+        const projectDir = path.join(PROJECTS_DIR, req.params.name);
+        if (!fs.existsSync(projectDir)) return res.status(404).json({ error: 'Project not found' });
+
+        const file = path.join(projectDir, 'publish-settings.json');
+        if (!fs.existsSync(file)) return res.json({});
+
+        let data = {};
+        try { data = JSON.parse(fs.readFileSync(file, 'utf8')); } catch (e) { data = {}; }
+        res.json(data && typeof data === 'object' ? data : {});
+    } catch (error) {
+        console.error('publish-settings read error:', error);
+        res.status(500).json({ error: 'Failed to read publish settings', details: error.message });
+    }
+});
+
+// POST /projects/:name/publish-settings
+// Body: { userTemplate?, deviceTemplate?, values?: {...} }. Persists the publish
+// form parameters (template choices + Crystal Setting / Other Settings fields).
+app.post('/projects/:name/publish-settings', (req, res) => {
+    try {
+        const projectDir = path.join(PROJECTS_DIR, req.params.name);
+        if (!fs.existsSync(projectDir)) return res.status(404).json({ error: 'Project not found' });
+
+        const body = req.body || {};
+        const data = {
+            userTemplate: typeof body.userTemplate === 'string' ? body.userTemplate : '',
+            deviceTemplate: typeof body.deviceTemplate === 'string' ? body.deviceTemplate : '',
+            values: (body.values && typeof body.values === 'object') ? body.values : {},
+        };
+        fs.writeFileSync(path.join(projectDir, 'publish-settings.json'), JSON.stringify(data, null, 2), 'utf8');
+        res.json({ success: true });
+    } catch (error) {
+        console.error('publish-settings write error:', error);
+        res.status(500).json({ error: 'Failed to save publish settings', details: error.message });
     }
 });
 

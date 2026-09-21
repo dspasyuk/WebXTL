@@ -25,6 +25,7 @@ import { RealSpaceRefiner } from './js/compute/RealSpaceRefiner.js';
 import { MoleculeCluster } from './js/compute/MoleculeCluster.js';
 import { FRAGMENTS } from './js/compute/FragmentLibrary.js';
 import { SphericalAbsorption } from './js/compute/SphericalAbsorption.js';
+import { omitInstructionsFromLst, mergeOmitInstructions, OMIT_ERROR_ESD_THRESHOLD } from './js/compute/omitReflections.js';
 import { AI_PROVIDERS, DEFAULT_AI_SETTINGS, aiSettingsFromProvider, aiChat, aiChatAgent, listModels } from './js/ai/client.js';
 import { AI_PROMPTS } from './js/ai/prompts.js';
 import './js/ace/mode-cif.js';
@@ -2086,6 +2087,13 @@ class WMOLApp {
         const devEl = document.getElementById('pub-device-template');
         if (userEl) userEl.value = (saved && saved.userTemplate) || '';
         if (devEl) devEl.value = (saved && saved.deviceTemplate) || '';
+
+        // PLATON SQUEEZE details are free text, restored verbatim.
+        const squeezeEl = document.getElementById('pub-platon-squeeze');
+        if (squeezeEl) squeezeEl.value = (saved && typeof saved.platonSqueeze === 'string') ? saved.platonSqueeze : '';
+
+        // CheckCIF alert/response rows.
+        this.setAlertReplies(saved && Array.isArray(saved.alertReplies) ? saved.alertReplies : []);
     }
 
     // Apply CIF key/values to the publish form. With allowClear=true every key
@@ -2119,12 +2127,16 @@ class WMOLApp {
         set('pub-size-mid', '_exptl_crystal_size_mid');
         set('pub-size-max', '_exptl_crystal_size_max');
         setSel('pub-cell-setting', '_symmetry_cell_setting');
-        set('pub-space-hm', '_symmetry_space_group_name_Hall');
+        set('pub-space-hm', '_symmetry_space_group_name_H-M');
         set('pub-z', '_cell_formula_units_Z');
         set('pub-abs-min', '_exptl_absorpt_correction_T_min');
         set('pub-abs-max', '_exptl_absorpt_correction_T_max');
         set('pub-temp', '_diffrn_ambient_temperature');
         setSel('pub-h-treat', '_refine_ls_hydrogen_treatment');
+        set('pub-cell-reflns-used', '_cell_measurement_reflns_used');
+        setSel('pub-abs-config', '_chemical_absolute_configuration');
+        set('pub-cell-theta-min', '_cell_measurement_theta_min');
+        set('pub-cell-theta-max', '_cell_measurement_theta_max');
     }
 
     // Collect the form values into a key->value map (empty values omitted).
@@ -2138,12 +2150,16 @@ class WMOLApp {
             '_exptl_crystal_size_mid': val('pub-size-mid'),
             '_exptl_crystal_size_max': val('pub-size-max'),
             '_symmetry_cell_setting': val('pub-cell-setting'),
-            '_symmetry_space_group_name_Hall': val('pub-space-hm'),
+            '_symmetry_space_group_name_H-M': val('pub-space-hm'),
             '_cell_formula_units_Z': val('pub-z'),
             '_exptl_absorpt_correction_T_min': val('pub-abs-min'),
             '_exptl_absorpt_correction_T_max': val('pub-abs-max'),
             '_diffrn_ambient_temperature': val('pub-temp'),
             '_refine_ls_hydrogen_treatment': val('pub-h-treat'),
+            '_cell_measurement_reflns_used': val('pub-cell-reflns-used'),
+            '_chemical_absolute_configuration': val('pub-abs-config'),
+            '_cell_measurement_theta_min': val('pub-cell-theta-min'),
+            '_cell_measurement_theta_max': val('pub-cell-theta-max'),
         };
         const out = {};
         for (const [k, v] of Object.entries(map)) {
@@ -2168,12 +2184,16 @@ class WMOLApp {
             '_exptl_crystal_size_mid': val('pub-size-mid'),
             '_exptl_crystal_size_max': val('pub-size-max'),
             '_symmetry_cell_setting': val('pub-cell-setting'),
-            '_symmetry_space_group_name_Hall': val('pub-space-hm'),
+            '_symmetry_space_group_name_H-M': val('pub-space-hm'),
             '_cell_formula_units_Z': val('pub-z'),
             '_exptl_absorpt_correction_T_min': val('pub-abs-min'),
             '_exptl_absorpt_correction_T_max': val('pub-abs-max'),
             '_diffrn_ambient_temperature': val('pub-temp'),
             '_refine_ls_hydrogen_treatment': val('pub-h-treat'),
+            '_cell_measurement_reflns_used': val('pub-cell-reflns-used'),
+            '_chemical_absolute_configuration': val('pub-abs-config'),
+            '_cell_measurement_theta_min': val('pub-cell-theta-min'),
+            '_cell_measurement_theta_max': val('pub-cell-theta-max'),
         };
     }
 
@@ -2183,6 +2203,8 @@ class WMOLApp {
             userTemplate: document.getElementById('pub-user-template')?.value || '',
             deviceTemplate: document.getElementById('pub-device-template')?.value || '',
             values: this.collectPublishFormState(),
+            platonSqueeze: document.getElementById('pub-platon-squeeze')?.value || '',
+            alertReplies: this.collectAlertReplies(),
         };
         try {
             await this.apiSavePublishSettings(project, settings);
@@ -2207,6 +2229,69 @@ class WMOLApp {
                 }
             });
         }
+
+        const btnAddAlert = document.getElementById('pub-add-alert');
+        if (btnAddAlert) btnAddAlert.addEventListener('click', () => this.addAlertRow());
+    }
+
+    // Add one checkCIF alert/response row to the publish dialog.
+    addAlertRow(alert = '', response = '') {
+        const list = document.getElementById('pub-alert-list');
+        if (!list) return;
+        const row = document.createElement('div');
+        row.className = 'border rounded p-2 mb-2 pub-alert-row';
+
+        const head = document.createElement('div');
+        head.className = 'd-flex justify-content-between align-items-center mb-1';
+        const caption = document.createElement('span');
+        caption.className = 'small text-muted';
+        caption.textContent = 'Alert';
+        const remove = document.createElement('button');
+        remove.type = 'button';
+        remove.className = 'btn btn-sm btn-link text-danger p-0 pub-alert-remove';
+        remove.textContent = 'Remove';
+        remove.addEventListener('click', () => row.remove());
+        head.appendChild(caption);
+        head.appendChild(remove);
+
+        const alertEl = document.createElement('textarea');
+        alertEl.className = 'form-control form-control-sm mb-1 pub-alert-text';
+        alertEl.rows = 2;
+        alertEl.placeholder = 'PLAT420_ALERT_2_B D-H Bond Without Acceptor  O6       --H6       .     Please Check';
+        alertEl.value = alert;
+
+        const responseEl = document.createElement('textarea');
+        responseEl.className = 'form-control form-control-sm pub-alert-response';
+        responseEl.rows = 2;
+        responseEl.placeholder = 'Explanation / response';
+        responseEl.value = response;
+
+        row.appendChild(head);
+        row.appendChild(alertEl);
+        row.appendChild(responseEl);
+        list.appendChild(row);
+    }
+
+    clearAlertRows() {
+        const list = document.getElementById('pub-alert-list');
+        if (list) list.innerHTML = '';
+    }
+
+    // Read the alert/response rows currently shown in the publish dialog.
+    collectAlertReplies() {
+        const rows = document.querySelectorAll('#pub-alert-list .pub-alert-row');
+        const out = [];
+        rows.forEach(row => {
+            const alert = (row.querySelector('.pub-alert-text')?.value || '').trim();
+            const response = (row.querySelector('.pub-alert-response')?.value || '').trim();
+            if (alert || response) out.push({ alert, response });
+        });
+        return out;
+    }
+
+    setAlertReplies(replies) {
+        this.clearAlertRows();
+        (Array.isArray(replies) ? replies : []).forEach(r => this.addAlertRow(r.alert || '', r.response || ''));
     }
 
     setPublishStatus(html, isError = false) {
@@ -2223,6 +2308,8 @@ class WMOLApp {
             userTemplate: document.getElementById('pub-user-template').value,
             deviceTemplate: document.getElementById('pub-device-template').value,
             extraValues: this.collectPublishFormValues(),
+            platonSqueeze: document.getElementById('pub-platon-squeeze')?.value || '',
+            alertReplies: this.collectAlertReplies(),
         };
 
         this.setPublishStatus('Generating publish CIF...');
@@ -3108,6 +3195,76 @@ class WMOLApp {
             let msg = `Inserted ${dispLines.length} DISP line(s) at λ=${wavelength} Å (${energy.toFixed(0)} eV).`;
             if (missing.length) msg += ` No data: ${missing.join(', ')}.`;
             status.textContent = msg;
+        }
+    }
+
+    // Omit reflections whose Error/esd exceeds the threshold in the .lst. SHELXL
+    // writes the "Most Disagreeable Reflections" table (h k l Fo^2 Fc^2
+    // Error/esd ...) to the refinement log; reflections above Error/esd 9 are
+    // turned into "OMIT h k l" instructions appended to the structure.
+    async omitError(threshold = OMIT_ERROR_ESD_THRESHOLD) {
+        const editor = this.state.editors.res;
+        if (!editor) { alert('Open a structure (.res/.ins) first.'); return; }
+        let lstText = this.state.editors.lst ? this.state.editors.lst.getValue() : '';
+        if (!lstText.trim()) {
+            // No .lst in the browser yet: fall back to the refinement log stored
+            // in the current project folder (same basename as project/structure).
+            lstText = await this.fetchProjectLst();
+            if (lstText) {
+                const lstEditor = this.state.editors.lst;
+                if (lstEditor) lstEditor.setValue(lstText, -1);
+            }
+        }
+        if (!lstText.trim()) {
+            alert('No .lst log found for this project. Run a refinement (or open a .lst) before omitting reflections.');
+            return;
+        }
+
+        const { reflections, instructions } = omitInstructionsFromLst(lstText, threshold);
+        const status = document.getElementById('status-bar-content');
+        if (!reflections.length) {
+            alert('No "Most Disagreeable Reflections" table found in the .lst.');
+            return;
+        }
+        if (!instructions.length) {
+            if (status) status.textContent = `No reflections with Error/esd > ${threshold} (max ${Math.max(...reflections.map(r => r.errorEsd)).toFixed(2)}).`;
+            return;
+        }
+
+        const { text, inserted, changed } = mergeOmitInstructions(editor.getValue(), instructions);
+        if (!changed) {
+            if (status) status.textContent = `All ${instructions.length} reflection(s) with Error/esd > ${threshold} are already omitted.`;
+            return;
+        }
+
+        editor.setValue(text, -1);
+        editor.loadedFile = text;
+        this.state.loadedContent = text;
+        this.renderContent(text, 'res');
+        if (status) status.textContent = `Omitted ${inserted.length} reflection(s) with Error/esd > ${threshold}.`;
+    }
+
+    // Fetch the current project's refinement log. Prefers <project>.lst, then the
+    // loaded structure basename, then any *.lst in the project. Returns '' when
+    // there is no project/.lst or the server cannot be reached.
+    async fetchProjectLst() {
+        const project = this.state.currentProject;
+        if (!project) return '';
+        try {
+            const files = await this.apiListProjectFiles(project);
+            const lstFiles = files.filter(f => /\.lst$/i.test(f.name));
+            if (!lstFiles.length) return '';
+            const projName = String(project).toLowerCase();
+            const structBase = (this.state.loadedFilename || '').replace(/\.[^.]+$/, '').toLowerCase();
+            const pick = lstFiles.find(f => f.name.toLowerCase() === `${projName}.lst`)
+                || (structBase ? lstFiles.find(f => f.name.toLowerCase() === `${structBase}.lst`) : null)
+                || lstFiles.find(f => f.name.toLowerCase().startsWith(projName + '_'))
+                || (structBase ? lstFiles.find(f => f.name.toLowerCase().startsWith(structBase + '_')) : null)
+                || lstFiles[0];
+            return await this.apiGetProjectFile(project, pick.name);
+        } catch (e) {
+            console.warn('Could not load project .lst:', e.message);
+            return '';
         }
     }
 
@@ -4417,16 +4574,7 @@ class WMOLApp {
         // OMIT Error/ESD>9
         editor.commands.addCommand({
             name: 'omitError',
-            exec: (editor) => {
-                // This usually implies looking at the .lst file or .res file comments?
-                // Or maybe just adding an OMIT instruction?
-                // "OMIT reflections with ERROR/ESD>9"
-                // This sounds like a specific Shelx command or a cleanup script.
-                // I'll just insert "OMIT -3 50" as a placeholder or similar.
-                // Or maybe it filters HKL?
-                // Let's assume it adds a standard OMIT instruction.
-                editor.insert("OMIT 0 999\n"); 
-            }
+            exec: () => { this.omitError(); }
         });
 
         // Calculate DISP

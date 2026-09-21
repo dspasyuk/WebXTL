@@ -7,9 +7,10 @@ _diffrn_radiation_monochromator   'Silicon 111'
 _computing_data_collection        'MxDC, (Fodje, 2012)'
 _computing_cell_refinement        'XDS (Kabsch (2010)'
 _computing_data_reduction         'XDS (Kabsch (2010)'  
-_computing_structure_solution     'SHELXL2013 (Sheldrick, 2013)'
-_computing_structure_refinement   'SHELXL2013 (Sheldrick, 2013)'
-_computing_molecular_graphics     'ShelXle (Hubschle, 2011)' 
+_computing_structure_solution     'SHELXL2018 (Sheldrick, 2013)'
+_computing_structure_refinement   'SHELXL2018 (Sheldrick, 2013)'
+_computing_molecular_graphics     'WebXTL (Spasyuk, 2026)' 
 _diffrn_ambient_temperature        100
 _cell_measurement_temperature      100
 _exptl_absorpt_process_details     'SADABS (Sheldrick, 1996)'
+_exptl_absorpt_correction_type     'multi-scan'

@@ -2047,12 +2047,16 @@ app.get('/projects/:name/cif-values', (req, res) => {
             '_exptl_crystal_size_mid': ['_exptl_crystal_size_mid'],
             '_exptl_crystal_size_max': ['_exptl_crystal_size_max'],
             '_symmetry_cell_setting': ['_symmetry_cell_setting', '_space_group_crystal_system'],
-            '_symmetry_space_group_name_Hall': ['_symmetry_space_group_name_Hall', '_space_group_name_Hall'],
+            '_symmetry_space_group_name_H-M': ['_symmetry_space_group_name_H-M', '_space_group_name_H-M_alt'],
             '_cell_formula_units_Z': ['_cell_formula_units_Z'],
             '_exptl_absorpt_correction_T_min': ['_exptl_absorpt_correction_T_min'],
             '_exptl_absorpt_correction_T_max': ['_exptl_absorpt_correction_T_max'],
             '_diffrn_ambient_temperature': ['_diffrn_ambient_temperature'],
             '_refine_ls_hydrogen_treatment': ['_refine_ls_hydrogen_treatment'],
+            '_cell_measurement_reflns_used': ['_cell_measurement_reflns_used'],
+            '_chemical_absolute_configuration': ['_chemical_absolute_configuration'],
+            '_cell_measurement_theta_min': ['_cell_measurement_theta_min'],
+            '_cell_measurement_theta_max': ['_cell_measurement_theta_max'],
         };
         const values = {};
         for (const [outKey, srcKeys] of Object.entries(fields)) {
@@ -2103,6 +2107,8 @@ app.post('/projects/:name/publish-settings', (req, res) => {
             userTemplate: typeof body.userTemplate === 'string' ? body.userTemplate : '',
             deviceTemplate: typeof body.deviceTemplate === 'string' ? body.deviceTemplate : '',
             values: (body.values && typeof body.values === 'object') ? body.values : {},
+            platonSqueeze: typeof body.platonSqueeze === 'string' ? body.platonSqueeze : '',
+            alertReplies: Array.isArray(body.alertReplies) ? body.alertReplies : [],
         };
         fs.writeFileSync(path.join(projectDir, 'publish-settings.json'), JSON.stringify(data, null, 2), 'utf8');
         res.json({ success: true });
@@ -2146,9 +2152,16 @@ app.post('/projects/:name/publish-cif', (req, res) => {
                 userTemplate,
                 deviceValues,
                 extraValues: body.extraValues || {},
+                platonSqueeze: body.platonSqueeze || '',
+                alertReplies: Array.isArray(body.alertReplies) ? body.alertReplies : [],
             });
         } else {
-            out = buildPublishCif(cifText, { includeGlobal: !!body.includeGlobal, global: body.global });
+            out = buildPublishCif(cifText, {
+                includeGlobal: !!body.includeGlobal,
+                global: body.global,
+                platonSqueeze: body.platonSqueeze || '',
+                alertReplies: Array.isArray(body.alertReplies) ? body.alertReplies : [],
+            });
         }
 
         // Persist as publish.cif in the project for convenience.

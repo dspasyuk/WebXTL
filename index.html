@@ -728,7 +728,7 @@
                     <hr>
                     <p><strong>Author:</strong> Denis Spasyuk</p>
                     <p><strong>License:</strong> MIT</p>
-                    <p>Version 1.2.0</p>
+                    <p>Version 1.3.0</p>
                     <p class="small text-muted">&copy; 2026 Denis Spasyuk</p>
                 </div>
                 <div class="modal-footer">
@@ -1046,8 +1046,64 @@
                                                 <option>none</option>
                                             </select>
                                         </div>
+                                        <div class="col-6">
+                                            <label class="form-label small mb-1">Cell reflns used</label>
+                                            <input type="text" class="form-control form-control-sm"
+                                                id="pub-cell-reflns-used">
+                                        </div>
+                                        <div class="col-6">
+                                            <label class="form-label small mb-1">Absolute configuration</label>
+                                            <select class="form-select form-select-sm" id="pub-abs-config">
+                                                <option value="">--</option>
+                                                <option>ad</option>
+                                                <option>rm</option>
+                                                <option>syn</option>
+                                                <option>anti</option>
+                                                <option>unknown</option>
+                                            </select>
+                                        </div>
+                                        <div class="col-6">
+                                            <label class="form-label small mb-1">Cell theta min (&deg;)</label>
+                                            <input type="text" class="form-control form-control-sm"
+                                                id="pub-cell-theta-min">
+                                        </div>
+                                        <div class="col-6">
+                                            <label class="form-label small mb-1">Cell theta max (&deg;)</label>
+                                            <input type="text" class="form-control form-control-sm"
+                                                id="pub-cell-theta-max">
+                                        </div>
                                     </div>
                                 </fieldset>
+                            </div>
+                        </div>
+
+                        <!-- PLATON SQUEEZE details (pasted verbatim into the CIF) -->
+                        <div class="row g-2 mt-1">
+                            <div class="col-12">
+                                <label class="form-label small mb-1">PLATON SQUEEZE details
+                                    (<code>_platon_squeeze_details</code> + void loop)</label>
+                                <textarea class="form-control form-control-sm" id="pub-platon-squeeze" rows="7"
+                                    spellcheck="false"
+                                    placeholder="_platon_squeeze_details&#10;;&#10;The SQUEEZE procedure was applied to treat ...&#10;;&#10;&#10;loop_&#10;  _platon_squeeze_void_nr&#10;  ...&#10;  _platon_squeeze_void_probe_radius                  1.20"></textarea>
+                                <div class="form-text">Paste the PLATON SQUEEZE CIF fragment; it is inserted verbatim at
+                                    the end of the structure block.</div>
+                            </div>
+                        </div>
+
+                        <!-- CheckCIF alert explanations (Validation Reply Form) -->
+                        <div class="row g-2 mt-1">
+                            <div class="col-12">
+                                <div class="d-flex justify-content-between align-items-center mb-1">
+                                    <label class="form-label small mb-0">CheckCIF alert explanations
+                                        (Validation Reply Form)</label>
+                                    <button type="button" class="btn btn-sm btn-outline-secondary py-0"
+                                        id="pub-add-alert"><i class="fa-solid fa-plus me-1"></i>Add alert</button>
+                                </div>
+                                <div id="pub-alert-list"></div>
+                                <div class="form-text">Paste a checkCIF alert (e.g.
+                                    <code>PLAT420_ALERT_2_B D-H Bond Without Acceptor O6 --H6 . Please Check</code>)
+                                    and its explanation. Each pair is written into the CIF as a
+                                    <code>_vrf_</code> Validation Reply Form entry.</div>
                             </div>
                         </div>
                     </div>

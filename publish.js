@@ -82,54 +82,90 @@ function findLoop(loops, key) {
 // Publish CIF generation
 // ---------------------------------------------------------------------------
 
+// Deprecated (pre-2010) symmetry keys -> current space-group keys. Used both to
+// upgrade the data block and to translate the publication form values, so the
+// published CIF follows current CIF syntax.
 const SG_RENAMES = [
-    ['_space_group_crystal_system', '_symmetry_cell_setting'],
-    ['_space_group_name_Hall', '_symmetry_space_group_name_Hall'],
-    ['_space_group_name_H-M_alt', '_symmetry_space_group_name_H-M'],
+    ['_symmetry_cell_setting', '_space_group_crystal_system'],
+    ['_symmetry_space_group_name_Hall', '_space_group_name_Hall'],
+    ['_symmetry_space_group_name_H-M', '_space_group_name_H-M_alt'],
 ];
 
-// Extract and clean the main data block (data_ ... _refine_diff_density_rms).
-// Returns an array of lines with space-group keys renamed and PLATON squeeze removed.
+// Rewrite a {key: value} map so legacy symmetry keys become the current
+// space-group keys.
+function normalizeValueKeys(values) {
+    const out = {};
+    for (const [k, v] of Object.entries(values || {})) {
+        let key = k;
+        for (const [from, to] of SG_RENAMES) {
+            if (key === from) { key = to; break; }
+        }
+        out[key] = v;
+    }
+    return out;
+}
+
+// Extract the main data block, keeping the embedded .res, .hkl and .fab files
+// that SHELXL stores in _shelx_res_file / _shelx_hkl_file / _shelx_fab_file
+// (their checksums depend on the exact bytes, so those text fields are copied
+// verbatim). Space-group keys are upgraded to current syntax; blank runs are
+// collapsed and PLATON-squeeze keys are dropped outside of text fields only.
 export function extractMainBlock(cifText) {
     const lines = cifText.split(/\r?\n/);
 
-    // Locate the data block boundaries.
-    let start = 0;
-    let end = lines.length - 1;
-    for (let n = 0; n < lines.length; n++) {
-        const l = lines[n].trim();
-        if (l.startsWith('data_')) start = n;
-        if (l.startsWith('_refine_diff_density_rms')) end = n + 1;
+    // Start of the data block.
+    let start = lines.findIndex(l => l.trim().startsWith('data_'));
+    if (start === -1) start = 0;
+
+    // End just after the last embedded-file checksum, so the structure model,
+    // structure factors and the .fab mask (all required by validation) are kept.
+    // The .fab text field itself contains the source PLATON/SQUEEZE comments, but
+    // those are inside a ;-block and therefore copied verbatim, not parsed.
+    let end = -1;
+    for (let n = start + 1; n < lines.length; n++) {
+        if (/^_(shelx_)?(hkl|res|fab)_checksum\b/i.test(lines[n].trim())) end = n + 1;
     }
-
-    let block = lines.slice(start, end + 1);
-
-    // Rename space-group keys to standard symmetry keys.
-    block = block.map(l => {
-        const t = l.trim();
-        for (const [from, to] of SG_RENAMES) {
-            if (t.startsWith(from)) {
-                return l.replace(from, to);
-            }
+    if (end === -1) {
+        // No embedded files: end at the next top-level data block or EOF.
+        end = lines.length;
+        let inText = false;
+        for (let n = start + 1; n < lines.length; n++) {
+            const t = lines[n].trim();
+            if (lines[n].startsWith(';')) { inText = !inText; continue; }
+            if (!inText && t.startsWith('data_')) { end = n; break; }
         }
-        return l;
-    });
-
-    // Drop PLATON squeeze lines if present.
-    if (block.some(l => l.toLowerCase().includes('_platon_squeeze'))) {
-        block = block.filter(l => !l.toLowerCase().includes('_platon_squeeze'));
     }
 
-    // Collapse runs of blank lines and trim.
+    const block = lines.slice(start, end);
+
     const cleaned = [];
+    let inText = false;
     let blank = 0;
-    for (const l of block) {
-        if (l.trim() === '') {
+    for (const line of block) {
+        const t = line.trim();
+
+        // Toggle ;-delimited text fields (multi-line values, embedded files).
+        if (line.startsWith(';')) {
+            inText = !inText;
+            blank = 0;
+            cleaned.push(line);
+            continue;
+        }
+        if (inText) { cleaned.push(line); continue; }
+
+        if (t.toLowerCase().includes('_platon_squeeze')) continue;
+
+        let out = line;
+        for (const [from, to] of SG_RENAMES) {
+            if (t.startsWith(from)) { out = line.replace(from, to); break; }
+        }
+
+        if (out.trim() === '') {
             blank++;
-            if (blank <= 1) cleaned.push('');
+            if (blank <= 1) cleaned.push(out);
         } else {
             blank = 0;
-            cleaned.push(l);
+            cleaned.push(out);
         }
     }
     while (cleaned.length && cleaned[0] === '') cleaned.shift();
@@ -173,14 +209,29 @@ export function checkValue(value) {
 // Apply a key->value dict to a block of CIF lines.
 // - Existing single-line keys: value replaced (33-char key column preserved).
 // - Existing multi-line (;) keys: whole block replaced by the new single-line value.
-// - Missing keys: appended at the end.
+// - Missing keys: inserted next to others of the same CIF category (e.g. a new
+//   _diffrn_radiation_source goes after the last existing _diffrn_* key), so
+//   template values do not pile up at the end of the file. Keys with no anchor
+//   in the block are appended.
 export function applyValuesToBlock(block, values) {
     const out = [];
     const consumed = new Set();
+    let inText = false;
     let i = 0;
     while (i < block.length) {
         const line = block[i];
         const t = line.trim();
+
+        // Copy ;-delimited text fields (e.g. embedded .res/.hkl) verbatim so
+        // their checksums stay valid; never treat their content as CIF keys.
+        if (line.startsWith(';')) {
+            inText = !inText;
+            out.push(line);
+            i++;
+            continue;
+        }
+        if (inText) { out.push(line); i++; continue; }
+
         const sp = t.indexOf(' ');
         const isKey = t.startsWith('_');
         const key = isKey ? (sp === -1 ? t : t.slice(0, sp)) : null;
@@ -206,15 +257,138 @@ export function applyValuesToBlock(block, values) {
         out.push(line);
         i++;
     }
+
+    // Insert the remaining values next to their CIF category siblings.
+    const groups = new Map();
     for (const [k, v] of Object.entries(values)) {
-        if (!consumed.has(k)) out.push(formatKeyValue(k, v));
+        if (consumed.has(k)) continue;
+        const m = /^_([^_]+)/.exec(k);
+        const category = m ? m[1] : '';
+        if (!groups.has(category)) groups.set(category, []);
+        groups.get(category).push([k, v]);
+    }
+    for (const [category, entries] of groups) {
+        const newLines = entries.map(([k, v]) => formatKeyValue(k, v));
+        const idx = category ? lastKeyIndexOutsideText(out, category) : -1;
+        if (idx === -1) out.push(...newLines);
+        else out.splice(idx + 1, 0, ...newLines);
     }
     return out;
 }
 
+// Index of the last line outside a ;-text field whose key belongs to `category`
+// (e.g. category 'diffrn' matches _diffrn_*), or -1 if none. Prevents new values
+// from being inserted inside an embedded .res/.hkl/.fab text field.
+function lastKeyIndexOutsideText(lines, category) {
+    const re = new RegExp('^_' + escapeRegExp(category) + '(_|$)');
+    let inText = false;
+    let idx = -1;
+    for (let n = 0; n < lines.length; n++) {
+        const line = lines[n];
+        if (line.startsWith(';')) { inText = !inText; continue; }
+        if (!inText && re.test(line.trim())) idx = n;
+    }
+    return idx;
+}
+
+function escapeRegExp(str) {
+    return String(str).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+// Append a user-supplied PLATON SQUEEZE fragment (the _platon_squeeze_details
+// text field and/or the void loop) verbatim at the end of the data block. It is
+// kept as pasted so it stays valid CIF; only outer whitespace is trimmed.
+function appendPlatonSqueeze(fragment) {
+    const text = String(fragment || '').replace(/^\s+|\s+$/g, '');
+    if (!text) return '';
+    return '\n' + text + '\n';
+}
+
+// Extract a checkCIF alert code ("PLAT420") from an alert line such as
+// "PLAT420_ALERT_2_B D-H Bond Without Acceptor ...". Falls back to the first
+// all-caps token (e.g. "RINTA01").
+function vrfAlertCode(alert) {
+    const s = String(alert || '');
+    const m = s.match(/\b([A-Z][A-Z0-9]*)_ALERT/);
+    if (m) return m[1];
+    const token = s.trim().split(/\s+/)[0] || '';
+    return /^[A-Z][A-Z0-9]*$/.test(token) ? token : 'ALERT';
+}
+
+// Word-wrap free text to a maximum line length. Existing line breaks are kept;
+// long words are hard-split. CIF readers are happiest with lines <= 80 chars.
+function wrapText(text, width = 80) {
+    const out = [];
+    for (const raw of String(text == null ? '' : text).replace(/\r\n?/g, '\n').split('\n')) {
+        const line = raw.replace(/\s+$/, '');
+        if (line.length <= width) { out.push(line); continue; }
+        let current = '';
+        for (const word of line.split(/\s+/)) {
+            let w = word;
+            while (w.length > width) {
+                if (current) { out.push(current); current = ''; }
+                out.push(w.slice(0, width));
+                w = w.slice(width);
+            }
+            if (!current) current = w;
+            else if (current.length + 1 + w.length <= width) current += ' ' + w;
+            else { out.push(current); current = w; }
+        }
+        out.push(current);
+    }
+    return out;
+}
+
+// Build a "Validation Reply Form" (VRF) block from {alert, response} pairs.
+// Format used by checkCIF/publCIF:
+//   _vrf_<alertcode>_<dataname>
+//   ;
+//   PROBLEM: <alert line>
+//   RESPONSE: <explanation>
+//   ;
+// PROBLEM/RESPONSE text is wrapped at 80 characters so no CIF line is too long.
+// Returned as lines ready to splice into the structure data block.
+function buildVrfLines(replies, dataName) {
+    const items = (replies || []).filter(r => r && (String(r.alert || '').trim() || String(r.response || '').trim()));
+    if (!items.length) return [];
+    const suffix = String(dataName || 'structure').replace(/[^A-Za-z0-9_]/g, '_') || 'structure';
+    const lines = ['# start Validation Reply Form'];
+    const used = new Set();
+    items.forEach((r) => {
+        const alert = String(r.alert || '').trim();
+        const response = String(r.response || '').trim();
+        let name = `_vrf_${vrfAlertCode(alert)}_${suffix}`;
+        let n = 2;
+        while (used.has(name)) { name = `_vrf_${vrfAlertCode(alert)}_${suffix}_${n++}`; }
+        used.add(name);
+        lines.push(name);
+        lines.push(';');
+        lines.push(...wrapText(`PROBLEM: ${alert}`));
+        lines.push(...wrapText(`RESPONSE: ${response}`));
+        lines.push(';');
+    });
+    lines.push('# end Validation Reply Form');
+    return lines;
+}
+
+// Data name of the structure block (first "data_..." line).
+function blockDataName(block) {
+    const line = (block || []).find(l => l.trim().startsWith('data_'));
+    return line ? line.trim().slice(5).trim() : '';
+}
+
+// Insert the VRF immediately after the structure block's data_ identifier.
+function withVrf(block, replies) {
+    const lines = buildVrfLines(replies, blockDataName(block));
+    if (!lines.length) return block;
+    const at = block.findIndex(l => l.trim().startsWith('data_'));
+    const pos = at === -1 ? 0 : at + 1;
+    return [...block.slice(0, pos), ...lines, ...block.slice(pos)];
+}
+
 // Build a publish CIF from templates (mirrors the Python "Prepare cif for publication"):
 //   publish.cif = user template (data_global) + main block with device values applied.
-// options: { userTemplate: string, deviceValues: {key: value}, extraValues: {key: value} }
+// options: { userTemplate, deviceValues, extraValues, platonSqueeze, alertReplies }
 // extraValues come from the manual form and are auto-quoted via checkValue().
 export function buildPublishCifFromTemplates(cifText, options = {}) {
     const mainBlock = extractMainBlock(cifText);
@@ -224,21 +398,24 @@ export function buildPublishCifFromTemplates(cifText, options = {}) {
         if (v === undefined || v === null || String(v).trim() === '') continue;
         extraValues[k] = checkValue(v);
     }
-    const values = { ...deviceValues, ...extraValues };
-    const updatedBlock = applyValuesToBlock(mainBlock, values);
+    const values = normalizeValueKeys({ ...deviceValues, ...extraValues });
+    let updatedBlock = applyValuesToBlock(mainBlock, values);
+    updatedBlock = withVrf(updatedBlock, options.alertReplies);
 
     let out = '';
     if (options.userTemplate) {
         out += options.userTemplate.replace(/\s+$/, '') + '\n\n';
     }
     out += updatedBlock.join('\n') + '\n';
+    out += appendPlatonSqueeze(options.platonSqueeze);
     return out;
 }
 
 // Build a clean, publication-ready CIF from a SHELXL .cif (manual mode, no templates).
-// options: { includeGlobal: bool, global: {author, address, email, title, abstract, references, figureCaptions, tableLegends} }
+// options: { includeGlobal: bool, global: {...}, platonSqueeze: string, alertReplies: [{alert, response}] }
 export function buildPublishCif(cifText, options = {}) {
-    const cleaned = extractMainBlock(cifText);
+    let cleaned = extractMainBlock(cifText);
+    cleaned = withVrf(cleaned, options.alertReplies);
 
     let out = '';
 
@@ -264,6 +441,7 @@ export function buildPublishCif(cifText, options = {}) {
     }
 
     out += cleaned.join('\n') + '\n';
+    out += appendPlatonSqueeze(options.platonSqueeze);
     return out;
 }
 

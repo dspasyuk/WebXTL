@@ -67,7 +67,7 @@ WebXTL includes a suite of specialized tools for structure refinement:
 -   **Isotropic / U(iso)**: Convert atoms to isotropic or change U(iso) values (Ctrl-I).
 -   **Change Occupancy (sof)**: Set the site-occupancy factor of atom lines — applied only to the atoms currently selected in the editor (Options → Change Occupancy).
 -   **Formula**: Calculate and correct molecular formula based on atom counts.
--   **Omit Error**: Remove atoms with ESD error flags.
+-   **Omit Error/ESD>9**: Parse the "Most Disagreeable Reflections" table from the refinement `.lst` and add `OMIT h k l` instructions for every reflection whose Error/esd exceeds 9. If no `.lst` is open in the browser, the same-basename `.lst` stored in the current project is fetched automatically.
 -   **Calculate DISP**: Compute dispersion corrections.
 -   **Assign Q as C**: Quickly convert Q-peaks to Carbon atoms.
 
@@ -96,7 +96,7 @@ Register it in your MCP client as a *stdio* server with the command above. Expos
 -   **Symmetry & Unit Cell**: Visual toggles for unit cell boundaries and symmetry elements.
 
 ### 📤 Publish Tools
--   **Create Publish CIF**: Generate a publication-ready CIF by combining a user/author template (`data_global` block with author, references, abstract) with an instrument/device template that overrides per-value device settings (e.g. diffractometer, wavelength).
+-   **Create Publish CIF**: Generate a publication-ready CIF by combining a user/author template (`data_global` block with author, references, abstract) with an instrument/device template that overrides per-value device settings (e.g. diffractometer, wavelength). The full structure block is kept — including the embedded `_shelx_res_file` (model), `_shelx_hkl_file` (structure factors) and `_shelx_fab_file` (mask) records, whose text is copied verbatim so the SHELX checksums stay valid — and space-group keys are upgraded to the current `_space_group_*` CIF syntax. Values coming from the device/author templates that are not already in the CIF are inserted next to the other keys of the same category (e.g. a new `_diffrn_radiation_source` goes into the `_diffrn_*` block, not the end of the file). The form also exposes `_cell_measurement_reflns_used`, `_cell_measurement_theta_min/max` and `_chemical_absolute_configuration`, a free-text box for a `_platon_squeeze_details` CIF fragment (description and/or void loop) that is inserted verbatim, and a repeatable **CheckCIF alert explanations** list that emits a `_vrf_<code>_<datablock>` Validation Reply Form (PROBLEM/RESPONSE) immediately after the structure `data_` identifier.
 -   **Crystallographic Report (DOCX)**: One-click generation of a formatted Word report containing crystal data and refinement tables, atomic coordinates, bond lengths/angles, and hydrogen bonds.
 
 ### 🖥️ Server & Backend Architecture

@@ -1,0 +1,8 @@
+_diffrn_measurement_method       '\k and \w scans' 
+_computing_structure_solution     'SHELXL2018 (Sheldrick, 2013)'
+_computing_structure_refinement   'SHELXL2018 (Sheldrick, 2013)'
+_computing_molecular_graphics     'WebXTL (Spasyuk, 2026)' 
+_diffrn_ambient_temperature        100
+_cell_measurement_temperature      100
+_exptl_absorpt_process_details     'SADABS (Sheldrick, 1996)'
+_exptl_absorpt_correction_type     'multi-scan'

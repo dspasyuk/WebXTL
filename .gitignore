@@ -9,7 +9,7 @@ HKLs
 .DS_Store
 *.log
 session-*
-
+/templates/MeCLS.cif
 # Third-party source with academic-only redistribution license (PLATON, (C) A.L. Spek)
 platon.f
 platon.*

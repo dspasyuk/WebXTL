@@ -50,18 +50,37 @@ export function parseCif(text) {
         if (line.startsWith('_')) {
             const sp = line.indexOf(' ');
             const key = sp === -1 ? line : line.slice(0, sp).trim();
-            let value = sp === -1 ? '' : line.slice(sp + 1).trim();
+            const value = sp === -1 ? '' : line.slice(sp + 1).trim();
+
             if (value === ';') {
-                // multi-line value
+                // Multi-line ;-block starting on the next line.
                 const buf = [];
                 i++;
-                while (i < lines.length && lines[i].trim() !== ';') {
-                    buf.push(lines[i]);
-                    i++;
-                }
+                while (i < lines.length && lines[i].trim() !== ';') { buf.push(lines[i]); i++; }
                 i++; // skip closing ';'
-                value = buf.join('\n').trim();
+                kv[key] = buf.join('\n').trim();
+                continue;
             }
+
+            if (value === '') {
+                // CIF allows the value to sit on the following line; SHELX wraps
+                // long items this way (e.g. _chemical_formula_sum).
+                const nt = i + 1 < lines.length ? lines[i + 1].trim() : '';
+                if (nt === ';') {
+                    const buf = [];
+                    i += 2; // skip key line and opening ';'
+                    while (i < lines.length && lines[i].trim() !== ';') { buf.push(lines[i]); i++; }
+                    i++; // skip closing ';'
+                    kv[key] = buf.join('\n').trim();
+                    continue;
+                }
+                if (nt && !nt.startsWith('_') && nt !== 'loop_' && !nt.startsWith('data_')) {
+                    kv[key] = nt;
+                    i += 2; // skip key line and value line
+                    continue;
+                }
+            }
+
             kv[key] = value;
             i++;
             continue;
@@ -517,16 +536,65 @@ function keyValueTable(pairs) {
     return makeTable(rows);
 }
 
+// Strip one layer of CIF quoting from a scalar value.
+function unquote(v) {
+    let s = String(v == null ? '' : v).trim();
+    if (s.length >= 2) {
+        const a = s[0], b = s[s.length - 1];
+        if ((a === "'" && b === "'") || (a === '"' && b === '"')) s = s.slice(1, -1).trim();
+    }
+    return s;
+}
+
 function get(kv, key, fallback = '?') {
     const v = kv[key];
     if (v === undefined || v === '' || v === '?') return fallback;
-    return v;
+    return unquote(v);
+}
+
+// First non-empty, non-'?' value among the given keys (unquoted).
+function firstOf(kv, keys, fallback = '?') {
+    for (const k of keys) {
+        const v = get(kv, k, '');
+        if (v) return v;
+    }
+    return fallback;
 }
 
 function pct(v) {
     const n = parseFloat(v);
     if (isNaN(n)) return '?';
     return (n * 100).toFixed(1) + ' %';
+}
+
+// Table 1 rows (label/value) of the crystallographic report, taken from the
+// parsed CIF key/values. Exported so the mapping can be unit-tested.
+export function crystalDataPairs(kv, dataName) {
+    const a = get(kv, '_cell_length_a'), b = get(kv, '_cell_length_b'), c = get(kv, '_cell_length_c');
+    const al = get(kv, '_cell_angle_alpha'), be = get(kv, '_cell_angle_beta'), ga = get(kv, '_cell_angle_gamma');
+    return [
+        ['Identification code', get(kv, '_chemical_name_common', dataName)],
+        ['Chemical formula', firstOf(kv, ['_chemical_formula_sum', '_chemical_formula_moiety'])],
+        ['Molecular weight', get(kv, '_chemical_formula_weight')],
+        ['Temperature (K)', get(kv, '_diffrn_ambient_temperature')],
+        ['Wavelength (\u00C5)', get(kv, '_diffrn_radiation_wavelength')],
+        ['Crystal system; space group', `${get(kv, '_symmetry_cell_setting', get(kv, '_space_group_crystal_system'))} ; ${get(kv, '_symmetry_space_group_name_H-M', get(kv, '_space_group_name_H-M_alt'))}`],
+        ['Unit cell (\u00C5, \u00B0)', `a = ${a}, b = ${b}, c = ${c}, \u03B1 = ${al}, \u03B2 = ${be}, \u03B3 = ${ga}`],
+        ['Volume (\u00C5\u00B3)', get(kv, '_cell_volume')],
+        ['Z; calculated density (g/cm\u00B3)', `${get(kv, '_cell_formula_units_Z')}; ${get(kv, '_exptl_crystal_density_diffrn')}`],
+        ['Absorption coefficient (\u00B9/mm)', get(kv, '_exptl_absorpt_coefficient_mu')],
+        ['F(000)', get(kv, '_exptl_crystal_F_000')],
+        ['Theta range for data collection (\u00B0)', `${get(kv, '_diffrn_reflns_theta_min')} to ${get(kv, '_diffrn_reflns_theta_max')}`],
+        ['Limiting indices', `${get(kv, '_diffrn_reflns_limit_h_min')} \u2264 h \u2264 ${get(kv, '_diffrn_reflns_limit_h_max')}, ${get(kv, '_diffrn_reflns_limit_k_min')} \u2264 k \u2264 ${get(kv, '_diffrn_reflns_limit_k_max')}, ${get(kv, '_diffrn_reflns_limit_l_min')} \u2264 l \u2264 ${get(kv, '_diffrn_reflns_limit_l_max')}`],
+        ['Reflections collected / unique', `${get(kv, '_diffrn_reflns_number')} / ${get(kv, '_reflns_number_total')} [R(int) = ${get(kv, '_diffrn_reflns_av_R_equivalents')}]`],
+        ['Completeness to theta max', pct(get(kv, '_diffrn_measured_fraction_theta_max'))],
+        ['Refinement method', 'Full-matrix least-squares on F\u00B2'],
+        ['Data / restraints / parameters', `${get(kv, '_refine_ls_number_reflns')} / ${get(kv, '_refine_ls_number_restraints')} / ${get(kv, '_refine_ls_number_parameters')}`],
+        ['Goodness of fit on F\u00B2', get(kv, '_refine_ls_goodness_of_fit_ref')],
+        ['Final R indices [I > 2\u03C3(I)]', `R1 = ${get(kv, '_refine_ls_R_factor_gt')}; wR2 = ${get(kv, '_refine_ls_wR_factor_gt')}`],
+        ['Final R indices [all data]', `R1 = ${get(kv, '_refine_ls_R_factor_all')}; wR2 = ${get(kv, '_refine_ls_wR_factor_ref')}`],
+        ['Largest diff. peak and hole (e/\u00C5\u00B3)', `${get(kv, '_refine_diff_density_max')} and ${get(kv, '_refine_diff_density_min')}`],
+    ];
 }
 
 // Build the full crystallographic report as a DOCX buffer.
@@ -555,32 +623,7 @@ export async function buildReportDocx(cifText, options = {}) {
 
     // ---- Table 1: Crystal data and structure refinement ----
     children.push(heading('Table 1. Crystal data and structure refinement'));
-    const a = get(kv, '_cell_length_a'), b = get(kv, '_cell_length_b'), c = get(kv, '_cell_length_c');
-    const al = get(kv, '_cell_angle_alpha'), be = get(kv, '_cell_angle_beta'), ga = get(kv, '_cell_angle_gamma');
-    const pairs = [
-        ['Identification code', get(kv, '_chemical_name_common', dataName)],
-        ['Chemical formula', get(kv, '_chemical_formula_sum')],
-        ['Molecular weight', get(kv, '_chemical_formula_weight')],
-        ['Temperature (K)', get(kv, '_diffrn_ambient_temperature')],
-        ['Wavelength (\u00C5)', get(kv, '_diffrn_radiation_wavelength')],
-        ['Crystal system; space group', `${get(kv, '_symmetry_cell_setting', get(kv, '_space_group_crystal_system'))} ; ${get(kv, '_symmetry_space_group_name_H-M', get(kv, '_space_group_name_H-M_alt'))}`],
-        ['Unit cell (\u00C5, \u00B0)', `a = ${a}, b = ${b}, c = ${c}, \u03B1 = ${al}, \u03B2 = ${be}, \u03B3 = ${ga}`],
-        ['Volume (\u00C5\u00B3)', get(kv, '_cell_volume')],
-        ['Z; calculated density (g/cm\u00B3)', `${get(kv, '_cell_formula_units_Z')}; ${get(kv, '_exptl_crystal_density_diffrn')}`],
-        ['Absorption coefficient (\u00B9/mm)', get(kv, '_exptl_absorpt_coefficient_mu')],
-        ['F(000)', get(kv, '_exptl_crystal_F_000')],
-        ['Theta range for data collection (\u00B0)', `${get(kv, '_diffrn_reflns_theta_min')} to ${get(kv, '_diffrn_reflns_theta_max')}`],
-        ['Limiting indices', `${get(kv, '_diffrn_reflns_limit_h_min')} \u2264 h \u2264 ${get(kv, '_diffrn_reflns_limit_h_max')}, ${get(kv, '_diffrn_reflns_limit_k_min')} \u2264 k \u2264 ${get(kv, '_diffrn_reflns_limit_k_max')}, ${get(kv, '_diffrn_reflns_limit_l_min')} \u2264 l \u2264 ${get(kv, '_diffrn_reflns_limit_l_max')}`],
-        ['Reflections collected / unique', `${get(kv, '_diffrn_reflns_number')} / ${get(kv, '_reflns_number_total')} [R(int) = ${get(kv, '_diffrn_reflns_av_R_equivalents')}]`],
-        ['Completeness to theta max', pct(get(kv, '_diffrn_measured_fraction_theta_max'))],
-        ['Refinement method', 'Full-matrix least-squares on F\u00B2'],
-        ['Data / restraints / parameters', `${get(kv, '_refine_ls_number_reflns')} / ${get(kv, '_refine_ls_number_restraints')} / ${get(kv, '_refine_ls_number_parameters')}`],
-        ['Goodness of fit on F\u00B2', get(kv, '_refine_ls_goodness_of_fit_ref')],
-        ['Final R indices [I > 2\u03C3(I)]', `R1 = ${get(kv, '_refine_ls_R_factor_gt')}; wR2 = ${get(kv, '_refine_ls_wR_factor_gt')}`],
-        ['Final R indices [all data]', `R1 = ${get(kv, '_refine_ls_R_factor_all')}; wR2 = ${get(kv, '_refine_ls_wR_factor_ref')}`],
-        ['Largest diff. peak and hole (e/\u00C5\u00B3)', `${get(kv, '_refine_diff_density_max')} and ${get(kv, '_refine_diff_density_min')}`],
-    ];
-    children.push(keyValueTable(pairs));
+    children.push(keyValueTable(crystalDataPairs(kv, dataName)));
 
     // ---- Table 2: Atomic coordinates (heavy atoms) ----
     if (atomLoop) {

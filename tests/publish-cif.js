@@ -1,9 +1,14 @@
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
 import {
     extractMainBlock,
     buildPublishCifFromTemplates,
     buildPublishCif,
     applyValuesToBlock,
-    checkValue
+    checkValue,
+    parseCif,
+    crystalDataPairs
 } from '../publish.js';
 
 let failures = 0;
@@ -219,6 +224,33 @@ const tooLong = wrappedVrf.filter(l => l.length > 80);
 check('all vrf lines <= 80 chars', tooLong, []);
 check('wrapped response keeps text', wrappedVrf.join(' ').includes('closest potential acceptor lies at 3.21 A'), true);
 check('wrapped problem starts with prefix', wrappedVrf.some(l => l.startsWith('PROBLEM: PLAT420_ALERT_2_B')), true);
+
+// --- parseCif: value on the following line (as SHELX writes
+// _chemical_formula_sum) and bare-key ;-blocks.
+const NL_CIF = [
+    'data_nl',
+    '_chemical_formula_moiety          ?',
+    '_chemical_formula_sum',
+    " 'C17 H27 Br2 N Ni O2 P' ",
+    '_chemical_formula_weight          526.89',
+    '_publ_section_title',
+    ';',
+    'Title line',
+    ';',
+    '_cell_length_a   10.0',
+].join('\n');
+const parsedNl = parseCif(NL_CIF);
+check('next-line value parsed', parsedNl.kv['_chemical_formula_sum'], "'C17 H27 Br2 N Ni O2 P'");
+check('next-line formula in report data', crystalDataPairs(parsedNl.kv, parsedNl.dataName).find(p => p[0] === 'Chemical formula')[1], 'C17 H27 Br2 N Ni O2 P');
+check('bare-key text block parsed', parsedNl.kv['_publ_section_title'], 'Title line');
+check('next key still parsed', parsedNl.kv['_cell_length_a'], '10.0');
+
+// Real SHELX CIFs wrap the formula onto the next line; the report must show it.
+const here = path.dirname(fileURLToPath(import.meta.url));
+const realCif = fs.readFileSync(path.join(here, '../projects/example/example.cif'), 'utf8');
+const realParsed = parseCif(realCif);
+const realFormula = crystalDataPairs(realParsed.kv, realParsed.dataName).find(p => p[0] === 'Chemical formula')[1];
+check('example.cif formula present', realFormula, 'C17 H27 Br2 N Ni O2 P');
 
 console.log(failures ? `\n${failures} failure(s)` : '\nall tests passed');
 process.exit(failures ? 1 : 0);

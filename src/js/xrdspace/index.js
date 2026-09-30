@@ -2,7 +2,8 @@
 // xrdspace — a JavaScript XPREP-style space-group determination tool.
 //
 // Main entry point: loads the space-group dictionary, parses HKL files
-// (XDS_ASCII, SHELX), and runs the full space-group analysis.
+// (XDS_ASCII, SHELX five-column, COD, Bruker P4P, MTZ), and runs the full
+// space-group analysis.
 // Works both as a Node module (for the WebXTL server/UI) and from the CLI
 // (see xrdspace.js).
 
@@ -12,10 +13,12 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { parseHkl } from './hkl-parser.js';
+import { parseMtz, writeMtz, getReflections } from './mtz.js';
 import { buildLaueGroups, sgLaueClass } from './laue.js';
 import { analyzeSpaceGroup, crystalSystemFromCell, scoreSpaceGroup, isCentrosymmetric, laueClassOfSg, isSohncke, cellVolume } from './analyze.js';
-import { mergeReflections, computeMergeStatistics, resolutionShellStats, artifactReport, writeShelxHkl, writeXdsAscii, writeXdsAsciiUnmerged, buildMergingReport, dSpacing } from './merge.js';
-import { parseOperation } from './op-math.js';
+import { mergeReflections, computeMergeStatistics, resolutionShellStats, artifactReport, writeShelxHkl, writeShelxHklUnmerged, writeXdsAscii, writeXdsAsciiUnmerged, buildMergingReport, dSpacing } from './merge.js';
+import { parseOperation, LATT_CENTERING, shelxSymmGenerators } from './op-math.js';
+import { analyzeBeamDamage } from './raddose.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -68,9 +71,13 @@ export function resolveSpaceGroup(sgData, spec) {
     return null;
 }
 
-// Centering letter (P/A/B/C/I/F/R) from a space group entry.
-function centeringOf(sg) {
-    return (sg.hm || ' ')[0].toUpperCase();
+// Centering letter (P/A/B/C/I/F/R) from a space group entry. The Hall symbol's
+// lattice letter is authoritative for non-standard settings (e.g. the
+// primitive-rhombohedral "P 3*" setting of R 3, which is P, not R).
+export function centeringOf(sg) {
+    const fromHs = ((sg.hs || '').replace(/^-\s*/, '')[0] || '').toUpperCase();
+    if (fromHs && 'PABCIFR'.includes(fromHs)) return fromHs;
+    return ((sg.hm || 'P')[0] || 'P').toUpperCase();
 }
 
 // Generate a SHELX instruction (.ins) file for structure-solution programs
@@ -84,14 +91,17 @@ export function writeShelxIns(usedSG, cell, options = {}) {
     out.push(`TITL ${title}`);
     out.push(`CELL ${wl.toFixed(5)} ${cell.a} ${cell.b} ${cell.c} ${cell.alpha} ${cell.beta} ${cell.gamma}`);
     out.push('ZERR 1 0.001 0.001 0.001 0.001 0.001 0.001');
-    const lattNum = { P: 1, A: 2, B: 3, C: 4, I: 5, F: 6, R: 7 }[centeringOf(usedSG)] || 1;
+    const centering = centeringOf(usedSG);
+    const lattType = LATT_CENTERING[centering] || 1;
     const centrosymmetric = isCentrosymmetric(usedSG);
-    const sign = centrosymmetric ? -1 : 1;
-    out.push(`LATT ${sign * lattNum}`);
+    // SHELX: negative LATT means NON-centrosymmetric. Centrosymmetric groups use
+    // a positive LATT and SHELX generates the inversion partners itself.
+    const sign = centrosymmetric ? 1 : -1;
+    out.push(`LATT ${sign * lattType}`);
     // Generating symmetry operations in SHELX convention (fraction first).
-    // For centrosymmetric space groups (LATT < 0) SHELX generates the
-    // inversion partners, so only one op from each inversion pair is written.
-    for (const op of shelxSymmOps(usedSG.s, centrosymmetric)) {
+    // Lattice centering is carried by LATT, so SYMM lists only one op per
+    // centering coset; for centrosymmetric groups only one op per inversion pair.
+    for (const op of shelxSymmOps(usedSG.s, centrosymmetric, lattType)) {
         out.push(`SYMM ${op}`);
     }
     // SHELXD/SHELXS only accept up to 13 scattering-factor types (a longer
@@ -141,72 +151,19 @@ function fmtComponent(cx, cy, cz, t) {
     return out.join('') || '0';
 }
 
-function matIs(m, ref) {
-    for (let i = 0; i < 3; i++) for (let j = 0; j < 3; j++) {
-        if (Math.abs(m[i][j] - ref[i][j]) > 1e-9) return false;
-    }
-    return true;
-}
-
-function vecIs(t, v) {
-    return t.every(x => Math.abs(x - v) < 1e-9);
-}
-
-function matKey(m) {
-    let out = '';
-    for (let i = 0; i < m.length; i++) {
-        if (i) out += '|';
-        for (let j = 0; j < m[i].length; j++) {
-            if (j) out += ',';
-            out += m[i][j];
-        }
-    }
-    return out;
-}
-
-function negVec(t) {
-    const out = [];
-    for (let i = 0; i < t.length; i++) out.push(-t[i]);
-    return out;
-}
-
-// Serialize a vector of values rounded to 6 decimals (for set membership keys).
-function vecKey(t) {
-    let out = '';
-    for (let i = 0; i < t.length; i++) {
-        if (i) out += ',';
-        out += Math.round(t[i] * 1e6) / 1e6;
-    }
-    return out;
-}
-
 // Reduce the full list of general positions to the generating operations
 // expected in a SHELX .ins (identity omitted; for centrosymmetric groups only
-// one op per inversion pair).
-function shelxSymmOps(ops, centrosymmetric) {
-    const I = [[1, 0, 0], [0, 1, 0], [0, 0, 1]];
-    const mI = [[-1, 0, 0], [0, -1, 0], [0, 0, -1]];
-    const out = [];
-    const seen = new Set();
-    for (const opStr of ops) {
-        const p = parseOperation(opStr);
-        if (!p) continue;
-        if (matIs(p.R, I) && vecIs(p.t, 0)) continue;           // identity
-        if (centrosymmetric && matIs(p.R, mI) && vecIs(p.t, 0)) continue; // pure inversion
-        if (centrosymmetric) {
-            // Inversion partner matrix: -R, and -t.
-            const negR = [[-p.R[0][0], -p.R[0][1], -p.R[0][2]], [-p.R[1][0], -p.R[1][1], -p.R[1][2]], [-p.R[2][0], -p.R[2][1], -p.R[2][2]]];
-            const partner = matKey(negR) + '|' + vecKey(negVec(p.t));
-            if (seen.has(partner)) continue;
-            seen.add(matKey(p.R) + '|' + vecKey(p.t));
-        }
+// one op per inversion pair; for centered lattices one op per centering coset).
+function shelxSymmOps(ops, centrosymmetric, lattType = 1) {
+    const parsed = ops.map(parseOperation).filter(Boolean);
+    const gens = shelxSymmGenerators(parsed, { centrosymmetric, latt: lattType });
+    return gens.map(p => {
         const parts = [];
         for (let i = 0; i < 3; i++) {
             parts.push(fmtComponent(p.R[i][0], p.R[i][1], p.R[i][2], p.t[i]));
         }
-        out.push(parts.join(', '));
-    }
-    return out;
+        return parts.join(', ');
+    });
 }
 
 /**
@@ -222,6 +179,14 @@ function shelxSymmOps(ops, centrosymmetric) {
  *                                          // (Sohncke) space groups. Default: true
  *                                          // for macromolecular cells (volume >
  *                                          // 64000 A^3, ~40x40x40), false otherwise.
+ *   quality: boolean,                      // per-shell table + artifact flags
+ *   rad: boolean,                          // RADDOSE-style beam-damage analysis
+ *                                          // (needs unmerged XDS_ASCII with PSI,
+ *                                          //  or Bruker P4P whose omega is PSI)
+ *   radMinIsig: number,                    // I/sigma threshold for the fit (2)
+ *   radEarlyFrac: number,                  // fraction of rotation = "early" (0.25)
+ *   radLateFrac: number,                   // fraction of rotation = "late"  (0.25)
+ *   radShells: number,                     // number of resolution shells (10)
  * }
  * Returns { ok, error?, summary, best, merge }.
  */
@@ -232,7 +197,13 @@ export function analyzeHkl(text, options = {}) {
     } catch (e) {
         return { ok: false, error: e.message };
     }
+    return analyzeParsed(parsed, options);
+}
 
+// Core space-group analysis over a normalized parsed-HKL object
+// ({ format, title, cell, reflections, wavelength, merge, friedelsLaw }).
+// Shared by the text-based (analyzeHkl) and MTZ-based (analyzeMtz) entry points.
+export function analyzeParsed(parsed, options = {}) {
     let cell = parsed.cell || options.cell || null;
     if (!cell) {
         return {
@@ -265,6 +236,20 @@ export function analyzeHkl(text, options = {}) {
         if (!reflections.length) {
             return { ok: false, error: 'No reflections within the requested resolution range.' };
         }
+    }
+
+    // Observations that data reduction rejected (XDS marks them with a negative
+    // sigma) are outliers (overloaded, bad-profile, etc.). They must not enter
+    // the merge, the merging statistics, or the space-group analysis: keeping
+    // them inflates R(merge) (13% -> 148% on the MDCoH set) and degrades the
+    // solution. They are retained only in the unmerged XDS_ASCII output, where
+    // their negative sigma is preserved so downstream programs (e.g. Phenix)
+    // can see and handle the flag. This matches XPREP and Pointless, which both
+    // drop the rejected observations from the analysis.
+    const allReflections = reflections;
+    reflections = reflections.filter(r => !r.rejected);
+    if (!reflections.length) {
+        return { ok: false, error: 'No reflections parsed from the HKL file.' };
     }
 
     const laueGroups = getLaueGroups();
@@ -322,9 +307,10 @@ export function analyzeHkl(text, options = {}) {
         merge = {
             nUnique: m.nUnique,
             nObs: m.nObs,
-            // All observations, kept unmerged and labelled as such for programs
+            // All observations (including rejected ones, whose negative sigma
+            // is preserved), kept unmerged and labelled as such for programs
             // (e.g. Phenix) that prefer the redundant measurements.
-            unmergedXdsAscii: writeXdsAsciiUnmerged(reflections, {
+            unmergedXdsAscii: writeXdsAsciiUnmerged(allReflections, {
                 outputFile: options.unmergedOutput || 'structure_unmerged.hkl',
                 cell,
                 spaceGroupNumber: usedSG ? usedSG.id : undefined,
@@ -335,7 +321,13 @@ export function analyzeHkl(text, options = {}) {
                 friedelsLaw: parsed.friedelsLaw,
             }),
             inputWasMerged: parsed.merge,
-            shelxHkl: writeShelxHkl(m.merged),
+            // Default SHELX output: UNMERGED. SHELXL (HKLF 4) does its own
+            // symmetry averaging and scaling, so it must receive the raw
+            // observations; a pre-merged file would double-merge the data.
+            shelxHkl: writeShelxHklUnmerged(reflections),
+            // Merged SHELX five-column text, kept for programs that expect a
+            // pre-merged dataset (e.g. SHELXD/SHELXT in some workflows).
+            shelxHklMerged: writeShelxHkl(m.merged),
             xdsAscii: writeXdsAscii(m.merged, {
                 outputFile: options.xdsOutput || 'structure_xds.hkl',
                 cell,
@@ -354,6 +346,18 @@ export function analyzeHkl(text, options = {}) {
         if (options.quality) {
             merge.shells = resolutionShellStats(reflections, usedLaueOps, cell, { centering: usedCentering });
             merge.artifacts = artifactReport(reflections, usedLaueOps, cell);
+        }
+        // RADDOSE-style beam-damage analysis: per-observation rotation angle
+        // (PSI) is the dose coordinate. Needs unmerged XDS_ASCII input (or P4P,
+        // whose omega is used as PSI); on other input it reports why it is not
+        // usable.
+        if (options.rad) {
+            merge.beamDamage = analyzeBeamDamage(reflections, cell, parsed.geometry, {
+                minIsig: options.radMinIsig,
+                earlyFrac: options.radEarlyFrac,
+                lateFrac: options.radLateFrac,
+                shells: options.radShells,
+            });
         }
         // Consistency of the (possibly forced) space group with the data.
         const fullSG = usedSG && usedSG.id ? sgData.find(g => g.id === usedSG.id) : null;
@@ -419,6 +423,65 @@ export function analyzeHkl(text, options = {}) {
     };
 }
 
+/**
+ * Read an MTZ reflection file (Buffer/ArrayBuffer/Uint8Array) and run the full
+ * xrdspace space-group analysis on it.
+ * options: same as analyzeHkl, plus:
+ *   intensity: string,  // MTZ column for I (default IMEAN, else F)
+ *   sigma: string,      // MTZ column for sigma(I) (default SIGIMEAN, else SIGF)
+ */
+export function analyzeMtz(buffer, options = {}) {
+    let mtz;
+    try {
+        mtz = parseMtz(buffer);
+    } catch (e) {
+        return { ok: false, error: e.message };
+    }
+    let reflections;
+    try {
+        reflections = getReflections(mtz, options);
+    } catch (e) {
+        return { ok: false, error: e.message };
+    }
+    // Resolve wavelength from the dataset records (prefer a non-zero one).
+    const datasets = mtz.datasets || [];
+    const wls = datasets.map(d => d.wavelength).filter(w => Number.isFinite(w) && w > 0);
+    const wavelength = wls.length ? wls[wls.length - 1] : null;
+    const parsed = {
+        format: 'mtz',
+        title: mtz.title || '',
+        cell: mtz.cell,
+        reflections,
+        wavelength,
+        merge: true,
+        friedelsLaw: null,
+        spaceGroupNumber: mtz.spaceGroupNumber,
+        spaceGroupName: mtz.spaceGroupName,
+    };
+    const result = analyzeParsed(parsed, options);
+    if (result.ok) {
+        result.mtz = {
+            ncols: mtz.ncols,
+            nreflections: mtz.nreflections,
+            columns: mtz.columns.map(c => c.label + ':' + c.type),
+            spaceGroupNumber: mtz.spaceGroupNumber,
+            spaceGroupName: mtz.spaceGroupName,
+            byteOrder: mtz.byteOrder,
+        };
+    }
+    return result;
+}
+
+// Read an MTZ file into a structured object (no analysis).
+export function readMtz(buffer, options = {}) {
+    return parseMtz(buffer, options);
+}
+
+// Re-serialize a parsed MTZ object to file bytes.
+export function writeMtzFile(mtz) {
+    return writeMtz(mtz);
+}
+
 // Convenience: return a compact one-line verdict string.
 export function verdict(result) {
     if (!result || !result.ok) return 'n/a';
@@ -447,3 +510,6 @@ export {
     searchPdbLookup,
     validateSpaceGroupAgainstPdb,
 } from './pdb-lookup.js';
+
+// RADDOSE-style beam-damage analysis (--rad).
+export { analyzeBeamDamage, kPer100 } from './raddose.js';

@@ -24,9 +24,9 @@ export function parseComponent(str) {
         let sign = 1;
         if (term[0] === '-') { sign = -1; term = term.slice(1); }
         else if (term[0] === '+') term = term.slice(1);
-        const vmatch = term.match(/[xyz]/);
+        const vmatch = term.match(/[xyz]/i);
         if (vmatch) {
-            const varName = vmatch[0];
+            const varName = vmatch[0].toLowerCase();
             const c = term.slice(0, vmatch.index);
             const coeff = c ? parseFraction(c) : 1;
             const val = sign * coeff;
@@ -60,6 +60,101 @@ export function parseOperation(opString) {
         t[i] = c.t;
     }
     return { R, t };
+}
+
+// SHELX LATT lattice-type codes (SHELX manual): 1=P, 2=I, 3=rhombohedral
+// (obverse, hexagonal axes), 4=F, 5=A, 6=B, 7=C. A *negative* LATT indicates a
+// non-centrosymmetric space group (SHELX then supplies no inversion).
+export const LATT_CENTERING = { P: 1, I: 2, R: 3, F: 4, A: 5, B: 6, C: 7 };
+
+// Lattice-centering translations for a SHELX LATT code (sign ignored).
+export function centeringTranslations(latt) {
+    switch (Math.abs(latt)) {
+        case 2: return [[0, 0, 0], [0.5, 0.5, 0.5]];                        // I
+        case 3: return [[0, 0, 0], [2 / 3, 1 / 3, 1 / 3], [1 / 3, 2 / 3, 2 / 3]]; // R (obverse)
+        case 4: return [[0, 0, 0], [0, 0.5, 0.5], [0.5, 0, 0.5], [0.5, 0.5, 0]];  // F
+        case 5: return [[0, 0, 0], [0, 0.5, 0.5]];                          // A
+        case 6: return [[0, 0, 0], [0.5, 0, 0.5]];                          // B
+        case 7: return [[0, 0, 0], [0.5, 0.5, 0]];                          // C
+        default: return [[0, 0, 0]];                                        // P
+    }
+}
+
+function lexCompare(a, b) {
+    for (let i = 0; i < a.length; i++) {
+        if (Math.abs(a[i] - b[i]) > 1e-9) return a[i] < b[i];
+    }
+    return false;
+}
+
+// Canonical translation representative modulo the lattice-centering translations
+// (components reduced into [0,1)). Ops that differ only by a centering
+// translation share the same representative.
+function reduceTranslation(t, centering) {
+    let best = null;
+    for (const c of centering) {
+        const v = [0, 0, 0];
+        for (let i = 0; i < 3; i++) {
+            let y = t[i] + c[i];
+            y -= Math.floor(y + 1e-9);
+            if (y > 1 - 1e-9 || y < 1e-9) y = 0;
+            v[i] = y;
+        }
+        if (best === null || lexCompare(v, best)) best = v;
+    }
+    return best;
+}
+
+// Reduce a full list of general-position operations to the generating SYMM
+// operators expected by SHELX. Identity is omitted; for centrosymmetric groups
+// SHELX adds the inversion (LATT positive), so one op per inversion pair is
+// kept; operations that differ only by a lattice-centering translation are
+// deduplicated because the centering is carried by LATT, not by SYMM.
+export function shelxSymmGenerators(ops, { centrosymmetric = false, latt = 1 } = {}) {
+    const I = [[1, 0, 0], [0, 1, 0], [0, 0, 1]];
+    const mI = [[-1, 0, 0], [0, -1, 0], [0, 0, -1]];
+    const centering = centeringTranslations(latt);
+    const isMat = (R, ref) => R.every((row, i) => row.every((v, j) => Math.abs(v - ref[i][j]) < 1e-9));
+    const isZero = (v) => v.every(x => x === 0);
+    const opKey = (R, t) => R.map(r => r.join(',')).join('|') + ':' + t.join(',');
+    // Find the group's inversion operation. SHELX requires the origin to lie on
+    // a centre of symmetry, so if the inversion carries a translation we shift
+    // the origin by half of it (origin choice 2) before emitting the operators.
+    let tInv = null;
+    if (centrosymmetric) {
+        for (const p of ops) {
+            if (p && isMat(p.R, mI)) { tInv = reduceTranslation(p.t, centering); break; }
+        }
+    }
+    let shifted = ops;
+    if (tInv && !isZero(tInv)) {
+        const o = tInv.map(v => v / 2);
+        shifted = ops.map(p => {
+            if (!p) return p;
+            const Ro = applyMat(p.R, o);
+            return { R: p.R, t: [0, 1, 2].map(i => p.t[i] + Ro[i] - o[i]) };
+        });
+        tInv = [0, 0, 0];
+    }
+    const out = [];
+    const seen = new Set([opKey(I, [0, 0, 0])]);
+    for (const p of shifted) {
+        if (!p) continue;
+        const t = reduceTranslation(p.t, centering);
+        if (isMat(p.R, I) && isZero(t)) continue;                    // identity
+        if (centrosymmetric && isMat(p.R, mI) && isZero(t)) continue; // inversion at origin
+        const k = opKey(p.R, t);
+        if (seen.has(k)) continue;
+        if (tInv) {
+            // Inversion partner: R' = -R, t' = tInv - t.
+            const negR = p.R.map(row => row.map(v => -v));
+            const negT = reduceTranslation(tInv.map((v, i) => v - t[i]), centering);
+            seen.add(opKey(negR, negT));
+        }
+        seen.add(k);
+        out.push({ R: p.R, t });
+    }
+    return out;
 }
 
 // Determinant of a 3x3 matrix.

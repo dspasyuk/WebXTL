@@ -182,11 +182,12 @@ export function detectCentering(reflections, sigThreshold = 5) {
         let violations = 0;
         let weak = 0;
         let checked = 0;
-        let sumISig = 0;
+        let sumForbiddenI = 0;
         for (const r of reflections) {
             const allowed = cond(r.h, r.k, r.l);
             if (!allowed) {
                 checked++;
+                sumForbiddenI += Math.abs(r.I);
                 if (r.sig > 0) {
                     const isig = Math.abs(r.I) / r.sig;
                     if (isig > sigThreshold) violations++;
@@ -203,11 +204,18 @@ export function detectCentering(reflections, sigThreshold = 5) {
             violations,
             weak,
             checked,
-            meanISig: checked ? sumISig / checked : 0,
+            // Mean intensity of the reflections this centering forbids. For the
+            // correct centering these are at background level (≈ 0); for a wrong
+            // centering they include genuinely-allowed strong reflections, so the
+            // mean is large. This is the discriminator when several centerings
+            // have zero violations (e.g. primitive data, where P and every
+            // centred lattice all "pass").
+            meanForbiddenI: checked ? sumForbiddenI / checked : 0,
         };
     }
     // Choose the most restrictive centering with no significant violations and
-    // no meaningful weak-forbidden presence.
+    // no meaningful weak-forbidden presence. Among such ties, the correct
+    // centering has the weakest forbidden reflections.
     const zero = [];
     for (const x of Object.values(results)) {
         if (x.violations === 0 && x.weak <= Math.max(5, 0.15 * x.checked)) zero.push(x);
@@ -216,7 +224,7 @@ export function detectCentering(reflections, sigThreshold = 5) {
     pool.sort((a, b) => {
         const dr = CENTERING_RANK[b.centering] - CENTERING_RANK[a.centering];
         if (dr !== 0) return dr;
-        return a.violations - b.violations || a.meanISig - b.meanISig;
+        return a.violations - b.violations || a.meanForbiddenI - b.meanForbiddenI;
     });
     return { centering: pool[0].centering, results };
 }
@@ -644,6 +652,19 @@ export function analyzeSpaceGroup(sgData, reflections, cell, options = {}) {
         // Relax: just crystal system + centering.
         candidates = enumerateCandidates(sgData, laueGroups, crystalSystem, centering);
     }
+    if (!candidates.length) {
+        // The detected centering has no stored settings for this crystal system
+        // (e.g. a B/C/I-centred triclinic cell, which the dictionary only holds
+        // as P 1 / P -1). Fall back to the primitive setting so a candidate
+        // always exists; the Bravais centering is still reported from
+        // detectCentering, so a centred cell is not silently mislabelled P.
+        candidates = enumerateCandidates(sgData, laueGroups, crystalSystem, 'P');
+    }
+    if (!candidates.length) {
+        // Last resort: every space group of the crystal system.
+        const [lo, hi] = SYSTEM_RANGES[crystalSystem] || [1, 230];
+        candidates = sgData.filter(g => g.id >= lo && g.id <= hi);
+    }
 
     // Chiral (Sohncke) restriction: macromolecular crystals (large unit cells)
     // are almost always in one of the 65 Sohncke space groups. Restrict the
@@ -672,6 +693,22 @@ export function analyzeSpaceGroup(sgData, reflections, cell, options = {}) {
         : reflections;
     const centricity = estimateCentricity(reflections, cell);
     const useCentricity = centricity.centric || centricity.acentric;
+    // R(sym) of each Laue class, from the R-merge table. This is the strongest
+    // discriminator between candidates of DIFFERENT Laue classes: a candidate
+    // whose Laue class has a much worse R(sym) than the chosen one belongs to a
+    // higher-symmetry class the data does not support (e.g. a 4/mmm group when
+    // the data is 4/m). The systematic-absence test cannot distinguish such
+    // cases (the extra mirrors impose trivially-"confirmed" absences), so the
+    // Laue R(sym) must rank before the confirmed-absence counts.
+    const laueRSym = {};
+    for (const t of laue.table) laueRSym[t.name] = t.rsym;
+    // The same R(sym) cap used to SELECT the Laue class (see selectLaueClass):
+    // a Laue class is "supported" when its R(sym) is within max(7%, 2x the
+    // intrinsic -1 merge). A candidate whose Laue class was REJECTED by this
+    // test (R(sym) above the cap) is inconsistent with the data and is ranked
+    // below every candidate whose Laue class is supported.
+    const baseR = (laue.table.find(t => t.name === '-1') || {}).rsym || 0;
+    const laueCap = Math.max(0.07, 2.0 * baseR);
     for (const c of candidates) {
         // Score every setting of this space group number that uses the detected
         // Bravais centering (e.g. P 1 21/c 1 vs P 1 21/n 1) and keep the best.
@@ -699,9 +736,20 @@ export function analyzeSpaceGroup(sgData, reflections, cell, options = {}) {
         c.centricMatch = useCentricity ? (c.centric === centricity.centric) : 1;
         // Prefer candidates in the R-merge-selected Laue class on a tie.
         c.laueMatch = c.laue === laue.name ? 1 : 0;
+        c.laueRSym = laueRSym[c.laue] != null ? laueRSym[c.laue] : Infinity;
     }
     candidates.sort((a, b) =>
         a.violations - b.violations ||
+        // A candidate whose Laue class was rejected by the R-merge (its R(sym)
+        // is above the cap, i.e. worse than the supported Laue classes) is
+        // ranked below every supported candidate, before the confirmed-absence
+        // counts are compared. This stops a higher-symmetry group (e.g.
+        // I 41/a m d, Laue 4/mmm) from beating the correct lower-symmetry one
+        // (I 41/a, Laue 4/m) merely because the extra mirrors add
+        // trivially-"confirmed" absences. A candidate whose Laue is a subgroup
+        // of the chosen one (lower R(sym)) stays supported and is ranked by the
+        // usual criteria below.
+        (a.laueRSym > laueCap ? 1 : 0) - (b.laueRSym > laueCap ? 1 : 0) ||
         b.confirmedOps - a.confirmedOps ||
         b.confirmedAbsences - a.confirmedAbsences ||
         b.laueMatch - a.laueMatch ||

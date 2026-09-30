@@ -10,8 +10,8 @@
 // Only the fractional coordinates change (same unit cell). Optional origin
 // shift can be supplied. Q peaks and disordered PART partners are preserved.
 
-import { parseOperation, mul3 } from './op-math.js';
-import { loadSpaceGroups, resolveSpaceGroup } from './index.js';
+import { parseOperation, mul3, LATT_CENTERING, centeringTranslations, shelxSymmGenerators } from './op-math.js';
+import { loadSpaceGroups, resolveSpaceGroup, centeringOf } from './index.js';
 
 // SHELX instruction keywords that are not atom lines.
 const SHELX_KEYWORDS = new Set([
@@ -25,19 +25,10 @@ const SHELX_KEYWORDS = new Set([
     'L.S.', 'NEUT', 'ANSC', 'CELL', 'SAVE', 'MERG'
 ]);
 
-// Lattice centering translations for SHELX LATT numbers (P,A,B,C,I,F,R).
+// Lattice-centering translations for SHELX LATT numbers (1=P, 2=I, 3=R,
+// 4=F, 5=A, 6=B, 7=C; sign ignored).
 function centeringVectors(latt) {
-    const n = Math.abs(latt);
-    if (n === 1) return [[0, 0, 0]];                 // P
-    if (n === 2) return [[0, 0, 0], [0, 0.5, 0.5]];   // A
-    if (n === 3) return [[0, 0, 0], [0.5, 0, 0.5]];   // B
-    if (n === 4) return [[0, 0, 0], [0.5, 0.5, 0]];   // C
-    if (n === 5) return [[0, 0, 0], [0.5, 0.5, 0.5]]; // I
-    if (n === 6) return [                              // F
-        [0, 0, 0], [0, 0.5, 0.5], [0.5, 0, 0.5], [0.5, 0.5, 0]];
-    if (n === 7) return [                              // R (hexagonal axes)
-        [0, 0, 0], [2 / 3, 1 / 3, 1 / 3], [1 / 3, 2 / 3, 2 / 3]];
-    return [[0, 0, 0]];
+    return centeringTranslations(Math.abs(latt) || 1);
 }
 
 const I3 = () => [[1, 0, 0], [0, 1, 0], [0, 0, 1]];
@@ -62,7 +53,11 @@ function capElement(s) {
 }
 
 function fracNorm(x) {
-    return x - Math.floor(x);
+    let r = x - Math.floor(x);
+    // Snap accumulated floating-point drift back onto exact fractions.
+    if (r < 1e-9) r = 0;
+    else if (r > 1 - 1e-9) r = 0;
+    return r;
 }
 
 // Normalise an affine op: translations are only defined modulo lattice
@@ -94,11 +89,13 @@ function opKey(op) {
 }
 
 // Build the full general-position operator list (identity + inversion + SYMM
-// generators + centering translations, closed under composition).
+// generators + centering translations, closed under composition). In SHELX a
+// POSITIVE LATT indicates a centrosymmetric group and the program itself adds
+// the inversion; a negative LATT is non-centrosymmetric.
 export function opsFromLattSymm(latt, symmLines = []) {
     const generators = [];
     if (Math.abs(latt) >= 1) generators.push({ R: I3(), t: [0, 0, 0] });
-    if (latt < 0) generators.push({ R: mI3(), t: [0, 0, 0] });
+    if (latt > 0) generators.push({ R: mI3(), t: [0, 0, 0] });
     for (const line of symmLines) {
         const p = parseOperation(line);
         if (p) generators.push({ R: p.R, t: p.t });
@@ -436,9 +433,10 @@ function fmtNum(v, w = 8) {
 // Header instructions (WGHT, REM, restraints, etc.) are carried over.
 export function rebuildShelx(parsed, sg, atoms, oldLatt, oldSymm, originShift = null) {
     const lattNum = Math.abs(oldLatt) || 1;
-    const centeringLetter = (sg.hm || sg.hs || 'P')[0];
-    const lattSign = isCentro(sg) ? -1 : 1;
-    const lattVal = lattSign * { P: 1, A: 2, B: 3, C: 4, I: 5, F: 6, R: 7 }[centeringLetter] || lattSign * lattNum;
+    const centeringLetter = centeringOf(sg);
+    // SHELX: positive LATT = centrosymmetric (SHELX adds inversion), negative = non-centrosymmetric.
+    const lattSign = isCentro(sg) ? 1 : -1;
+    const lattVal = lattSign * (LATT_CENTERING[centeringLetter] || lattNum);
 
     const out = [];
     if (parsed.title) {
@@ -558,42 +556,19 @@ function isCentro(sg) {
     });
 }
 
-// Return SYMM lines (SHELX convention: skip identity; for centrosymmetric
-// groups SHELX adds inversion partners automatically so only half are needed).
+// Return SYMM lines (SHELX convention: identity omitted; for centrosymmetric
+// groups one op per inversion pair; lattice centering carried by LATT).
 function shelxSymmOpsForSg(sg) {
     const centro = isCentro(sg);
+    const centeringLetter = centeringOf(sg);
+    const lattType = LATT_CENTERING[centeringLetter] || 1;
     const ops = (sg.s || []).map(parseOperation).filter(Boolean);
-    const I = [[1, 0, 0], [0, 1, 0], [0, 0, 1]];
-    const out = [];
-    const seen = new Set();
-    const isIdentity = (p) => {
-        for (let i = 0; i < 3; i++) for (let j = 0; j < 3; j++) if (Math.abs(p.R[i][j] - I[i][j]) > 1e-9) return false;
-        return Math.abs(p.t[0]) < 1e-9 && Math.abs(p.t[1]) < 1e-9 && Math.abs(p.t[2]) < 1e-9;
-    };
-    const isInversion = (p) => {
-        const mI = [[-1, 0, 0], [0, -1, 0], [0, 0, -1]];
-        for (let i = 0; i < 3; i++) for (let j = 0; j < 3; j++) if (Math.abs(p.R[i][j] - mI[i][j]) > 1e-9) return false;
-        return Math.abs(p.t[0]) < 1e-9 && Math.abs(p.t[1]) < 1e-9 && Math.abs(p.t[2]) < 1e-9;
-    };
-    const negOp = (p) => ({ R: [[-p.R[0][0], -p.R[0][1], -p.R[0][2]], [-p.R[1][0], -p.R[1][1], -p.R[1][2]], [-p.R[2][0], -p.R[2][1], -p.R[2][2]]], t: [-p.t[0], -p.t[1], -p.t[2]] });
-    const key = (p) => opKey(p);
-    for (const p of ops) {
-        if (isIdentity(p)) continue;
-        if (centro && isInversion(p)) continue; // SHELXL adds -1 from LATT<0
-        const partner = negOp(p);
-        if (centro) {
-            const k = key(p), pk = key(partner);
-            if (seen.has(pk)) continue;
-            seen.add(k);
-        } else {
-            if (seen.has(key(p))) continue;
-            seen.add(key(p));
-        }
+    const gens = shelxSymmGenerators(ops, { centrosymmetric: centro, latt: lattType });
+    return gens.map(p => {
         const parts = [];
         for (let i = 0; i < 3; i++) parts.push(formatComponent(p.R[i], p.t[i]));
-        out.push(parts.join(', '));
-    }
-    return out;
+        return parts.join(', ');
+    });
 }
 
 // Format "-x, 1/2+y, 1/2-z" (uppercase, fraction first).

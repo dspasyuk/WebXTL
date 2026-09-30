@@ -1,13 +1,15 @@
 // Copyright (c) 2026 Denis Spasyuk. MIT License.
 // HKL file parsers for xrdspace.
 // Supports XDS_ASCII.HKL (with ! header lines), the standard SHELX
-// five-column format (H K L I SIG(I)), and COD .hkl files (CIF with a
-// _refln_ reflection loop).
+// five-column format (H K L I SIG(I)), COD .hkl files (CIF with a
+// _refln_ reflection loop), and Bruker P4P files (SAINT/APEX output with a
+// FILEID/CELL/SOURCE header and REF05 reflection records).
 
 export const HKL_FORMAT = {
     XDS_ASCII: 'xds_ascii',
     SHELX: 'shelx',
     COD: 'cod',
+    P4P: 'p4p',
     UNKNOWN: 'unknown',
 };
 
@@ -48,8 +50,40 @@ function parseXdsHeader(lines) {
             const f = val.match(/FRIEDEL'?S_LAW\s*=\s*(\w+)/i);
             if (f) header["FRIEDEL'S_LAW"] = f[1];
         }
+        // Data-record column layout, e.g. "!ITEM_PSI=12". Values are 1-based
+        // column positions; we keep a lowercase key -> column map so the data
+        // parser can read PSI (and friends) without assuming a fixed layout.
+        const item = key.match(/^ITEM_(.+)$/);
+        if (item) {
+            const col = parseInt(val, 10);
+            if (Number.isFinite(col)) header['item_' + item[1].toLowerCase()] = col;
+        }
     }
     return header;
+}
+
+// Scan geometry for a rotation experiment, used to turn each observation's
+// rotation angle (PSI) into a cumulative dose position. Returns
+// { startAngle, oscRange, nFrames, totalRotation } (any field may be null when
+// the header does not carry it).
+function parseXdsGeometry(header) {
+    const num = (v) => {
+        const x = v == null ? NaN : parseFloat(String(v).trim());
+        return Number.isFinite(x) ? x : null;
+    };
+    const startAngle = num(header.STARTING_ANGLE);
+    const oscRange = num(header.OSCILLATION_RANGE);
+    let nFrames = null;
+    const dr = header.DATA_RANGE;
+    if (dr) {
+        const t = tokenize(dr);
+        const lo = parseInt(t[0], 10);
+        const hi = parseInt(t[1], 10);
+        if (Number.isFinite(lo) && Number.isFinite(hi) && hi >= lo) nFrames = hi - lo + 1;
+    }
+    let totalRotation = null;
+    if (oscRange != null && nFrames != null) totalRotation = oscRange * nFrames;
+    return { startAngle, oscRange, nFrames, totalRotation };
 }
 
 // Parse a SHELX-style HKL line: 5+ whitespace separated numbers H K L I SIG(I).
@@ -165,21 +199,137 @@ function parseCodRefln(lines) {
     return out;
 }
 
+// Parse a Bruker P4P header (the fixed keyword lines written by SAINT/APEX).
+// Returns { title, cell, wavelength }. The unit cell is on the `CELL` line and
+// the wavelength is the second number of the `SOURCE` line (e.g. "SOURCE CU
+// 1.54188 1.54056 1.54439 ...").
+function parseP4PHeader(lines) {
+    let title = '';
+    let cell = null;
+    let wavelength = null;
+    for (const raw of lines) {
+        const line = raw.trim();
+        if (!line) continue;
+        const tokens = tokenize(line);
+        const key = tokens[0].toUpperCase();
+        if (key === 'TITLE') {
+            title = tokens.slice(1).join(' ').trim();
+        } else if (key === 'CELL') {
+            if (tokens.length >= 6) {
+                cell = {
+                    a: parseFloat(tokens[1]), b: parseFloat(tokens[2]), c: parseFloat(tokens[3]),
+                    alpha: parseFloat(tokens[4]), beta: parseFloat(tokens[5]), gamma: parseFloat(tokens[6]),
+                };
+            }
+        } else if (key === 'SOURCE') {
+            // "SOURCE CU 1.54188 1.54056 1.54439 2.00000 40.00 4.00"
+            for (let i = 1; i < tokens.length; i++) {
+                const v = parseFloat(tokens[i]);
+                if (Number.isFinite(v)) { wavelength = v; break; }
+            }
+        }
+    }
+    return { title, cell, wavelength };
+}
+
+// Parse a single Bruker P4P `REF05` reflection line.
+//
+// Layout (whitespace-separated, after the "REF05" tag):
+//   [flag] h k l omega 2theta psi chi <2 aux> I sigma u1 u2 u3 [0 0 0 0]
+// where `flag` is an optional single/multi-letter status field (H, C, A, CH,
+// AC, ACH, ...) and the trailing zeros are present in most files.
+//
+// The intensity (I) and its standard deviation (sigma) are the two numeric
+// fields immediately before the reciprocal-lattice vector components
+// (u1, u2, u3): these are verified to equal ORT . (h k l) (the orientation
+// matrix applied to the Miller indices), which pins them down unambiguously.
+// For this SAINT/APEX layout that puts I at h+9 and sigma at h+10. The
+// rotation angle is `omega`, the field right after l.
+//
+// A quirk of some SAINT/APEX versions: when `l` is followed by a negative
+// `omega` the two are written with no separating space, e.g. "13-108.000"
+// meaning l=13, omega=-108.000. We split that token on the sign boundary
+// (omega is always the negative, decimal-carrying part).
+//
+// The (0,0,0) direct-beam / standard-reflection rows that SAINT writes are
+// skipped: they carry no diffraction data.
+//
+// Returns { h, k, l, I, sig, psi } or null.
+function parseP4PLine(line) {
+    const tokens = tokenize(line);
+    if (tokens.length < 12) return null;
+    // Drop the leading "REF05" tag, then any alphabetic status flag(s).
+    let i = 0;
+    if (/^REF\d*$/.test(tokens[0])) i = 1;
+    while (i < tokens.length && !/^-?\d/.test(tokens[i])) i++;
+    // Need at least up to the intensity/sigma pair (the normal case reads
+    // tokens[i+9] and tokens[i+10]).
+    if (i + 10 >= tokens.length) return null;
+
+    let h = parseInt(tokens[i], 10);
+    let k = parseInt(tokens[i + 1], 10);
+    let lTok = tokens[i + 2];
+    let omega;
+    // Normal case: l is a plain integer, omega is the next token.
+    if (/^-?\d+$/.test(lTok)) {
+        const l = parseInt(lTok, 10);
+        if (isNaN(h) || isNaN(k) || isNaN(l)) return null;
+        omega = parseFloat(tokens[i + 3]);
+        // Fields after h: k(+1) l(+2) omega(+3) 2theta(+4) psi(+5) chi(+6)
+        // P1(+7) P2(+8) I(+9) sigma(+10) u1(+11) u2(+12) u3(+13) [0 0 0 0]
+        const I = parseFloat(tokens[i + 9]);
+        const sig = parseFloat(tokens[i + 10]);
+        return makeP4PRefl(h, k, l, omega, I, sig);
+    }
+    // Concatenated case: l and omega are fused, e.g. "13-108.000" or
+    // "-2-108.000". Split at the sign boundary between the integer l and the
+    // (always negative) floating-point omega.
+    const m = lTok.match(/^(-?\d+)(-\d+(?:\.\d+)?)$/);
+    if (!m) return null;
+    const l = parseInt(m[1], 10);
+    if (isNaN(h) || isNaN(k) || isNaN(l)) return null;
+    omega = parseFloat(m[2]);
+    // One token was merged, so everything after l shifts left by one:
+    // I is at i+8, sigma at i+9.
+    const I = parseFloat(tokens[i + 8]);
+    const sig = parseFloat(tokens[i + 9]);
+    return makeP4PRefl(h, k, l, omega, I, sig);
+}
+
+function makeP4PRefl(h, k, l, omega, I, sig) {
+    if (isNaN(I)) return null;
+    // (0,0,0) rows are direct-beam / standard measurements, not reflections.
+    if (h === 0 && k === 0 && l === 0) return null;
+    return {
+        h, k, l,
+        I,
+        sig: isNaN(sig) ? 0 : Math.abs(sig),
+        psi: Number.isFinite(omega) ? omega : undefined,
+        // No `raw`: a P4P REF line is not in XDS_ASCII layout, so it must not
+        // be copied verbatim into an XDS_ASCII output. The per-observation
+        // rotation angle (omega) is carried in `psi` instead, which the
+        // unmerged writer places in the PSI column.
+    };
+}
+
 // Detect the format of an HKL file by scanning its lines. A file with a
-// `_refln_` loop is COD (even though its data rows look SHELX-like); otherwise
-// XDS_ASCII (! header lines) or SHELX five-column.
+// `_refln_` loop is COD (even though its data rows look SHELX-like); a file
+// with a Bruker P4P header (FILEID) is P4P; otherwise XDS_ASCII (! header
+// lines) or SHELX five-column.
 export function detectFormat(text) {
     const lines = text.split(/\r?\n/);
     let hasCodRefln = false;
     let hasCifTag = false;
     let hasXds = false;
     let hasShelx = false;
+    let hasP4PHeader = false;
     for (const raw of lines) {
         const line = raw.trim();
         if (!line || line.startsWith('#')) continue;
         if (line.startsWith('!')) hasXds = true;
         if (line.startsWith('_')) hasCifTag = true;
         if (line.startsWith('_refln_')) hasCodRefln = true;
+        if (/^FILEID\b/.test(line)) hasP4PHeader = true;
         const tokens = tokenize(line);
         if (tokens.length >= 5 && /^-?\d/.test(tokens[0])) hasShelx = true;
     }
@@ -187,6 +337,12 @@ export function detectFormat(text) {
     // A CIF that has no single-crystal `_refln_` loop (e.g. a powder `_pd_`
     // pattern whose numeric rows would otherwise look SHELX-like) is unusable.
     if (hasCifTag) return HKL_FORMAT.UNKNOWN;
+    // P4P is recognised by its FILEID header, which is unambiguous. A P4P file
+    // with no REFxx reflection records (raw DATA blocks only) is still a P4P
+    // file: it simply carries no integrated reflections, so it is detected as
+    // P4P (and the unit cell is read from the header) rather than being
+    // misread as SHELX five-column from the numeric DATA rows.
+    if (hasP4PHeader) return HKL_FORMAT.P4P;
     if (hasXds) return HKL_FORMAT.XDS_ASCII;
     if (hasShelx) return HKL_FORMAT.SHELX;
     return HKL_FORMAT.UNKNOWN;
@@ -198,7 +354,10 @@ export function detectFormat(text) {
  *   format, title,
  *   cell: { a, b, c, alpha, beta, gamma } | null,
  *   spaceGroupNumber, spaceGroupName, wavelength, merge: bool, friedelsLaw,
- *   reflections: [{ h, k, l, I, sig, raw? }]  // raw = original XDS_ASCII line
+ *   geometry: { startAngle, oscRange, nFrames, totalRotation } | null,
+ *              // scan geometry (XDS_ASCII / P4P; null fields when absent)
+ *   reflections: [{ h, k, l, I, sig, psi?, raw? }]
+ *              // raw = original data line; psi = rotation angle (deg)
  * }
  */
 export function parseHkl(text) {
@@ -211,6 +370,7 @@ export function parseHkl(text) {
     let merge = null;
     let friedelsLaw = null;
     let title = '';
+    let geometry = null;
 
     const format = detectFormat(text);
 
@@ -233,15 +393,29 @@ export function parseHkl(text) {
         if (wl) wavelength = parseFloat(wl);
         merge = (header.MERGE || '').toUpperCase() === 'TRUE';
         friedelsLaw = ((header["FRIEDEL'S_LAW"] ?? header.FRIEDELS_LAW) || '').toUpperCase() === 'TRUE';
+        geometry = parseXdsGeometry(header);
+
+        // Column position of the rotation angle (PSI) in the data record, when
+        // the header declares it (XDS always does: !ITEM_PSI=<n>).
+        const psiCol = header.item_psi != null ? header.item_psi - 1 : null; // 0-based
 
         for (const raw of lines) {
             const line = raw.trim();
             if (!line || line.startsWith('!')) continue;
             const tokens = tokenize(line);
             const r = parseXdsLine(tokens);
-            // Keep the original data record verbatim so an unmerged output can
-            // preserve the auxiliary XDS columns (XD, YD, ZD, RLP, PEAK, CORR, PSI).
-            if (r) { r.raw = line; reflections.push(r); }
+            if (r) {
+                // Rotation angle of this observation (degrees), the dose
+                // coordinate for beam-damage analysis. Kept only when present.
+                if (psiCol != null && tokens[psiCol] !== undefined) {
+                    const psi = parseFloat(tokens[psiCol]);
+                    if (Number.isFinite(psi)) r.psi = psi;
+                }
+                // Keep the original data record verbatim so an unmerged output can
+                // preserve the auxiliary XDS columns (XD, YD, ZD, RLP, PEAK, CORR, PSI).
+                r.raw = line;
+                reflections.push(r);
+            }
         }
     } else if (format === HKL_FORMAT.SHELX) {
         for (const raw of lines) {
@@ -255,9 +429,35 @@ export function parseHkl(text) {
         title = 'COD entry';
         const rl = parseCodRefln(lines);
         reflections.push(...rl);
+    } else if (format === HKL_FORMAT.P4P) {
+        const hdr = parseP4PHeader(lines);
+        title = hdr.title || '';
+        cell = hdr.cell;
+        wavelength = hdr.wavelength;
+        for (const raw of lines) {
+            const line = raw.trim();
+            if (!line || !/^REF\d+\b/.test(line)) continue;
+            const r = parseP4PLine(line);
+            if (r) reflections.push(r);
+        }
+        // Scan geometry for the rotation experiment, so the per-observation
+        // rotation angle (omega) can be used as a dose coordinate for the
+        // beam-damage analysis. The P4P header does not store the frame
+        // count, so the total rotation is the observed omega span.
+        let omegaMin = null;
+        let omegaMax = null;
+        for (const r of reflections) {
+            if (Number.isFinite(r.psi)) {
+                if (omegaMin === null || r.psi < omegaMin) omegaMin = r.psi;
+                if (omegaMax === null || r.psi > omegaMax) omegaMax = r.psi;
+            }
+        }
+        if (omegaMin !== null) {
+            geometry = { startAngle: omegaMin, oscRange: null, nFrames: null, totalRotation: omegaMax - omegaMin };
+        }
     } else {
         throw new Error('Unrecognized HKL file format.');
     }
 
-    return { format, title, cell, spaceGroupNumber, spaceGroupName, wavelength, merge, friedelsLaw, reflections };
+    return { format, title, cell, spaceGroupNumber, spaceGroupName, wavelength, merge, friedelsLaw, geometry, reflections };
 }

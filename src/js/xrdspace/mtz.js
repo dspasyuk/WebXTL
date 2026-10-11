@@ -412,7 +412,10 @@ export function writeMtz(mtz) {
     lines.push(pad('VERS MTZ:V1.1'));
     lines.push(pad('TITLE ' + (mtz.title || 'xrdspace')));
     lines.push(pad('NCOL' + String(ncol).padStart(8) + String(nrefl).padStart(12) + String(0).padStart(8)));
-    lines.push(pad('CELL  ' + [cell.a, cell.b, cell.c, cell.alpha, cell.beta, cell.gamma].map(v => Number(v).toFixed(4).padStart(9)).join(' ')));
+    const cellVals = [cell.a, cell.b, cell.c, cell.alpha, cell.beta, cell.gamma];
+    const cellStrs = [];
+    for (let i = 0; i < cellVals.length; i++) cellStrs[i] = Number(cellVals[i]).toFixed(4).padStart(9);
+    lines.push(pad('CELL  ' + cellStrs.join(' ')));
     lines.push(pad('SORT    0   0   0   0   0'));
     const hm = lat + sgName.slice(1);
     lines.push(pad(`SYMINF ${String(symops.length).padStart(3)} ${String(symops.length).padStart(2)} ${lat} ${String(sgNumber).padStart(5)} ` + `'${hm}'`.padEnd(25) + 'PG1'));
@@ -434,7 +437,12 @@ export function writeMtz(mtz) {
         lines.push(pad(`PROJECT ${String(ds.id).padStart(7)} ${ds.project || 'HKL_base'}`));
         lines.push(pad(`CRYSTAL ${String(ds.id).padStart(7)} ${ds.crystal || 'HKL_base'}`));
         lines.push(pad(`DATASET ${String(ds.id).padStart(7)} ${ds.dataset || 'HKL_base'}`));
-        lines.push(pad(`DCELL ${String(ds.id).padStart(9)} ` + [uc.a, uc.b, uc.c, uc.alpha, uc.beta, uc.gamma].map(v => Number(v).toFixed(4).padStart(10)).join('')));
+        {
+            const dv = [uc.a, uc.b, uc.c, uc.alpha, uc.beta, uc.gamma];
+            let dcell = '';
+            for (let i = 0; i < dv.length; i++) dcell += Number(dv[i]).toFixed(4).padStart(10);
+            lines.push(pad(`DCELL ${String(ds.id).padStart(9)} ` + dcell));
+        }
         lines.push(pad(`DWAVEL ${String(ds.id).padStart(8)} ` + Number(ds.wavelength || 0).toFixed(5).padStart(10)));
     }
     lines.push(pad('END'));

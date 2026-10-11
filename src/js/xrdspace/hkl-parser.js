@@ -207,6 +207,11 @@ function parseP4PHeader(lines) {
     let title = '';
     let cell = null;
     let wavelength = null;
+    // Crystal->lab reciprocal orientation matrix from the ORT1/ORT2/ORT3 lines
+    // (SAINT/APEX). Each line is one row: q_lab = ORT . (h, k, l); the matrix
+    // already contains the reciprocal metric, so |ORT.(h,k,l)| = 1/d(hkl).
+    const orientation = [[0, 0, 0], [0, 0, 0], [0, 0, 0]];
+    let haveOrt = false;
     for (const raw of lines) {
         const line = raw.trim();
         if (!line) continue;
@@ -221,6 +226,12 @@ function parseP4PHeader(lines) {
                     alpha: parseFloat(tokens[4]), beta: parseFloat(tokens[5]), gamma: parseFloat(tokens[6]),
                 };
             }
+        } else if (key === 'ORT1' || key === 'ORT2' || key === 'ORT3') {
+            const row = parseInt(key.slice(3), 10) - 1;
+            if (tokens.length >= 4) {
+                const vals = [parseFloat(tokens[1]), parseFloat(tokens[2]), parseFloat(tokens[3])];
+                if (vals.every(Number.isFinite)) { orientation[row] = vals; haveOrt = true; }
+            }
         } else if (key === 'SOURCE') {
             // "SOURCE CU 1.54188 1.54056 1.54439 2.00000 40.00 4.00"
             for (let i = 1; i < tokens.length; i++) {
@@ -229,7 +240,7 @@ function parseP4PHeader(lines) {
             }
         }
     }
-    return { title, cell, wavelength };
+    return { title, cell, wavelength, orientation: haveOrt ? orientation : null };
 }
 
 // Parse a single Bruker P4P `REF05` reflection line.
@@ -371,6 +382,7 @@ export function parseHkl(text) {
     let friedelsLaw = null;
     let title = '';
     let geometry = null;
+    let orientation = null;
 
     const format = detectFormat(text);
 
@@ -434,6 +446,7 @@ export function parseHkl(text) {
         title = hdr.title || '';
         cell = hdr.cell;
         wavelength = hdr.wavelength;
+        orientation = hdr.orientation;
         for (const raw of lines) {
             const line = raw.trim();
             if (!line || !/^REF\d+\b/.test(line)) continue;
@@ -459,5 +472,5 @@ export function parseHkl(text) {
         throw new Error('Unrecognized HKL file format.');
     }
 
-    return { format, title, cell, spaceGroupNumber, spaceGroupName, wavelength, merge, friedelsLaw, geometry, reflections };
+    return { format, title, cell, spaceGroupNumber, spaceGroupName, wavelength, merge, friedelsLaw, geometry, orientation, reflections };
 }

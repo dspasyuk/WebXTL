@@ -13,6 +13,8 @@
 //   - searchCodByCell()   search the Crystallography Open Database
 //   - searchPdbByCell()   search the RCSB Protein Data Bank
 //   - searchByCell()      both databases at once
+//   - structureDownloads()    deposited-file URLs for the search hits
+//   - fetchStructureDownloads()  download those files
 
 import { det3 } from './op-math.js';
 import { cellVolume } from './analyze.js';
@@ -175,8 +177,9 @@ export function cellSettings(cell, { settingsLimit = 48 } = {}) {
     const matrices = signedPermutationMatrices();
     for (const M of matrices) {
         const t = transformCell(cell, M);
-        const key = [t.a, t.b, t.c, t.alpha, t.beta, t.gamma]
-            .map(v => Math.round(v * 10000) / 10000).join(',');
+        const vals = [t.a, t.b, t.c, t.alpha, t.beta, t.gamma];
+        let key = '';
+        for (let i = 0; i < vals.length; i++) key += (i ? ',' : '') + Math.round(vals[i] * 10000) / 10000;
         if (seen.has(key)) continue;
         seen.add(key);
         out.push(t);
@@ -216,14 +219,18 @@ export function cellSimilarity(queryCell, candidateCell) {
 // Returns [{aMin,aMax,bMin,bMax,cMin,cMax,alphaMin,alphaMax,betaMin,betaMax,gammaMin,gammaMax}]
 export function cellToleranceWindows(settings, { tolLen = 0.01, tolAng = 1.5 } = {}) {
     const clampAng = (x) => Math.max(0.01, Math.min(180 - 0.01, x));
-    return settings.map(s => ({
-        aMin: s.a * (1 - tolLen), aMax: s.a * (1 + tolLen),
-        bMin: s.b * (1 - tolLen), bMax: s.b * (1 + tolLen),
-        cMin: s.c * (1 - tolLen), cMax: s.c * (1 + tolLen),
-        alphaMin: clampAng(s.alpha - tolAng), alphaMax: clampAng(s.alpha + tolAng),
-        betaMin: clampAng(s.beta - tolAng), betaMax: clampAng(s.beta + tolAng),
-        gammaMin: clampAng(s.gamma - tolAng), gammaMax: clampAng(s.gamma + tolAng),
-    }));
+    const out = [];
+    for (const s of settings) {
+        out.push({
+            aMin: s.a * (1 - tolLen), aMax: s.a * (1 + tolLen),
+            bMin: s.b * (1 - tolLen), bMax: s.b * (1 + tolLen),
+            cMin: s.c * (1 - tolLen), cMax: s.c * (1 + tolLen),
+            alphaMin: clampAng(s.alpha - tolAng), alphaMax: clampAng(s.alpha + tolAng),
+            betaMin: clampAng(s.beta - tolAng), betaMax: clampAng(s.beta + tolAng),
+            gammaMin: clampAng(s.gamma - tolAng), gammaMax: clampAng(s.gamma + tolAng),
+        });
+    }
+    return out;
 }
 
 // --- HTTP helpers ---
@@ -372,11 +379,13 @@ export async function searchPdbByCell(queryCell, options = {}) {
     const settings = cellSettings(queryCell);
     const windows = cellToleranceWindows(settings, { tolLen, tolAng });
 
+    const nodes = [];
+    for (const w of windows) nodes.push(pdbSettingNode(w));
     const body = {
         query: {
             type: 'group',
             logical_operator: 'or',
-            nodes: windows.map(w => pdbSettingNode(w)),
+            nodes,
         },
         return_type: 'entry',
         request_options: {
@@ -394,7 +403,8 @@ export async function searchPdbByCell(queryCell, options = {}) {
         // RCSB returns 204 No Content when nothing matches.
         return { settings, results: [], total: 0 };
     }
-    const ids = (search.result_set || []).map(r => r.identifier);
+    const ids = [];
+    for (const r of (search.result_set || [])) ids.push(r.identifier);
     const total = search.total_count != null ? search.total_count : ids.length;
     const wanted = ids.slice(0, fetchCap);
 
@@ -465,10 +475,69 @@ export async function searchByCell(queryCell, options = {}) {
     results.sort((x, y) => y.match - x.match || (x.database + x.id).localeCompare(y.database + y.id));
     return {
         queryCell,
-        databases: databases.filter(d => databases.includes(d)),
+        databases,
         settings: cellSettings(queryCell),
         results: results.slice(0, limit),
         total: results.length,
         errors,
     };
+}
+
+// --- structure download ---
+
+const RCSB_FILES = 'https://files.rcsb.org/download';
+
+// The deposited structure file(s) for one or more search hits. COD distributes
+// CIF only; RCSB provides both legacy PDB and mmCIF. `formats` is one of
+// 'pdb', 'cif', 'both' or 'native' (native = the database's own format:
+// RCSB -> .pdb, COD -> .cif). Returns [{ database, id, format, filename, url }].
+export function structureDownloads(results, { formats = 'both' } = {}) {
+    const list = Array.isArray(results) ? results : [results];
+    const native = formats === 'native';
+    const wantPdb = native || formats === 'pdb' || formats === 'both';
+    const wantCif = native || formats === 'cif' || formats === 'both';
+    const pdbCif = !native && (formats === 'cif' || formats === 'both');
+    const out = [];
+    for (const r of list) {
+        const id = String(r.id);
+        if (r.database === 'PDB') {
+            if (wantPdb) {
+                out.push({ database: 'PDB', id, format: 'pdb', filename: `${id}.pdb`, url: `${RCSB_FILES}/${id}.pdb` });
+            }
+            if (pdbCif) {
+                out.push({ database: 'PDB', id, format: 'cif', filename: `${id}.cif`, url: `${RCSB_FILES}/${id}.cif` });
+            }
+        } else if (r.database === 'COD') {
+            // COD deposits CIF only, so a PDB-format file is never offered.
+            if (wantCif) {
+                out.push({ database: 'COD', id, format: 'cif', filename: `${id}.cif`, url: `${COD_BASE}/${id}.cif` });
+            }
+        }
+    }
+    return out;
+}
+
+async function httpText(url, timeoutMs = 60000) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+    try {
+        const res = await fetch(url, { signal: ctrl.signal });
+        if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
+        return await res.text();
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
+// Fetch every download in parallel. Never throws: each entry is returned with a
+// `text` field on success or an `error` field on failure.
+export async function fetchStructureDownloads(downloads, { concurrency = 4, timeoutMs = 60000 } = {}) {
+    const out = await runConcurrent(downloads, concurrency, (d) => httpText(d.url, timeoutMs));
+    const results = [];
+    for (let i = 0; i < downloads.length; i++) {
+        const d = downloads[i];
+        const r = out[i];
+        results.push(r.ok ? { ...d, text: r.value } : { ...d, error: r.error });
+    }
+    return results;
 }

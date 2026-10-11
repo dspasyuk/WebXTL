@@ -116,7 +116,11 @@ export function shelxSymmGenerators(ops, { centrosymmetric = false, latt = 1 } =
     const centering = centeringTranslations(latt);
     const isMat = (R, ref) => R.every((row, i) => row.every((v, j) => Math.abs(v - ref[i][j]) < 1e-9));
     const isZero = (v) => v.every(x => x === 0);
-    const opKey = (R, t) => R.map(r => r.join(',')).join('|') + ':' + t.join(',');
+    const opKey = (R, t) => {
+        let s = '';
+        for (let i = 0; i < R.length; i++) s += (i ? '|' : '') + R[i].join(',');
+        return s + ':' + t.join(',');
+    };
     // Find the group's inversion operation. SHELX requires the origin to lie on
     // a centre of symmetry, so if the inversion carries a translation we shift
     // the origin by half of it (origin choice 2) before emitting the operators.
@@ -128,12 +132,17 @@ export function shelxSymmGenerators(ops, { centrosymmetric = false, latt = 1 } =
     }
     let shifted = ops;
     if (tInv && !isZero(tInv)) {
-        const o = tInv.map(v => v / 2);
-        shifted = ops.map(p => {
-            if (!p) return p;
+        const o = [0, 0, 0];
+        for (let i = 0; i < tInv.length; i++) o[i] = tInv[i] / 2;
+        shifted = [];
+        for (let i = 0; i < ops.length; i++) {
+            const p = ops[i];
+            if (!p) { shifted.push(p); continue; }
             const Ro = applyMat(p.R, o);
-            return { R: p.R, t: [0, 1, 2].map(i => p.t[i] + Ro[i] - o[i]) };
-        });
+            const t = [0, 0, 0];
+            for (let j = 0; j < 3; j++) t[j] = p.t[j] + Ro[j] - o[j];
+            shifted.push({ R: p.R, t });
+        }
         tInv = [0, 0, 0];
     }
     const out = [];
@@ -147,8 +156,13 @@ export function shelxSymmGenerators(ops, { centrosymmetric = false, latt = 1 } =
         if (seen.has(k)) continue;
         if (tInv) {
             // Inversion partner: R' = -R, t' = tInv - t.
-            const negR = p.R.map(row => row.map(v => -v));
-            const negT = reduceTranslation(tInv.map((v, i) => v - t[i]), centering);
+            const negR = [];
+            for (let i = 0; i < p.R.length; i++) {
+                const row = [];
+                for (let j = 0; j < p.R[i].length; j++) row[j] = -p.R[i][j];
+                negR.push(row);
+            }
+            const negT = reduceTranslation([tInv[0] - t[0], tInv[1] - t[1], tInv[2] - t[2]], centering);
             seen.add(opKey(negR, negT));
         }
         seen.add(k);

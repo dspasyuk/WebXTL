@@ -287,8 +287,13 @@ function conditionalOps(sg) {
         let best = null;
         let bestNorm = Infinity;
         for (const c of cvecs) {
-            const r = parsed.t.map((v, i) => wrapFrac(v - c[i]));
-            const norm = r.reduce((s, v) => s + Math.abs(v), 0);
+            const r = [];
+            let norm = 0;
+            for (let i = 0; i < parsed.t.length; i++) {
+                const v = wrapFrac(parsed.t[i] - c[i]);
+                r.push(v);
+                norm += Math.abs(v);
+            }
             if (norm < bestNorm) { bestNorm = norm; best = r; }
         }
         if (!best) continue;
@@ -540,7 +545,8 @@ function classifyCentricity(score, n) {
 // unphysical here and would otherwise blow up in the noise shells.
 // Returns { centric, acentric, score, n }.
 export function estimateCentricity(reflections, cell) {
-    const positive = reflections.filter(r => r.I > 0);
+    const positive = [];
+    for (const r of reflections) if (r.I > 0) positive.push(r);
     const data = positive.length ? positive : reflections;
     if (!data.length) return { centric: false, acentric: false, score: 0, n: 0 };
 
@@ -663,7 +669,8 @@ export function analyzeSpaceGroup(sgData, reflections, cell, options = {}) {
     if (!candidates.length) {
         // Last resort: every space group of the crystal system.
         const [lo, hi] = SYSTEM_RANGES[crystalSystem] || [1, 230];
-        candidates = sgData.filter(g => g.id >= lo && g.id <= hi);
+        candidates = [];
+        for (const g of sgData) if (g.id >= lo && g.id <= hi) candidates.push(g);
     }
 
     // Chiral (Sohncke) restriction: macromolecular crystals (large unit cells)
@@ -673,7 +680,8 @@ export function analyzeSpaceGroup(sgData, reflections, cell, options = {}) {
     const chiral = options.chiral === true ||
         (options.chiral !== false && cellVolume(cell) > MACROMOLECULE_CELL_VOLUME);
     if (chiral) {
-        const chiralOnly = candidates.filter(c => isSohncke(c));
+        const chiralOnly = [];
+        for (const c of candidates) if (isSohncke(c)) chiralOnly.push(c);
         if (chiralOnly.length) candidates = chiralOnly;
     }
 

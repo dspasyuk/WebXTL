@@ -83,9 +83,23 @@ function applyOp(a, op) {
     };
 }
 
+// Parse a space group's operator strings, dropping unparsable entries.
+function parseOps(ops) {
+    const out = [];
+    for (const op of ops) {
+        const p = parseOperation(op);
+        if (p) out.push(p);
+    }
+    return out;
+}
+
 function opKey(op) {
     const n = normOp(op);
-    return n.R.map(r => r.join(',')).join('|') + ':' + n.t.map(v => Math.round(v * 1e9) / 1e9).join(',');
+    let rs = '';
+    for (let i = 0; i < n.R.length; i++) rs += (i ? '|' : '') + n.R[i].join(',');
+    let ts = '';
+    for (let i = 0; i < n.t.length; i++) ts += (i ? ',' : '') + Math.round(n.t[i] * 1e9) / 1e9;
+    return rs + ':' + ts;
 }
 
 // Build the full general-position operator list (identity + inversion + SYMM
@@ -268,7 +282,12 @@ function sameSite(a, b, metric, tolDist2) {
 // Apply origin shift to every atom.
 function shiftAtoms(atoms, shift) {
     if (!shift || (!shift[0] && !shift[1] && !shift[2])) return atoms;
-    return atoms.map(a => ({ ...a, x: a.x + shift[0], y: a.y + shift[1], z: a.z + shift[2] }));
+    const out = new Array(atoms.length);
+    for (let i = 0; i < atoms.length; i++) {
+        const a = atoms[i];
+        out[i] = { ...a, x: a.x + shift[0], y: a.y + shift[1], z: a.z + shift[2] };
+    }
+    return out;
 }
 
 /**
@@ -301,7 +320,8 @@ export function expandAsu(atoms, ops, cell, { tolDist = 0.05 } = {}) {
         }
     }
     // Wrap
-    return out.map(wrapAtom);
+    for (let i = 0; i < out.length; i++) out[i] = wrapAtom(out[i]);
+    return out;
 }
 
 /**
@@ -344,7 +364,8 @@ export function reduceToAsu(atoms, ops, cell, { tolDist = 0.05 } = {}) {
         }
         if (!redundant) kept.push(a);
     }
-    return kept.map(wrapAtom);
+    for (let i = 0; i < kept.length; i++) kept[i] = wrapAtom(kept[i]);
+    return kept;
 }
 
 // --- Public entry point -----------------------------------------------------
@@ -380,7 +401,7 @@ export function transformModelToSpaceGroup(modelText, targetSG,
     const latt = currentLatt != null ? currentLatt : parsed.latt;
     const symm = currentSymm || parsed.symm;
     const oldOps = opsFromLattSymm(latt, symm);
-    const newOps = (sg.s || []).map(parseOperation).filter(Boolean);
+    const newOps = parseOps(sg.s || []);
 
     const atoms0 = shiftAtoms(parsed.atoms, originShift);
 
@@ -389,7 +410,11 @@ export function transformModelToSpaceGroup(modelText, targetSG,
     // ASU under the NEW group.
     const asu = reduceToAsu(full, newOps, parsed.cell, { tolDist });
 
-    const countAtoms = (list) => list.filter(a => a.element !== 'Q').length;
+    const countAtoms = (list) => {
+        let n = 0;
+        for (const a of list) if (a.element !== 'Q') n++;
+        return n;
+    };
     const nOld = countAtoms(atoms0);
     const nFull = countAtoms(full);
     const nNew = countAtoms(asu);
@@ -455,9 +480,12 @@ export function rebuildShelx(parsed, sg, atoms, oldLatt, oldSymm, originShift = 
     // SFAC element list follows the DECLARATION order from the input file
     // (filtered to elements still present), so scattering-factor indices stay
     // stable. Q peaks use index 1 (SHELXL ignores their scattering type).
-    const declared = parsed.sfac.map(s => s.toUpperCase());
-    const present = new Set(atoms.filter(a => a.element !== 'Q').map(a => a.element.toUpperCase()));
-    const elements = declared.filter(e => present.has(e));
+    const declared = [];
+    for (const s of parsed.sfac) declared.push(s.toUpperCase());
+    const present = new Set();
+    for (const a of atoms) if (a.element !== 'Q') present.add(a.element.toUpperCase());
+    const elements = [];
+    for (const e of declared) if (present.has(e)) elements.push(e);
     // If the model declares no SFAC, fall back to discovery order.
     if (!elements.length) {
         const seen = new Set();
@@ -467,7 +495,8 @@ export function rebuildShelx(parsed, sg, atoms, oldLatt, oldSymm, originShift = 
             if (!seen.has(e)) { seen.add(e); elements.push(e); }
         }
     }
-    const sfacIdx = new Map(elements.map((e, i) => [e, i + 1]));
+    const sfacIdx = new Map();
+    for (let i = 0; i < elements.length; i++) sfacIdx.set(elements[i], i + 1);
     const sfacIndexOf = (el) => {
         if (el === 'Q') return 1;
         return sfacIdx.get(el.toUpperCase()) || 1;
@@ -478,12 +507,14 @@ export function rebuildShelx(parsed, sg, atoms, oldLatt, oldSymm, originShift = 
         // UNIT must equal the number of atoms per element in the FULL unit cell
         // (SHELXL uses it for cell-content/electron checks). Re-expand the new
         // ASU under the target symmetry to count the true cell content.
-        const targetOps = (sg.s || []).map(parseOperation).filter(Boolean);
+        const targetOps = parseOps(sg.s || []);
         const full = expandAsu(atoms, targetOps, parsed.cell, { tolDist: 0.05 });
-        const unit = elements.map(el => {
-            const n = full.filter(a => a.element.toUpperCase() === el).length;
-            return Math.max(1, Math.round(n));
-        });
+        const unit = [];
+        for (const el of elements) {
+            let n = 0;
+            for (const a of full) if (a.element.toUpperCase() === el) n++;
+            unit.push(Math.max(1, Math.round(n)));
+        }
         out.push('UNIT ' + unit.join(' '));
     }
 
@@ -562,13 +593,15 @@ function shelxSymmOpsForSg(sg) {
     const centro = isCentro(sg);
     const centeringLetter = centeringOf(sg);
     const lattType = LATT_CENTERING[centeringLetter] || 1;
-    const ops = (sg.s || []).map(parseOperation).filter(Boolean);
+    const ops = parseOps(sg.s || []);
     const gens = shelxSymmGenerators(ops, { centrosymmetric: centro, latt: lattType });
-    return gens.map(p => {
+    const out = [];
+    for (const p of gens) {
         const parts = [];
         for (let i = 0; i < 3; i++) parts.push(formatComponent(p.R[i], p.t[i]));
-        return parts.join(', ');
-    });
+        out.push(parts.join(', '));
+    }
+    return out;
 }
 
 // Format "-x, 1/2+y, 1/2-z" (uppercase, fraction first).

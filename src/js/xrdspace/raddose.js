@@ -94,6 +94,13 @@ function resolutionShells(rows, cell, nshells) {
     return shells;
 }
 
+// Count distinct (h,k,l) reflections in a row list.
+function nUniqueHkl(rows) {
+    const seen = new Set();
+    for (const r of rows) seen.add(r.h + ',' + r.k + ',' + r.l);
+    return seen.size;
+}
+
 /**
  * RADDOSE-style beam-damage analysis over unmerged observations.
  *
@@ -154,7 +161,8 @@ export function analyzeBeamDamage(reflections, cell, geometry, options = {}) {
     }
 
     // Accumulate early / late intensities per shell.
-    const acc = shells.map(() => ({ eSum: 0, eN: 0, lSum: 0, lN: 0 }));
+    const acc = new Array(shells.length);
+    for (let i = 0; i < shells.length; i++) acc[i] = { eSum: 0, eN: 0, lSum: 0, lN: 0 };
     for (const x of rows) {
         const a = acc[x.shell];
         if (x.dose < earlyHi) { a.eSum += x.I; a.eN++; }
@@ -165,17 +173,21 @@ export function analyzeBeamDamage(reflections, cell, geometry, options = {}) {
     // its own early intensity, so R is scale-free and directly comparable
     // across shells: R = 1 means no damage in that shell, R < 1 means the
     // intensities decayed over the course of the scan.
-    const shellsOut = shells.map((s, i) => {
+    const shellsOut = [];
+    for (let i = 0; i < shells.length; i++) {
+        const s = shells[i];
         const a = acc[i];
         const meanE = a.eN ? a.eSum / a.eN : NaN;
         const meanL = a.lN ? a.lSum / a.lN : NaN;
-        return {
+        const ratio = (Number.isFinite(meanE) && Number.isFinite(meanL) && meanE !== 0) ? meanL / meanE : NaN;
+        if (!Number.isFinite(ratio)) continue;
+        shellsOut.push({
             dLo: s.dLo, dHi: s.dHi, dMid: 1 / Math.sqrt((s.qLo + s.qHi) / 2),
             nEarly: a.eN, nLate: a.lN,
             meanEarly: meanE, meanLate: meanL,
-            ratio: (Number.isFinite(meanE) && Number.isFinite(meanL) && meanE !== 0) ? meanL / meanE : NaN,
-        };
-    }).filter(s => Number.isFinite(s.ratio));
+            ratio,
+        });
+    }
 
     if (shellsOut.length < 3) {
         return {
@@ -188,9 +200,15 @@ export function analyzeBeamDamage(reflections, cell, geometry, options = {}) {
     // Fit ln(R) = a + b * (1/d^2). b < 0 => the decay increases with resolution
     // (high-resolution reflections are damaged faster), the classic RADDOSE
     // pattern. The weighted slope is the decay rate per A^-2.
-    const xs = shellsOut.map(s => 1 / (s.dMid * s.dMid));
-    const ys = shellsOut.map(s => Math.log(s.ratio));
-    const ws = shellsOut.map(s => s.nEarly + s.nLate);
+    const xs = new Array(shellsOut.length);
+    const ys = new Array(shellsOut.length);
+    const ws = new Array(shellsOut.length);
+    for (let i = 0; i < shellsOut.length; i++) {
+        const s = shellsOut[i];
+        xs[i] = 1 / (s.dMid * s.dMid);
+        ys[i] = Math.log(s.ratio);
+        ws[i] = s.nEarly + s.nLate;
+    }
     const reg = weightedLinReg(xs, ys, ws);
 
     // Overall early->late drop: the observation-weighted mean of the per-shell
@@ -221,7 +239,7 @@ export function analyzeBeamDamage(reflections, cell, geometry, options = {}) {
         totalRotation, startAngle,
         doseMin: dmin, doseMax: dmax,
         nObs: rows.length,
-        nRefl: new Set(rows.map(r => r.h + ',' + r.k + ',' + r.l)).size,
+        nRefl: nUniqueHkl(rows),
         earlyFrac, lateFrac, minIsig,
         overall: {
             ratio: overallRatio,          // <I>_late / <I>_early over all shells

@@ -19,6 +19,7 @@ import { analyzeSpaceGroup, crystalSystemFromCell, scoreSpaceGroup, isCentrosymm
 import { mergeReflections, computeMergeStatistics, resolutionShellStats, artifactReport, writeShelxHkl, writeShelxHklUnmerged, writeXdsAscii, writeXdsAsciiUnmerged, buildMergingReport, dSpacing } from './merge.js';
 import { parseOperation, LATT_CENTERING, shelxSymmGenerators } from './op-math.js';
 import { analyzeBeamDamage } from './raddose.js';
+import { runAbsorptionCorrection, buildAbsorptionReport, MultiScanAbsorptionCorr } from './abs.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -123,6 +124,42 @@ export function writeShelxIns(usedSG, cell, options = {}) {
     return out.join('\n') + '\n';
 }
 
+// Build a merged MTZ buffer (REFMAC / CCP4-ready) from merged reflections.
+// Columns: H K L IMEAN SIGIMEAN F SIGF (F = sqrt(I), sigF = sigI/(2F)). The
+// cell, space group and full symmetry operators come from the resolved group.
+function buildMergedMtz(merged, cell, sg, parsed, stats) {
+    const ncols = 7;
+    const n = merged.length;
+    const data = new Float64Array(n * ncols);
+    for (let i = 0; i < n; i++) {
+        const r = merged[i];
+        const I = r.I;
+        const F = I > 0 ? Math.sqrt(I) : 0;
+        const sigF = (I > 0 && r.sig > 0) ? r.sig / (2 * Math.sqrt(I)) : (r.sig || 0);
+        const o = i * ncols;
+        data[o] = r.h; data[o + 1] = r.k; data[o + 2] = r.l;
+        data[o + 3] = I; data[o + 4] = r.sig || 0;
+        data[o + 5] = F; data[o + 6] = sigF;
+    }
+    return writeMtz({
+        title: parsed.title || 'xrdspace',
+        nreflections: n,
+        ncols,
+        columns: [
+            { label: 'H' }, { label: 'K' }, { label: 'L' },
+            { label: 'IMEAN', dataset: 0 }, { label: 'SIGIMEAN', dataset: 0 },
+            { label: 'F', dataset: 0 }, { label: 'SIGF', dataset: 0 },
+        ],
+        data,
+        cell,
+        spaceGroupNumber: sg.id,
+        spaceGroupName: sg.hm,
+        symops: (sg.s && sg.s.length) ? sg.s : ['x,y,z'],
+        wavelength: parsed.wavelength || 0,
+        reso: [stats.dmin, stats.dmax],
+    });
+}
+
 // Format a fraction for SHELX (e.g. 1/2, 1/4, -1/2).
 function fmtFrac(v) {
     const denoms = [1, 2, 3, 4, 6, 8, 12];
@@ -155,15 +192,21 @@ function fmtComponent(cx, cy, cz, t) {
 // expected in a SHELX .ins (identity omitted; for centrosymmetric groups only
 // one op per inversion pair; for centered lattices one op per centering coset).
 function shelxSymmOps(ops, centrosymmetric, lattType = 1) {
-    const parsed = ops.map(parseOperation).filter(Boolean);
+    const parsed = [];
+    for (const op of ops) {
+        const p = parseOperation(op);
+        if (p) parsed.push(p);
+    }
     const gens = shelxSymmGenerators(parsed, { centrosymmetric, latt: lattType });
-    return gens.map(p => {
+    const out = [];
+    for (const p of gens) {
         const parts = [];
         for (let i = 0; i < 3; i++) {
             parts.push(fmtComponent(p.R[i][0], p.R[i][1], p.R[i][2], p.t[i]));
         }
-        return parts.join(', ');
-    });
+        out.push(parts.join(', '));
+    }
+    return out;
 }
 
 /**
@@ -247,7 +290,8 @@ export function analyzeParsed(parsed, options = {}) {
     // can see and handle the flag. This matches XPREP and Pointless, which both
     // drop the rejected observations from the analysis.
     const allReflections = reflections;
-    reflections = reflections.filter(r => !r.rejected);
+    reflections = [];
+    for (const r of allReflections) if (!r.rejected) reflections.push(r);
     if (!reflections.length) {
         return { ok: false, error: 'No reflections parsed from the HKL file.' };
     }
@@ -291,6 +335,40 @@ export function analyzeParsed(parsed, options = {}) {
         usedLaueOps = lg.settings[0].ops;
     }
 
+    // Multi-scan empirical absorption correction (AIMLESS method, Evans &
+    // McCoy, Acta Cryst. D66, 210 (2010)).
+    //
+    // ORDERING: this runs AFTER the space-group / Laue determination above
+    // (the equivalent-reflection grouping needs the Laue class) and BEFORE the
+    // merge below, so the corrected intensities feed the merge statistics and
+    // every output file. `reflections` is replaced by the corrected non-rejected
+    // set; the data-reduction-rejected observations (negative sigma) are kept
+    // only for the unmerged output.
+    let absorption = null;
+    let unmergedRefs = allReflections;
+    if (options.abs && options.absScans) {
+        absorption = runAbsorptionCorrection(options.absScans, cell, usedLaueOps, {
+            lmaxEven: options.absLmaxEven,
+            lmaxOdd: options.absLmaxOdd,
+            maxIterations: options.absMaxIter,
+            convergenceThreshold: options.absConvThreshold,
+            minGroups: options.absMinGroups,
+            minScans: options.absMinScans,
+            useSD: options.absUseSD,
+            robust: options.absRobust,
+            robustLoss: options.absRobustLoss,
+            outlierSigma: options.absOutlierSigma,
+        });
+        absorption.report = buildAbsorptionReport(absorption, cell);
+        if (absorption.ok && Array.isArray(absorption.correctedReflections)
+            && absorption.correctedReflections.length) {
+            reflections = absorption.correctedReflections;
+            unmergedRefs = [];
+            for (const r of reflections) unmergedRefs.push(r);
+            for (const r of allReflections) if (r.rejected) unmergedRefs.push(r);
+        }
+    }
+
     // Merge under the chosen Laue class and generate the corrected HKL output
     // (SHELX format + merged XDS_ASCII) plus a merging report.
     let merge = null;
@@ -310,7 +388,7 @@ export function analyzeParsed(parsed, options = {}) {
             // All observations (including rejected ones, whose negative sigma
             // is preserved), kept unmerged and labelled as such for programs
             // (e.g. Phenix) that prefer the redundant measurements.
-            unmergedXdsAscii: writeXdsAsciiUnmerged(allReflections, {
+            unmergedXdsAscii: writeXdsAsciiUnmerged(unmergedRefs, {
                 outputFile: options.unmergedOutput || 'structure_unmerged.hkl',
                 cell,
                 spaceGroupNumber: usedSG ? usedSG.id : undefined,
@@ -359,6 +437,9 @@ export function analyzeParsed(parsed, options = {}) {
                 shells: options.radShells,
             });
         }
+        // The absorption correction was computed above (before the merge) and
+        // its corrected intensities are already in `reflections`; just attach it.
+        if (absorption) merge.absorption = absorption;
         // Consistency of the (possibly forced) space group with the data.
         const fullSG = usedSG && usedSG.id ? sgData.find(g => g.id === usedSG.id) : null;
         if (fullSG) {
@@ -374,6 +455,8 @@ export function analyzeParsed(parsed, options = {}) {
                 sfac: options.sfac,
                 unit: options.unit,
             });
+            // Merged MTZ (REFMAC / CCP4-ready): H K L IMEAN SIGIMEAN F SIGF.
+            merge.mtz = buildMergedMtz(m.merged, cell, fullSG, parsed, stats);
         }
     }
 
@@ -445,7 +528,11 @@ export function analyzeMtz(buffer, options = {}) {
     }
     // Resolve wavelength from the dataset records (prefer a non-zero one).
     const datasets = mtz.datasets || [];
-    const wls = datasets.map(d => d.wavelength).filter(w => Number.isFinite(w) && w > 0);
+    const wls = [];
+    for (const d of datasets) {
+        const w = d.wavelength;
+        if (Number.isFinite(w) && w > 0) wls.push(w);
+    }
     const wavelength = wls.length ? wls[wls.length - 1] : null;
     const parsed = {
         format: 'mtz',
@@ -460,10 +547,12 @@ export function analyzeMtz(buffer, options = {}) {
     };
     const result = analyzeParsed(parsed, options);
     if (result.ok) {
+        const cols = [];
+        for (const c of mtz.columns) cols.push(c.label + ':' + c.type);
         result.mtz = {
             ncols: mtz.ncols,
             nreflections: mtz.nreflections,
-            columns: mtz.columns.map(c => c.label + ':' + c.type),
+            columns: cols,
             spaceGroupNumber: mtz.spaceGroupNumber,
             spaceGroupName: mtz.spaceGroupName,
             byteOrder: mtz.byteOrder,
@@ -501,6 +590,8 @@ export {
     searchCodByCell,
     searchPdbByCell,
     searchByCell,
+    structureDownloads,
+    fetchStructureDownloads,
 } from './cell-search.js';
 
 // Offline PDB space-group validation (data/pdb-cells.json).
@@ -513,3 +604,7 @@ export {
 
 // RADDOSE-style beam-damage analysis (--rad).
 export { analyzeBeamDamage, kPer100 } from './raddose.js';
+
+// Multi-scan empirical absorption correction (AIMLESS method,
+// P. R. Evans & A. W. McCoy, Acta Cryst. D66, 210 (2010)).
+export { runAbsorptionCorrection, buildAbsorptionReport, MultiScanAbsorptionCorr } from './abs.js';

@@ -158,7 +158,9 @@ export function validateSpaceGroupAgainstPdb(table, cell, sgId, options = {}) {
         limit: options.limit !== undefined ? options.limit : 200,
     });
 
-    const sgNumbers = [...new Set(matches.map(m => m.sg))].sort((a, b) => a - b);
+    const sgSet = new Set();
+    for (const m of matches) sgSet.add(m.sg);
+    const sgNumbers = [...sgSet].sort((a, b) => a - b);
     const counts = new Map();
     for (const m of matches) counts.set(m.sg, (counts.get(m.sg) || 0) + 1);
     const sgCounts = [];

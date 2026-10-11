@@ -460,7 +460,9 @@ export function artifactReport(reflections, matrices, cell, options = {}) {
     for (const g of groups.values()) {
         const vals = g.vals, nv = vals.length;
         if (nv < 2) continue;
-        const sorted = vals.map(o => o.I).sort((a, b) => a - b);
+        const sorted = new Array(nv);
+        for (let i = 0; i < nv; i++) sorted[i] = vals[i].I;
+        sorted.sort((a, b) => a - b);
         const mid = nv >> 1;
         const median = (nv % 2) ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
         for (const o of vals) {
@@ -502,14 +504,17 @@ export function artifactReport(reflections, matrices, cell, options = {}) {
         { axis: 'b*', dom: (h, k, l) => Math.abs(k) > Math.abs(h) && Math.abs(k) > Math.abs(l) },
         { axis: 'c*', dom: (h, k, l) => Math.abs(l) > Math.abs(h) && Math.abs(l) > Math.abs(k) },
     ];
-    const anisotropy = axes.map(({ axis, dom }) => {
-        const sub = reflections.filter(o => dom(o.h, o.k, o.l));
-        if (sub.length < 100) return { axis, d: null, n: sub.length };
+    const anisotropy = [];
+    for (const ax of axes) {
+        const sub = [];
+        for (const o of reflections) if (ax.dom(o.h, o.k, o.l)) sub.push(o);
+        if (sub.length < 100) { anisotropy.push({ axis: ax.axis, d: null, n: sub.length }); continue; }
         const merged = mergeReflections(sub, matrices, cell).merged;
         const cut = resolutionAtISigma(merged, cell, 2);
-        return { axis, d: cut ? cut.d : null, n: sub.length };
-    });
-    const limits = anisotropy.map(a => a.d).filter(v => v != null);
+        anisotropy.push({ axis: ax.axis, d: cut ? cut.d : null, n: sub.length });
+    }
+    const limits = [];
+    for (const a of anisotropy) if (a.d != null) limits.push(a.d);
     const anisoRatio = limits.length >= 2 ? Math.max(...limits) / Math.min(...limits) : null;
 
     return {
